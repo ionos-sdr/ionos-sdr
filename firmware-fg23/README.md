@@ -12,4 +12,4 @@ Vendor library policy: RAIL is used only through its public API. See CONTRIBUTIN
 - `cw_trainer/` — CW trainer TX (concept by N7HPR), OLED UI.
 - `railtest_wspr/` — RAILtest-based WSPR experiments.
 
-Each is a Simplicity Studio project: import the `.slcp`, let the SDK regenerate `autogen/`, then copy `station_config.example.h` → `station_config.h`. `music_clip.h` / `voice_clip.h` (audio test clips referenced by the NBFM TX test) are intentionally not in the repository — generate your own 8 kHz int8 clip; the encoding is documented in `app.c`.
+Each is a Simplicity Studio project: import the `.slcp`, let the SDK regenerate `autogen/`, then copy `station_config.example.h` → `station_config.h`. `voice_clip.h` (flite-generated speech, MIT) is included. `music_clip.h` is git-ignored: generate your own with `iq_capture/tools/make_music_clip.py <any audio file>` (the embedded excerpt must be one you are allowed to redistribute if you publish it).

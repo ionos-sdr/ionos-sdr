@@ -64,3 +64,6 @@ Thumbs.db
 # --- Station-specific config (callsign, passcode, position, WiFi) ---
 **/station_config.h
 **/secrets.h
+
+# --- Locally generated audio test clip (see tools/make_music_clip.py) ---
+firmware-fg23/iq_capture/music_clip.h
