@@ -1,6 +1,6 @@
 # Ionos SDR
 
-Open, calibrated, remotely usable SDR transceiver on a commodity ISM radio SoC (Silicon Labs EFR32FG23) with an ESP32‑S3 companion. 16‑bit I/Q over WiFi/USB, open protocols, on‑device DSP. RX+TX, 110–223 MHz (902 MHz planned).
+Open, calibrated, remotely usable SDR transceiver on a commodity ISM radio SoC (Silicon Labs EFR32FG23) with an ESP32‑S3 companion. 16‑bit I/Q over WiFi/USB, open protocols, on‑device DSP. RX tunes across the SoC's range (optimum inside the matched band); TX is matching‑network dependent — the 2 m band first, further bands as plug‑in matching on the final hardware.
 
 <p>
 <img src="docs/img/prototype_bench.jpg" height="420" alt="Prototype: Silicon Labs WSTK + EFR32FG23 radio board (BRD4265B), ESP32-S3 N16R8 module, 2.8&quot; ILI9341 TFT">
@@ -15,15 +15,11 @@ Open, calibrated, remotely usable SDR transceiver on a commodity ISM radio SoC (
 
 ## Architecture
 
-```
- antenna ─ LNA ─┐                          ┌─ WiFi  (SpyServer-compatible, ~175 ksps int16)
-                ├─ EFR32FG23 ──I²S/SPI──▶ ESP32-S3 ─┤─ USB CDC (~250 ksps int16)
- PA ◀── NCO-TX ─┘   RAIL, 39 MHz VCTCXO     N16R8    └─ TFT waterfall, GPS, SD, APRS-IS
-```
+<img src="docs/img/architecture.svg" width="100%" alt="System architecture: RF front-end (LNA, LDMOS PA, T/R switch, 39 MHz VCTCXO) – EFR32FG23 radio SoC (I/Q capture, NCO transmitter, calibration and scan) – I²S/SPI – ESP32-S3 companion (streaming server, on-device DSP, TFT/GPS/SD) – WiFi/USB – hosts (SDR++, GNU Radio, SoapySDR) and services (APRS-IS, SatNOGS)">
 
 - **RX**: FG23 I/Q capture → zero‑copy FIFO → ESP32‑S3 → host (SDR++, GNU Radio via SoapySDR, GQRX…).
 - **TX**: no I/Q DAC on the FG23; modulation is synthesised by stepping the PLL frequency offset (NCO). Constant‑envelope modes only on‑chip.
-- **Reference**: 39 MHz VCTCXO, VDAC‑pulled for WSPR; TCXO + open‑loop ΣΔ for 2 m, thermal LUT + GPS trim planned for 902 MHz.
+- **Reference**: 39 MHz TCXO; VCTCXO with VDAC pulling for WSPR is in progress. Roadmap: TCXO + open‑loop ΣΔ for 2 m, thermal LUT + GPS trim for higher bands.
 
 ## Status
 
@@ -33,9 +29,9 @@ Open, calibrated, remotely usable SDR transceiver on a commodity ISM radio SoC (
 | I/Q over USB CDC | ~250 ksps int16 |
 | APRS AX.25/AFSK‑1200 TX (NCO) | validated on‑air, decoded on APRS‑IS |
 | NBFM voice TX, CW TX (ramped envelope) | validated |
-| WSPR encoder | bit‑exact vs. independent reference |
+| WSPR encoder | bit‑exact vs. independent reference; on‑air WSPR TX (VCTCXO pulling) in progress |
 | On‑device FFT waterfall, 2.8" TFT | working |
-| Multi‑point frequency calibration (TCXO) | validated |
+| Multi‑point frequency calibration | validated |
 | GPS time + locator | working |
 | Open KiCad hardware (6‑layer) | in progress — prototype runs on BRD4265B + custom carrier |
 | Native streaming protocol spec, SoapySDR driver, DSP plugin API | planned |

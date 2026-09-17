@@ -1,0 +1,151 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1240" height="560" viewBox="0 0 1240 560" font-family="Inter, Segoe UI, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#4b5563"/>
+    </marker>
+    <marker id="arrRF" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#c2410c"/>
+    </marker>
+  </defs>
+  <rect width="1240" height="560" fill="#ffffff" rx="8"/>
+  <text x="24" y="36" font-size="20" font-weight="600" fill="#111827">Ionos SDR — system architecture</text>
+  <text x="24" y="56" font-size="12" fill="#6b7280">RX+TX · wideband RX, TX band set by the matching network (2 m first) · 16-bit I/Q · open protocols · on-device DSP</text>
+
+  <!-- ===== RF front-end (orange) ===== -->
+  <rect x="24" y="90" width="250" height="330" rx="10" fill="#fff7ed" stroke="#f97316" stroke-width="1.5"/>
+  <text x="40" y="116" font-size="14" font-weight="600" fill="#9a3412">RF front-end</text>
+  <text x="40" y="134" font-size="11" fill="#9a3412">open KiCad hardware, 6-layer</text>
+
+  <!-- antenna -->
+  <g stroke="#9a3412" stroke-width="2" fill="none">
+    <line x1="60" y1="215" x2="60" y2="170"/>
+    <line x1="60" y1="170" x2="42" y2="150"/>
+    <line x1="60" y1="170" x2="78" y2="150"/>
+    <line x1="60" y1="170" x2="60" y2="148"/>
+  </g>
+  <text x="44" y="234" font-size="11" fill="#9a3412">antenna</text>
+
+  <rect x="110" y="150" width="140" height="48" rx="6" fill="#ffedd5" stroke="#f97316"/>
+  <text x="180" y="170" font-size="12" font-weight="600" fill="#7c2d12" text-anchor="middle">LNA + bias-tee</text>
+  <text x="180" y="186" font-size="10" fill="#7c2d12" text-anchor="middle">DC block mandatory</text>
+
+  <rect x="110" y="222" width="140" height="48" rx="6" fill="#ffedd5" stroke="#f97316"/>
+  <text x="180" y="242" font-size="12" font-weight="600" fill="#7c2d12" text-anchor="middle">LDMOS PA</text>
+  <text x="180" y="258" font-size="10" fill="#7c2d12" text-anchor="middle">AFT05MS004N · 2 W / 5 W</text>
+
+  <rect x="110" y="294" width="140" height="48" rx="6" fill="#ffedd5" stroke="#f97316"/>
+  <text x="180" y="314" font-size="12" font-weight="600" fill="#7c2d12" text-anchor="middle">T/R switch + interlock</text>
+  <text x="180" y="330" font-size="10" fill="#7c2d12" text-anchor="middle">firmware-protected LNA</text>
+
+  <rect x="110" y="366" width="140" height="40" rx="6" fill="#ffedd5" stroke="#f97316"/>
+  <text x="180" y="384" font-size="12" font-weight="600" fill="#7c2d12" text-anchor="middle">39 MHz TCXO / VCTCXO</text>
+  <text x="180" y="398" font-size="10" fill="#7c2d12" text-anchor="middle">VDAC pulling for WSPR: in progress</text>
+
+  <line x1="60" y1="215" x2="60" y2="318" stroke="#9a3412" stroke-width="2"/>
+  <line x1="60" y1="318" x2="110" y2="318" stroke="#9a3412" stroke-width="2"/>
+  <line x1="180" y1="222" x2="180" y2="198" stroke="#c2410c" stroke-width="1.5" marker-end="url(#arrRF)"/>
+  <line x1="180" y1="270" x2="180" y2="294" stroke="#c2410c" stroke-width="1.5"/>
+
+  <!-- ===== EFR32FG23 (blue) ===== -->
+  <rect x="320" y="90" width="270" height="330" rx="10" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.5"/>
+  <text x="336" y="116" font-size="14" font-weight="600" fill="#1e3a8a">EFR32FG23 radio SoC</text>
+  <text x="336" y="134" font-size="11" fill="#1e3a8a">Cortex-M33 · RAIL (public API only)</text>
+
+  <rect x="340" y="150" width="230" height="48" rx="6" fill="#dbeafe" stroke="#3b82f6"/>
+  <text x="455" y="170" font-size="12" font-weight="600" fill="#1e3a8a" text-anchor="middle">I/Q capture</text>
+  <text x="455" y="186" font-size="10" fill="#1e3a8a" text-anchor="middle">zero-copy FIFO · int16, Q-first · ≤1 Msps</text>
+
+  <rect x="340" y="222" width="230" height="48" rx="6" fill="#dbeafe" stroke="#3b82f6"/>
+  <text x="455" y="242" font-size="12" font-weight="600" fill="#1e3a8a" text-anchor="middle">NCO transmitter</text>
+  <text x="455" y="258" font-size="10" fill="#1e3a8a" text-anchor="middle">PLL offset stepping · AFSK/CW/NBFM · WSPR (WIP)</text>
+
+  <rect x="340" y="294" width="230" height="48" rx="6" fill="#dbeafe" stroke="#3b82f6"/>
+  <text x="455" y="314" font-size="12" font-weight="600" fill="#1e3a8a" text-anchor="middle">Calibration + scan</text>
+  <text x="455" y="330" font-size="10" fill="#1e3a8a" text-anchor="middle">multi-point freq cal · RSSI sweep · CLI</text>
+
+  <rect x="340" y="366" width="230" height="40" rx="6" fill="#dbeafe" stroke="#3b82f6"/>
+  <text x="455" y="384" font-size="12" font-weight="600" fill="#1e3a8a" text-anchor="middle">DSP plugin contract</text>
+  <text x="455" y="398" font-size="10" fill="#1e3a8a" text-anchor="middle">planned · fixed I/Q block API</text>
+
+  <!-- RF <-> SoC -->
+  <line x1="250" y1="174" x2="340" y2="174" stroke="#c2410c" stroke-width="1.5" marker-end="url(#arrRF)"/>
+  <text x="295" y="166" font-size="9" fill="#9a3412" text-anchor="middle">RX</text>
+  <line x1="340" y1="246" x2="250" y2="246" stroke="#c2410c" stroke-width="1.5" marker-end="url(#arrRF)"/>
+  <text x="295" y="238" font-size="9" fill="#9a3412" text-anchor="middle">TX</text>
+  <line x1="250" y1="386" x2="340" y2="386" stroke="#4b5563" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#arr)"/>
+  <text x="295" y="378" font-size="9" fill="#4b5563" text-anchor="middle">HFXO</text>
+
+  <!-- ===== ESP32-S3 (green) ===== -->
+  <rect x="660" y="90" width="270" height="330" rx="10" fill="#f0fdf4" stroke="#22c55e" stroke-width="1.5"/>
+  <text x="676" y="116" font-size="14" font-weight="600" fill="#14532d">ESP32-S3 companion</text>
+  <text x="676" y="134" font-size="11" fill="#14532d">N16R8 · 16 MB flash · 8 MB PSRAM</text>
+
+  <rect x="680" y="150" width="230" height="48" rx="6" fill="#dcfce7" stroke="#22c55e"/>
+  <text x="795" y="170" font-size="12" font-weight="600" fill="#14532d" text-anchor="middle">I/Q streaming server</text>
+  <text x="795" y="186" font-size="10" fill="#14532d" text-anchor="middle">SpyServer-compatible · native protocol (planned)</text>
+
+  <rect x="680" y="222" width="230" height="48" rx="6" fill="#dcfce7" stroke="#22c55e"/>
+  <text x="795" y="242" font-size="12" font-weight="600" fill="#14532d" text-anchor="middle">On-device DSP</text>
+  <text x="795" y="258" font-size="10" fill="#14532d" text-anchor="middle">FFT waterfall · APRS/AX.25 RX · CW RX</text>
+
+  <rect x="680" y="294" width="230" height="48" rx="6" fill="#dcfce7" stroke="#22c55e"/>
+  <text x="795" y="314" font-size="12" font-weight="600" fill="#14532d" text-anchor="middle">Peripherals</text>
+  <text x="795" y="330" font-size="10" fill="#14532d" text-anchor="middle">2.8" TFT · GPS (M8) · SD store-and-forward</text>
+
+  <rect x="680" y="366" width="230" height="40" rx="6" fill="#dcfce7" stroke="#22c55e"/>
+  <text x="795" y="384" font-size="12" font-weight="600" fill="#14532d" text-anchor="middle">Control CLI + diagnostics</text>
+  <text x="795" y="398" font-size="10" fill="#14532d" text-anchor="middle">benchmarks · flash log · calibration writeback</text>
+
+  <!-- SoC <-> ESP32 -->
+  <line x1="570" y1="174" x2="680" y2="174" stroke="#4b5563" stroke-width="2" marker-end="url(#arr)"/>
+  <text x="625" y="164" font-size="10" font-weight="600" fill="#374151" text-anchor="middle">I²S / SPI</text>
+  <text x="625" y="190" font-size="9" fill="#6b7280" text-anchor="middle">I/Q blocks + RDY</text>
+  <line x1="680" y1="318" x2="570" y2="318" stroke="#4b5563" stroke-width="1.5" marker-end="url(#arr)"/>
+  <text x="625" y="310" font-size="10" fill="#374151" text-anchor="middle">UART cmd link</text>
+
+  <!-- ===== Hosts / network (purple) ===== -->
+  <rect x="1000" y="90" width="216" height="330" rx="10" fill="#faf5ff" stroke="#a855f7" stroke-width="1.5"/>
+  <text x="1016" y="116" font-size="14" font-weight="600" fill="#581c87">Hosts &amp; network</text>
+  <text x="1016" y="134" font-size="11" fill="#581c87">any client, no vendor software</text>
+
+  <rect x="1016" y="150" width="184" height="48" rx="6" fill="#f3e8ff" stroke="#a855f7"/>
+  <text x="1108" y="170" font-size="12" font-weight="600" fill="#581c87" text-anchor="middle">SDR++ · GNU Radio</text>
+  <text x="1108" y="186" font-size="10" fill="#581c87" text-anchor="middle">SoapySDR · GQRX · CubicSDR</text>
+
+  <rect x="1016" y="222" width="184" height="48" rx="6" fill="#f3e8ff" stroke="#a855f7"/>
+  <text x="1108" y="242" font-size="12" font-weight="600" fill="#581c87" text-anchor="middle">APRS-IS · SatNOGS</text>
+  <text x="1108" y="258" font-size="10" fill="#581c87" text-anchor="middle">iGate · telemetry upload (SiDS)</text>
+
+  <rect x="1016" y="294" width="184" height="48" rx="6" fill="#f3e8ff" stroke="#a855f7"/>
+  <text x="1108" y="314" font-size="12" font-weight="600" fill="#581c87" text-anchor="middle">Python tools</text>
+  <text x="1108" y="330" font-size="10" fill="#581c87" text-anchor="middle">scan viewer · sinks · benchmarks</text>
+
+  <rect x="1016" y="366" width="184" height="40" rx="6" fill="#f3e8ff" stroke="#a855f7"/>
+  <text x="1108" y="384" font-size="12" font-weight="600" fill="#581c87" text-anchor="middle">Remote operation</text>
+  <text x="1108" y="398" font-size="10" fill="#581c87" text-anchor="middle">unattended ground station</text>
+
+  <!-- ESP32 -> hosts -->
+  <line x1="910" y1="166" x2="1016" y2="166" stroke="#4b5563" stroke-width="2" marker-end="url(#arr)"/>
+  <text x="963" y="158" font-size="10" font-weight="600" fill="#374151" text-anchor="middle">WiFi</text>
+  <text x="963" y="180" font-size="9" fill="#6b7280" text-anchor="middle">~175 ksps int16</text>
+  <line x1="910" y1="190" x2="1016" y2="190" stroke="#4b5563" stroke-width="2" marker-end="url(#arr)"/>
+  <text x="963" y="205" font-size="9" fill="#6b7280" text-anchor="middle">USB CDC ~250 ksps</text>
+  <line x1="910" y1="246" x2="1016" y2="246" stroke="#4b5563" stroke-width="1.5" stroke-dasharray="5 3" marker-end="url(#arr)"/>
+  <text x="963" y="238" font-size="9" fill="#6b7280" text-anchor="middle">TCP / TLS</text>
+
+  <!-- ===== Footer: data formats & legend ===== -->
+  <rect x="24" y="440" width="1192" height="96" rx="8" fill="#f9fafb" stroke="#e5e7eb"/>
+  <text x="40" y="464" font-size="12" font-weight="600" fill="#111827">Key figures (measured)</text>
+  <text x="40" y="484" font-size="11" fill="#374151">NCO tick 4.649 Hz = 39 MHz / 2²³, phase-continuous, ~3.4 µs latency · AFSK @ 38.4 kS/s: THD 2.1 %, spurs &lt; −41 dBc · I²S fs = 39 MHz / N (1 Msps @ 270 kHz BW)</text>
+  <text x="40" y="502" font-size="11" fill="#374151">WiFi ~712 kB/s sustained · zero-copy FIFO: 75 % → 11 % CPU @ 1 Msps · CALOFFSET LSB disabled → 9.3 Hz steps, pair-PWM restores resolution</text>
+
+  <g font-size="11" fill="#374151">
+    <rect x="40" y="514" width="14" height="10" fill="#ffedd5" stroke="#f97316"/><text x="60" y="523">RF / open hardware</text>
+    <rect x="190" y="514" width="14" height="10" fill="#dbeafe" stroke="#3b82f6"/><text x="210" y="523">radio SoC firmware (MIT)</text>
+    <rect x="380" y="514" width="14" height="10" fill="#dcfce7" stroke="#22c55e"/><text x="400" y="523">companion firmware (MIT)</text>
+    <rect x="570" y="514" width="14" height="10" fill="#f3e8ff" stroke="#a855f7"/><text x="590" y="523">host software / services</text>
+    <line x1="760" y1="519" x2="790" y2="519" stroke="#c2410c" stroke-width="1.5"/><text x="798" y="523">RF path</text>
+    <line x1="870" y1="519" x2="900" y2="519" stroke="#4b5563" stroke-width="2"/><text x="908" y="523">data</text>
+    <line x1="960" y1="519" x2="990" y2="519" stroke="#4b5563" stroke-width="1.2" stroke-dasharray="4 3"/><text x="998" y="523">control / reference</text>
+  </g>
+</svg>
