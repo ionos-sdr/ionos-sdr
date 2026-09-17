@@ -1,17 +1,17 @@
 /* SPDX-License-Identifier: MIT
  *
- * cw_morse.h — CW (Morse) adó a FG23-on (Simplicity / RAIL)
- *   Copyright (c) 2026 Zoltan Doczi HA7DCD — MIT licenc
+ * cw_morse.h — CW (Morse) transmitter on the FG23 (Simplicity / RAIL)
+ *   Copyright (c) 2026 Zoltan Doczi HA7DCD — MIT license
  *
- * OOK (on-off keying) a vivőn: RAIL_StartTxStream(CARRIER_WAVE) /
- * RAIL_StopTxStream. A timing RAIL_GetTime()-mal pontos.
+ * OOK (on-off keying) of the carrier: RAIL_StartTxStream(CARRIER_WAVE) /
+ * RAIL_StopTxStream. Timing is precise via RAIL_GetTime().
  *
- * Használat (app.c handle_line-ból):
+ * Usage (from app.c handle_line):
  *   cw_morse_send("CQ CQ DE HA7DCD K", 18);   // 18 WPM
- *   vagy a kész parancsok: M1 / M2 / M3 / M <szöveg>
+ *   or the ready-made commands: M1 / M2 / M3 / M <text>
  *
- * A modul NEM függ a stream-állapottól — induláskor leállítja az
- * esetleges RX-et / más TX-et, végén visszaáll RX-be.
+ * The module does NOT depend on the stream state — on start it stops any
+ * ongoing RX / other TX, and returns to RX at the end.
  */
 
 #ifndef CW_MORSE_H
@@ -25,35 +25,35 @@
 extern "C" {
 #endif
 
-/* Alapértelmezett sebesség (PARIS standard). 12–25 WPM a praktikus. */
+/* Default speed (PARIS standard). 12–25 WPM is the practical range. */
 #ifndef CW_DEFAULT_WPM
 #define CW_DEFAULT_WPM  18
 #endif
 
-/* A hívójel (ugyanaz, mint az APRS/WSPR). */
+/* The callsign (same as for APRS/WSPR). */
 #ifndef CW_MYCALL
 #define CW_MYCALL  "HA7DCD"
 #endif
 
 /**
- * Morse szöveg adása.
+ * Send Morse text.
  *
  * @param rail     RAIL handle (s_rail)
- * @param channel  csatorna (s_channel)
- * @param text     ASCII, A-Z 0-9 és a szokásos írásjelek (. , / ? = + -)
- *                 Kisbetű automatikusan nagybetűvé alakul. Ismeretlen
- *                 karaktert szóközként kezelünk.
- * @param wpm      5..40 (kívül eső értéket a default-ra cseréljük)
- * @return         true = végigment, false = 'x' billentyűvel megszakítva
+ * @param channel  channel (s_channel)
+ * @param text     ASCII, A-Z 0-9 and the common punctuation (. , / ? = + -)
+ *                 Lower case is converted to upper case automatically.
+ *                 Unknown characters are treated as a space.
+ * @param wpm      5..40 (out-of-range values are replaced by the default)
+ * @return         true = completed, false = aborted with the 'x' key
  *
- * Blokkoló. A VCOM-ról érkező 'x' karakter azonnal leállítja.
- * A függvény a végén StopTxStream + StartRx-et csinál (restart_rx
- * helyett, hogy ne kelljen az app.c-ből exportálni mindent).
+ * Blocking. An 'x' character arriving on VCOM stops it immediately.
+ * At the end the function does StopTxStream + StartRx (instead of
+ * restart_rx, so that not everything has to be exported from app.c).
  */
 bool cw_morse_send(RAIL_Handle_t rail, uint16_t channel,
                    const char *text, uint8_t wpm);
 
-/* Kész tesztüzenetek (a terminál M1/M2/M3 parancsaihoz). */
+/* Ready-made test messages (for the terminal M1/M2/M3 commands). */
 bool cw_morse_cq(RAIL_Handle_t rail, uint16_t channel, uint8_t wpm);
 bool cw_morse_test(RAIL_Handle_t rail, uint16_t channel, uint8_t wpm);
 bool cw_morse_beacon(RAIL_Handle_t rail, uint16_t channel, uint8_t wpm);

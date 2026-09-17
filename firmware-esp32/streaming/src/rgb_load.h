@@ -1,25 +1,25 @@
-/* rgb_load.h - a WS2812 szinkeverese a CPU-terheles utemere
+/* rgb_load.h - WS2812 colour cycling paced by CPU load
  *
- * HA7DCD / Kolibri.  A panelen levo RGB LED lassan sodrodik a szinkoron,
- * ha a rendszer unatkozik, es annal gyorsabban pörög, minel jobban meg van
- * terhelve.  Egy pillantas a panelre, es tudod, mi van - kijelzohely es
- * figyelem nelkul.
+ * HA7DCD.  The on-board RGB LED drifts slowly around the colour wheel when
+ * the system is idle, and cycles faster the more heavily it is loaded.  A
+ * glance at the board shows the state - without display space or attention.
  *
- * MERES: FreeRTOS idle-hook magonkent.  Az idle task minden korben egyet
- * szamol; ha nincs szabad ido, nem szamol.  A terheles = 1 - szamlalo/max,
- * ahol a max onkalibralodik (felfele azonnal, lefele lassan cseng).
- * Nem "igazi" profiler, de arra, hogy a LED jol mutassa a nyomast, eleg -
- * es nem kell hozza CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS.
+ * MEASUREMENT: FreeRTOS idle hook per core.  The idle task increments a
+ * counter on every iteration; without free time it does not count.  Load
+ * = 1 - counter/max, where max self-calibrates (immediately upward, slow
+ * decay downward).  Not a "real" profiler, but sufficient for the LED to
+ * indicate pressure - and it does not need
+ * CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS.
  *
- * KOLTSEG: ~30 us / frissites (RMT viszi), 50 Hz-en 0,15% CPU.
- * Sajat task, 1-es prioritas, 0-as mag.
+ * COST: ~30 us / update (handled by RMT), 0.15% CPU at 50 Hz.
+ * Own task, priority 1, core 0.
  *
- * HASZNALAT:
- *   setup():  rgb_load_init(48);          // 38 is elofordul klonokon
- *   parancs:  if (rgb_load_cmd(line)) return;
+ * USAGE:
+ *   setup():  rgb_load_init(48);          // 38 also occurs on clones
+ *   command:  if (rgb_load_cmd(line)) return;
  *
- * Ha sajat terhelesmerod van (SPI-sor melyseg, eagain-rata, RXRING vizjel):
- *   rgb_load_override(0.75f);   // 0..1 ; -1 = vissza az automatikara
+ * With an external load measure (SPI queue depth, EAGAIN rate, RXRING watermark):
+ *   rgb_load_override(0.75f);   // 0..1 ; -1 = back to automatic
  */
 #pragma once
 
@@ -34,27 +34,27 @@ void  rgb_load_init(int pin);
 void  rgb_load_stop(void);
 bool  rgb_load_running(void);
 
-/* 0..1 kozotti aktualis terheles (a ket mag maximuma) */
+/* Current load in 0..1 (maximum of the two cores) */
 float rgb_load_get(void);
 void  rgb_load_get_cores(float *core0, float *core1);
 
-/* Kulso terhelesforras. -1.0f = vissza az automatikus meresre. */
+/* External load source. -1.0f = back to automatic measurement. */
 void  rgb_load_override(float load_0_1);
 
-/* ---- parancsok (true = ez a modul kezelte a sort) ----------------------
- *   L                statusz
- *   L0 / L1          ki / be
- *   Ltest            vegigfut a szinkoron 3 mp alatt (bekotes-ellenorzes)
- *   Lset k=v ...     konfig:
- *       pin=48       a WS2812 laba
- *       fenyero=12   csucs-fenyero 1..255 (12 = nagyon halvany)
- *       lassu=90     korido masodpercben ures rendszernel
- *       gyors=2      korido masodpercben 100% terhelesnel
- *       gorbe=50     leképzes gorbulete %-ban (50 = gyokos, 100 = linearis)
- *       dither=1     idobeli ditherelés (halvany fenyeronel kotelezo)
- *       gamma=1      gamma-korrekcio
- *       telitettseg=100
- *       hz=50        frissitesi rata
+/* ---- commands (true = this module handled the line) --------------------
+ *   L                status
+ *   L0 / L1          off / on
+ *   Ltest            sweeps the colour wheel in 3 s (wiring check)
+ *   Lset k=v ...     config:
+ *       pin=48       WS2812 pin
+ *       fenyero=12   peak brightness 1..255 (12 = very dim)
+ *       lassu=90     cycle period in seconds on an idle system
+ *       gyors=2      cycle period in seconds at 100% load
+ *       gorbe=50     curvature of the mapping in % (50 = square root, 100 = linear)
+ *       dither=1     temporal dithering (mandatory at low brightness)
+ *       gamma=1      gamma correction
+ *       telitettseg=100  saturation
+ *       hz=50        update rate
  */
 bool rgb_load_cmd(const char *line);
 

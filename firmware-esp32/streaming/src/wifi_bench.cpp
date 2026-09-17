@@ -1,14 +1,15 @@
-/* wifi_bench.cpp - lasd wifi_bench.h
+/* wifi_bench.cpp - see wifi_bench.h
  *
- * Tervezesi elvek (a projekt korabbi tanulsagaibol):
- *  - SOHA nem blokkolo iras: kozvetlen send(fd,...,MSG_DONTWAIT), a
- *    NetworkClient::write() 1 masodperces select-varakozasa megkerulve.
- *  - A bench sajat taskban fut, hogy a merese ne a loop() utemezesetol
- *    fuggjon; a magja es prioritasa futasidoben allithato, mert pont az az
- *    egyik merendo valtozo, hogy hova erdemes tenni.
- *  - Minden keret onhordozo fejlecet visz (magic + seq + step + felkinalt
- *    rata), igy a Python-nyelo FUGGETLENUL is tud lepcsonkent osszesiteni.
- *    Ez a masodik meropont, ami az USB-hid nyugdijazasakor elveszett.
+ * Design principles (from earlier lessons of the project):
+ *  - NEVER blocking writes: direct send(fd,...,MSG_DONTWAIT), bypassing
+ *    the 1-second select wait of NetworkClient::write().
+ *  - The bench runs in its own task so that its measurement does not depend
+ *    on the loop() scheduling; its core and priority are adjustable at run
+ *    time, because where to place it is one of the variables under test.
+ *  - Every frame carries a self-describing header (magic + seq + step +
+ *    offered rate), so the Python sink can aggregate per step
+ *    INDEPENDENTLY. This is the second measurement point that was lost
+ *    when the USB bridge was retired.
  */
 
 #include "wifi_bench.h"
@@ -18,9 +19,9 @@
 #include <stdlib.h>
 #include <errno.h>
 
-/* A kimeneti csatorna. EBBEN A PROJEKTBEN a Serial a NYERS I/Q FOLYAM
- * (nativ USB CDC), a szoveges diagnosztika a Serial0 (CP2102) - ezert
- * alapertelmezetten oda irunk. Mas projektben -D WB_OUT=Serial. */
+/* The output channel. IN THIS PROJECT Serial is the RAW I/Q STREAM
+ * (native USB CDC), text diagnostics go to Serial0 (CP2102) - hence the
+ * default. In another project use -D WB_OUT=Serial. */
 #ifndef WB_OUT
 #define WB_OUT Serial0
 #endif
@@ -34,15 +35,15 @@
 #include <fcntl.h>
 #include <sys/time.h>
 
-/* ===================== forditasi ideju alapertekek ===================== */
+/* ===================== compile-time defaults =========================== */
 #ifndef WB_DEF_PORT
 #define WB_DEF_PORT     7777
 #endif
 #ifndef WB_DEF_BLK
-#define WB_DEF_BLK      1040    /* ugyanaz, mint az IQ-blokk: osszemerheto */
+#define WB_DEF_BLK      1040    /* same as the IQ block: comparable */
 #endif
 #ifndef WB_DEF_CHUNK
-#define WB_DEF_CHUNK    2880    /* 2 x 1440 MSS - merve: ez jo, a HT40 nem */
+#define WB_DEF_CHUNK    2880    /* 2 x 1440 MSS - measured: this works, HT40 does not */
 #endif
 #ifndef WB_DEF_CORE
 #define WB_DEF_CORE     0
@@ -63,23 +64,23 @@
 #define WB_STACK        4096
 #endif
 #define WB_BLK_MAX      8192
-#define WB_BUF_MAX      32768   /* blk * agg felso korlat */
+#define WB_BUF_MAX      32768   /* upper bound of blk * agg */
 #define WB_HDR          24
 #define WB_MAGIC        "WBN1"
 
-/* ===================== keretfejlec (a nyelo ugyanezt olvassa) ========== */
+/* ===================== frame header (the sink reads the same) ========== */
 typedef struct __attribute__((packed)) {
     char     magic[4];    /* "WBN1"                                       */
-    uint32_t seq;         /* keret sorszam, futasonkent 0-tol             */
-    uint32_t len;         /* teljes keret bajtban (fejlec + payload)      */
-    uint32_t t_us;        /* esp_timer_get_time() also 32 bit             */
-    uint16_t step;        /* lepcso index (0-tol)                         */
-    uint16_t flags;       /* bit0 = bemelegites (dobd el a statisztikabol)*/
-    uint32_t rate_kBps;   /* felkinalt rata; 0 = fekezes nelkul           */
+    uint32_t seq;         /* frame sequence number, from 0 per run        */
+    uint32_t len;         /* whole frame in bytes (header + payload)      */
+    uint32_t t_us;        /* esp_timer_get_time() lower 32 bits           */
+    uint16_t step;        /* step index (from 0)                          */
+    uint16_t flags;       /* bit0 = warm-up (exclude from statistics)     */
+    uint32_t rate_kBps;   /* offered rate; 0 = no throttling              */
 } wb_hdr_t;
-static_assert(sizeof(wb_hdr_t) == WB_HDR, "wb_hdr_t merete nem 24");
+static_assert(sizeof(wb_hdr_t) == WB_HDR, "wb_hdr_t size is not 24");
 
-/* ===================== konfig ========================================== */
+/* ===================== config ========================================== */
 typedef struct {
     uint16_t port;
     uint16_t blk;
@@ -91,7 +92,7 @@ typedef struct {
     uint16_t warm_s;
     uint16_t win_ms;
     uint16_t burst;
-    uint16_t agg;      /* hany keret menjen egy loketben */
+    uint16_t agg;      /* frames per burst */
     int32_t  sndbuf;
 } wb_cfg_t;
 
@@ -100,12 +101,12 @@ static wb_cfg_t s_cfg = {
     1, 0, WB_DEF_WARM_S, WB_DEF_WIN_MS, WB_DEF_BURST, 1, 0
 };
 
-/* ===================== menetrend ======================================= */
+/* ===================== schedule ======================================== */
 typedef struct {
-    uint32_t start_kBps;  /* 0 = max mod                                  */
+    uint32_t start_kBps;  /* 0 = max mode                                 */
     uint32_t stop_kBps;
-    uint32_t step_kBps;   /* 0 = egyetlen lepcso                          */
-    uint32_t dwell_s;     /* 0 = vegtelen                                 */
+    uint32_t step_kBps;   /* 0 = single step                              */
+    uint32_t dwell_s;     /* 0 = unlimited                                */
 } wb_plan_t;
 
 static wb_plan_t   s_plan;
@@ -116,10 +117,10 @@ static volatile bool s_abort = false;
 static uint8_t    *s_buf     = NULL;
 static uint32_t    s_buf_sz  = 0;
 
-/* ===================== segedek ========================================= */
+/* ===================== helpers ========================================= */
 static void wb_fill_pattern(uint8_t *p, int n)
 {
-    /* determinisztikus, offszet-fuggo minta - a nyelo memcmp-pel ellenorzi */
+    /* deterministic, offset-dependent pattern - the sink verifies with memcmp */
     for (int i = 0; i < n; i++) p[i] = (uint8_t)(i * 31u + 7u);
 }
 
@@ -143,14 +144,14 @@ static int wb_setup_client(int fd)
     if (s_cfg.sndbuf > 0) {
         int v = s_cfg.sndbuf;
         if (setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &v, sizeof(v)) != 0)
-            WB_OUT.printf("BENCH: SO_SNDBUF=%d NEM allithato (LWIP_SO_SNDBUF?)\n", v);
+            WB_OUT.printf("BENCH: SO_SNDBUF=%d CANNOT be set (LWIP_SO_SNDBUF?)\n", v);
     }
     int fl = fcntl(fd, F_GETFL, 0);
     fcntl(fd, F_SETFL, fl | O_NONBLOCK);
     return 0;
 }
 
-/* varakozas irhatosagra, max to_ms; visszater: 1 irhato, 0 timeout, -1 hiba */
+/* wait for writability, at most to_ms; returns: 1 writable, 0 timeout, -1 error */
 static int wb_wait_writable(int fd, int to_ms)
 {
     fd_set w;
@@ -164,12 +165,12 @@ static int wb_wait_writable(int fd, int to_ms)
     return r > 0 ? 1 : 0;
 }
 
-/* ===================== a task ========================================== */
+/* ===================== the task ======================================== */
 typedef struct {
     uint64_t bytes;
     uint32_t frames;
     uint32_t eagain;
-    uint32_t tmax_us;      /* leghosszabb egyetlen send() hivas          */
+    uint32_t tmax_us;      /* longest single send() call                 */
     uint32_t heap_min;
     uint64_t t0_us;
 } wb_acc_t;
@@ -188,8 +189,8 @@ static void wb_print_window(int step, uint32_t offered_kBps, const wb_acc_t *a)
     double kBps = (double)a->bytes * 1000.0 / (double)dt;   /* B/us -> kB/s */
     wb_ext_t e; wb_ext_read(&e);
     WB_OUT.printf(
-        "BENCH: lep=%d fel=%lu ach=%.1f kB/s sps16=%.0f sps8=%.0f "
-        "ker=%lu eagain=%lu tmax=%luus ring=%lu dtmax=%luus heap=%luk\n",
+        "BENCH: step=%d off=%lu ach=%.1f kB/s sps16=%.0f sps8=%.0f "
+        "frames=%lu eagain=%lu tmax=%luus ring=%lu dtmax=%luus heap=%luk\n",
         step, (unsigned long)offered_kBps, kBps,
         kBps * 1000.0 / 4.0, kBps * 1000.0 / 2.0,
         (unsigned long)a->frames, (unsigned long)a->eagain,
@@ -204,8 +205,8 @@ static void wb_print_step(int step, uint32_t offered_kBps,
     if (dt == 0) dt = 1;
     double kBps = (double)a->bytes * 1000.0 / (double)dt;
     WB_OUT.printf(
-        "BENCH-STEP: lep=%d fel=%lu ach=%.1f sps16=%.0f sps8=%.0f ido=%.1fs "
-        "ker=%lu eagain=%lu tmax=%luus lost=%lu dup=%lu ovf=%lu blk=%lu "
+        "BENCH-STEP: step=%d off=%lu ach=%.1f sps16=%.0f sps8=%.0f time=%.1fs "
+        "frames=%lu eagain=%lu tmax=%luus lost=%lu dup=%lu ovf=%lu blk=%lu "
         "spydrop=%lu ring=%lu dtmax=%luus heapmin=%luk\n",
         step, (unsigned long)offered_kBps, kBps,
         kBps * 1000.0 / 4.0, kBps * 1000.0 / 2.0, (double)dt / 1e6,
@@ -224,7 +225,7 @@ static void wb_task(void *arg)
 
     int lsock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (lsock < 0) {
-        WB_OUT.println("BENCH: socket() hiba");
+        WB_OUT.println("BENCH: socket() error");
         s_run = false; s_task = NULL; vTaskDelete(NULL); return;
     }
     int one = 1;
@@ -237,13 +238,13 @@ static void wb_task(void *arg)
     sa.sin_port        = htons(s_cfg.port);
     if (bind(lsock, (struct sockaddr *)&sa, sizeof(sa)) != 0 ||
         listen(lsock, 1) != 0) {
-        WB_OUT.printf("BENCH: bind/listen hiba a %u porton\n", s_cfg.port);
+        WB_OUT.printf("BENCH: bind/listen error on port %u\n", s_cfg.port);
         close(lsock);
         s_run = false; s_task = NULL; vTaskDelete(NULL); return;
     }
     { int fl = fcntl(lsock, F_GETFL, 0); fcntl(lsock, F_SETFL, fl | O_NONBLOCK); }
 
-    WB_OUT.printf("BENCH: varom a nyelot a %u porton "
+    WB_OUT.printf("BENCH: waiting for the sink on port %u "
                   "(blk=%u chunk=%u core=%u prio=%u nodelay=%u)\n",
                   s_cfg.port, s_cfg.blk, s_cfg.chunk,
                   s_cfg.core, s_cfg.prio, s_cfg.nodelay);
@@ -256,12 +257,12 @@ static void wb_task(void *arg)
     if (cfd < 0) { close(lsock); s_run = false; s_task = NULL; vTaskDelete(NULL); return; }
 
     wb_setup_client(cfd);
-    WB_OUT.println("BENCH: nyelo csatlakozott, mehet");
+    WB_OUT.println("BENCH: sink connected, starting");
 
-    /* ---- lepcsok vegigjatszasa ---- */
+    /* ---- run through the steps ---- */
     const uint32_t blk   = s_cfg.blk;
-    const uint32_t agg   = s_cfg.agg ? s_cfg.agg : 1;   /* keret / loket    */
-    const uint32_t bufsz = blk * agg;                   /* egy loket bajtja */
+    const uint32_t agg   = s_cfg.agg ? s_cfg.agg : 1;   /* frames / burst   */
+    const uint32_t bufsz = blk * agg;                   /* bytes per burst  */
     const uint32_t chunk = s_cfg.chunk ? s_cfg.chunk : bufsz;
     for (uint32_t f = 0; f < agg; f++)
         wb_fill_pattern(s_buf + f * blk + WB_HDR, blk - WB_HDR);
@@ -290,29 +291,29 @@ static void wb_task(void *arg)
         uint64_t win_t0   = step_t0;
         uint32_t frame_off = 0;
 
-        WB_OUT.printf("BENCH: --- lepcso %d: %lu kB/s (%.0f ksps int16) ---\n",
+        WB_OUT.printf("BENCH: --- step %d: %lu kB/s (%.0f ksps int16) ---\n",
                       step, (unsigned long)rate, (double)rate / 4.0);
 
         while (s_run && !s_abort) {
             uint64_t now = esp_timer_get_time();
 
-            /* bemelegites lejart? innentol szamol az akkumulator */
+            /* warm-up over? the accumulator counts from here */
             if (warm && (now - step_t0) >= warm_us) {
                 warm = false;
                 wb_acc_reset(&acc);
                 wb_ext_read(&e0);
             }
-            /* lepcso vege? */
+            /* end of step? */
             if (dwell_us && (now - step_t0) >= dwell_us + warm_us) break;
 
-            /* token-vodor */
+            /* token bucket */
             if (rate_Bps) {
                 tokens += (int64_t)((now - last) * rate_Bps / 1000000ull);
                 if (tokens > (int64_t)token_cap) tokens = (int64_t)token_cap;
             }
             last = now;
 
-            /* uj loket indul? */
+            /* new burst starting? */
             if (frame_off == 0) {
                 if (rate_Bps && tokens < (int64_t)bufsz) {
                     uint64_t need_us = ((uint64_t)bufsz - (uint64_t)tokens)
@@ -357,7 +358,7 @@ static void wb_task(void *arg)
                 if (!warm) acc.eagain++;
                 if (wb_wait_writable(cfd, 20) < 0) { s_abort = true; break; }
             } else {
-                WB_OUT.printf("BENCH: kliens elszallt (errno=%d)\n", errno);
+                WB_OUT.printf("BENCH: client gone (errno=%d)\n", errno);
                 s_abort = true;
                 break;
             }
@@ -366,7 +367,7 @@ static void wb_task(void *arg)
             if (fh < win.heap_min) win.heap_min = fh;
             if (!warm && fh < acc.heap_min) acc.heap_min = fh;
 
-            /* riportablak */
+            /* report window */
             if (s_cfg.win_ms &&
                 (esp_timer_get_time() - win_t0) >= (uint64_t)s_cfg.win_ms * 1000ull) {
                 if (!s_cfg.quiet) wb_print_window(step, rate, &win);
@@ -384,19 +385,19 @@ static void wb_task(void *arg)
         d.spi_ovf    = e1.spi_ovf    - e0.spi_ovf;
         d.spi_blocks = e1.spi_blocks - e0.spi_blocks;
         d.spy_drop   = e1.spy_drop   - e0.spy_drop;
-        d.spi_ring_max   = e1.spi_ring_max;      /* vizjel: abszolut */
+        d.spi_ring_max   = e1.spi_ring_max;      /* watermark: absolute */
         d.loop_dt_max_us = e1.loop_dt_max_us;
         wb_print_step(step, rate, &acc, &d);
 
-        /* kovetkezo lepcso */
-        if (!s_plan.step_kBps || !s_plan.dwell_s) break;   /* egyetlen lepcso */
+        /* next step */
+        if (!s_plan.step_kBps || !s_plan.dwell_s) break;   /* single step */
         if (rate >= s_plan.stop_kBps) break;
         rate += s_plan.step_kBps;
         if (rate > s_plan.stop_kBps) rate = s_plan.stop_kBps;
         step++;
     }
 
-    WB_OUT.println("BENCH-END: kesz");
+    WB_OUT.println("BENCH-END: done");
     if (cfd >= 0) close(cfd);
     close(lsock);
     s_run  = false;
@@ -404,19 +405,19 @@ static void wb_task(void *arg)
     vTaskDelete(NULL);
 }
 
-/* ===================== inditas / leallitas ============================= */
+/* ===================== start / stop ==================================== */
 static bool wb_start(uint32_t start_kBps, uint32_t stop_kBps,
                      uint32_t step_kBps, uint32_t dwell_s)
 {
-    if (s_run) { WB_OUT.println("BENCH: mar fut (B0 = stop)"); return false; }
+    if (s_run) { WB_OUT.println("BENCH: already running (B0 = stop)"); return false; }
 
     if (s_cfg.blk < 64 || s_cfg.blk > WB_BLK_MAX) {
-        WB_OUT.println("BENCH: ervenytelen blk"); return false;
+        WB_OUT.println("BENCH: invalid blk"); return false;
     }
     if (s_cfg.agg < 1) s_cfg.agg = 1;
     uint32_t need = (uint32_t)s_cfg.blk * s_cfg.agg;
     if (need > WB_BUF_MAX) {
-        WB_OUT.printf("BENCH: blk*agg = %lu > %d - csokkentsd\n",
+        WB_OUT.printf("BENCH: blk*agg = %lu > %d - reduce it\n",
                       (unsigned long)need, WB_BUF_MAX);
         return false;
     }
@@ -425,7 +426,7 @@ static bool wb_start(uint32_t start_kBps, uint32_t stop_kBps,
         s_buf = (uint8_t *)malloc(need);
         s_buf_sz = s_buf ? need : 0;
     }
-    if (!s_buf) { WB_OUT.println("BENCH: nincs RAM a pufferre"); return false; }
+    if (!s_buf) { WB_OUT.println("BENCH: no RAM for the buffer"); return false; }
 
     s_plan.start_kBps = start_kBps;
     s_plan.stop_kBps  = stop_kBps;
@@ -440,7 +441,7 @@ static bool wb_start(uint32_t start_kBps, uint32_t stop_kBps,
         s_cfg.prio, &s_task, s_cfg.core ? 1 : 0);
 
     if (ok != pdPASS) {
-        WB_OUT.println("BENCH: task-inditas sikertelen");
+        WB_OUT.println("BENCH: task start failed");
         s_run = false;
         return false;
     }
@@ -452,19 +453,19 @@ void wifi_bench_stop(void)
     if (!s_run) return;
     s_abort = true;
     s_run   = false;
-    WB_OUT.println("BENCH: leallitas keresve");
+    WB_OUT.println("BENCH: stop requested");
 }
 
 bool wifi_bench_running(void) { return s_run; }
 void wifi_bench_set_ext(wb_ext_fn fn) { s_ext_fn = fn; }
-void wifi_bench_init(void) { /* lusta inicializalas; a task inditaskor jon */ }
+void wifi_bench_init(void) { /* lazy initialisation; done at task start */ }
 
-/* ===================== parancsertelmezo ================================ */
+/* ===================== command parser ================================== */
 static void wb_print_cfg(void)
 {
     WB_OUT.printf("BENCH-CFG: port=%u blk=%u chunk=%u core=%u prio=%u "
                   "nodelay=%u sndbuf=%ld warm=%u win=%u burst=%u agg=%u quiet=%u "
-                  "fut=%d\n",
+                  "run=%d\n",
                   s_cfg.port, s_cfg.blk, s_cfg.chunk, s_cfg.core, s_cfg.prio,
                   s_cfg.nodelay, (long)s_cfg.sndbuf, s_cfg.warm_s,
                   s_cfg.win_ms, s_cfg.burst, s_cfg.agg, s_cfg.quiet, (int)s_run);
@@ -496,7 +497,7 @@ static void wb_set_kv(const char *args)
         else if (!strcmp(k, "burst"))   s_cfg.burst   = (uint16_t)v;
         else if (!strcmp(k, "agg"))     s_cfg.agg     = (uint16_t)(v < 1 ? 1 : v);
         else if (!strcmp(k, "quiet"))   s_cfg.quiet   = (uint8_t)(v ? 1 : 0);
-        else WB_OUT.printf("BENCH: ismeretlen kulcs: %s\n", k);
+        else WB_OUT.printf("BENCH: unknown key: %s\n", k);
     }
     wb_print_cfg();
 }
@@ -540,7 +541,7 @@ bool wifi_bench_cmd(const char *line)
         return true;
     }
 
-    WB_OUT.println("BENCH: B | B0 | Br<kBps>[,<s>] | Bs<a>,<b>,<lep>,<s> | "
+    WB_OUT.println("BENCH: B | B0 | Br<kBps>[,<s>] | Bs<a>,<b>,<step>,<s> | "
                    "Bm[<s>] | Bset k=v");
     return true;
 }

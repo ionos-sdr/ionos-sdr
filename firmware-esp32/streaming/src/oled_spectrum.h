@@ -1,14 +1,14 @@
-// oled_spectrum.h — 128x64 SSD1306 mini-spektrum + 1-bites waterfall (U8g2)
+// oled_spectrum.h — 128x64 SSD1306 mini spectrum + 1-bit waterfall (U8g2)
 // HA7DCD, 2026-08. Header-only.
 //
-// Elrendezes: felso 24 px spektrumgorbe (max-hold nelkul), also 40 px
-// 1-bites, Bayer-4x4 ditherelt waterfall (~5 szurkeszint erzet).
-// Bemenet: barmilyen nbin-es uint8 sor (a SPECLINE-e); 128 binre max-decimal.
+// Layout: top 24 px spectrum trace (no max-hold), bottom 40 px 1-bit,
+// Bayer-4x4 dithered waterfall (~5 perceived gray levels).
+// Input: any nbin-wide uint8 row (that of SPECLINE); max-decimated to 128 bins.
 //
-// HASZNALAT:
-//   OledSpectrum oled;              // globalis
-//   ...SPECLINE erkezik: oled.push(bins, nbin);
-//   ...kirajzolas (pl. 10 Hz): oled.draw(u8g2);   // u8g2.clearBuffer/sendBuffer benne
+// USAGE:
+//   OledSpectrum oled;              // global
+//   ...on SPECLINE arrival: oled.push(bins, nbin);
+//   ...render (e.g. at 10 Hz): oled.draw(u8g2);   // includes u8g2.clearBuffer/sendBuffer
 
 #pragma once
 #include <stdint.h>
@@ -21,7 +21,7 @@ public:
     static const int WF_H = 40;
 
     void push(const uint8_t* bins, uint16_t nbin) {
-        // nbin -> 128 max-decimalas (a keskeny csucsok ne vesszenek el)
+        // nbin -> 128 max-decimation (narrow peaks must not be lost)
         uint8_t row[W];
         for (int x = 0; x < W; x++) {
             int a = (int)((uint32_t)x * nbin / W);
@@ -31,26 +31,26 @@ public:
             for (int j = a + 1; j < b && j < nbin; j++) if (bins[j] > m) m = bins[j];
             row[x] = m;
         }
-        // waterfall gorgetes lefele
+        // scroll the waterfall down
         memmove(&wf[1][0], &wf[0][0], (WF_H - 1) * W);
         memcpy(&wf[0][0], row, W);
         memcpy(cur, row, W);
     }
 
-    // Egy fix kuszob-ablakot ter kepez 0..255 -> 0..15 (dither-szint).
-    // lo/hi: a megjelenitett dB-ablak a uint8 skalan (a kliens floor/range-hez kepest).
+    // Maps a fixed threshold window 0..255 -> 0..15 (dither level).
+    // lo/hi: the displayed dB window on the uint8 scale (relative to the client floor/range).
     void setWindow(uint8_t lo, uint8_t hi) { wlo = lo; whi = hi > lo ? hi : lo + 1; }
 
     template <typename U8G2>
     void draw(U8G2& g) {
         g.clearBuffer();
-        // felso spektrumgorbe
+        // top spectrum trace
         for (int x = 0; x < W; x++) {
             int v = level16(cur[x]);                // 0..15
             int h = (v * (SPEC_H - 1)) / 15;
             if (h > 0) g.drawVLine(x, SPEC_H - 1 - h, h + 1);
         }
-        // also 1-bites ditherelt waterfall
+        // bottom 1-bit dithered waterfall
         for (int y = 0; y < WF_H; y++) {
             const uint8_t* r = wf[y];
             for (int x = 0; x < W; x++) {

@@ -1,12 +1,12 @@
 /* SPDX-License-Identifier: MIT
  *
- * cw_rx.cpp — CW dekóder ESP32-S3
- *   IQ → NCO keverés (tone → DC) → envelope → hiszterézis → Morse timing
+ * cw_rx.cpp — CW decoder for the ESP32-S3
+ *   IQ → NCO mixing (tone → DC) → envelope → hysteresis → Morse timing
  *
- * Fontos: a tone-ra keverés UTÁN a jel DC-n van, ezért NEM Goertzel 700-on,
- * hanem envelope (I'²+Q'²). A Goertzel a keverés nélküli audiós CW-hez való.
+ * Important: AFTER mixing to the tone the signal sits at DC, so NO Goertzel
+ * at 700 Hz but an envelope (I'²+Q'²). Goertzel is for unmixed audio CW.
  *
- * HackRF: --tone 700   (a stream DC-blokkolja a 0 Hz OOK-t)
+ * HackRF: --tone 700   (the stream DC-blocks 0 Hz OOK)
  */
 
 #include "cw_rx.h"
@@ -22,15 +22,15 @@
 #define CW_TEXT_LEN      48
 #define CW_MIN_DOT_MS    20
 #define CW_MAX_DOT_MS    200
-#define CW_ENV_SHIFT     3          /* envelope simítás 1/8 */
-#define CW_NOISE_SHIFT   6          /* zajpadló 1/64 */
+#define CW_ENV_SHIFT     3          /* envelope smoothing 1/8 */
+#define CW_NOISE_SHIFT   6          /* noise floor 1/64 */
 
 static float    s_tone_hz = CW_TONE_DEFAULT;
 static uint32_t s_sps = 50000;
 static float    s_ph = 0, s_dph = 0;
 
-static float    s_env = 0;          /* simított envelope */
-static float    s_noise = 100.f;    /* key-up zajpadló */
+static float    s_env = 0;          /* smoothed envelope */
+static float    s_noise = 100.f;    /* key-up noise floor */
 static float    s_peak = 0;
 static bool     s_key = false;
 static bool     s_prev_key = false;
@@ -47,7 +47,7 @@ static uint8_t  s_text_len = 0;
 static uint32_t s_chars = 0;
 static uint32_t s_last_ms = 0;
 
-/* debug: hányszor volt key, max env */
+/* debug: number of key events, max env */
 static float    s_dbg_max_env = 0;
 static uint32_t s_dbg_keys = 0;
 static uint32_t s_dbg_last_print = 0;
@@ -124,7 +124,7 @@ void cw_rx_init(void)
   s_ph = 0;
   s_dbg_max_env = 0; s_dbg_keys = 0; s_dbg_last_print = 0;
   retune();
-  Serial0.printf("CW: mix+env kesz (tone=%.0f Hz). HackRF: --tone %.0f\n",
+  Serial0.printf("CW: mix+env ready (tone=%.0f Hz). HackRF: --tone %.0f\n",
                  (double)s_tone_hz, (double)s_tone_hz);
 }
 
@@ -139,10 +139,10 @@ void cw_rx_feed(const int16_t *iq, int nsamp, uint32_t sps)
     float ii = (float)iq[n * 2];
     float qq = (float)iq[n * 2 + 1];
 
-    /* NCO: tone → DC. Mindkét oldalsáv: próbáljuk a +tone keverést.
+    /* NCO: tone → DC. Either sideband: mix with +tone.
      * I' = I*c + Q*s
      * Q' = Q*c - I*s
-     * env = sqrt(I'²+Q'²) = |z|  (forgásinvariáns, LSB/USB mindegy) */
+     * env = sqrt(I'²+Q'²) = |z|  (rotation-invariant, LSB/USB irrelevant) */
     float c = cosf(s_ph);
     float s = sinf(s_ph);
     s_ph += s_dph;
@@ -152,7 +152,7 @@ void cw_rx_feed(const int16_t *iq, int nsamp, uint32_t sps)
     float qp = qq * c - ii * s;
     float env = sqrtf(ip * ip + qp * qp);
 
-    /* gyors envelope simítás */
+    /* fast envelope smoothing */
     s_env += (env - s_env) * (1.f / (float)(1 << CW_ENV_SHIFT));
 
     if (s_env > s_peak) s_peak = s_env;
@@ -160,13 +160,13 @@ void cw_rx_feed(const int16_t *iq, int nsamp, uint32_t sps)
 
     if (s_env > s_dbg_max_env) s_dbg_max_env = s_env;
 
-    /* zajpadló csak key-up alatt */
+    /* noise floor tracked only during key-up */
     if (!s_key) {
       s_noise += (s_env - s_noise) * (1.f / (float)(1 << CW_NOISE_SHIFT));
       if (s_noise < 1.f) s_noise = 1.f;
     }
 
-    /* hiszterézis: on = 3×noise, off = 1.5×noise, abs padló */
+    /* hysteresis: on = 3×noise, off = 1.5×noise, absolute floor */
     float thr_on  = s_noise * 3.0f + 50.f;
     float thr_off = s_noise * 1.5f + 20.f;
     s_signal = (s_peak > thr_on);
@@ -179,7 +179,7 @@ void cw_rx_feed(const int16_t *iq, int nsamp, uint32_t sps)
       if (dur < 1) dur = 1;
 
       if (s_prev_key) {
-        /* key-down vége */
+        /* end of key-down */
         if (dur >= CW_MIN_DOT_MS) {
           bool dah = (dur >= s_dot_ms * 2);
           uint32_t est = dah ? (dur / 3) : dur;
@@ -193,7 +193,7 @@ void cw_rx_feed(const int16_t *iq, int nsamp, uint32_t sps)
           ++s_dbg_keys;
         }
       } else {
-        /* key-up vége */
+        /* end of key-up */
         if (dur >= s_dot_ms * 6) {
           finish_char();
           if (s_text_len && s_text[s_text_len - 1] != ' ')
@@ -215,7 +215,7 @@ void cw_rx_tick(uint32_t now_ms)
   if (!s_key && s_bitlen > 0 && silence > s_dot_ms * 3)
     finish_char();
 
-  /* 2 mp-enként diagnosztika, amíg nincs sok karakter */
+  /* diagnostics every 2 s until enough characters have been decoded */
   if (now_ms - s_dbg_last_print > 2000) {
     s_dbg_last_print = now_ms;
     if (s_chars < 20) {

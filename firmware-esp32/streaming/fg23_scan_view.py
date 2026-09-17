@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
-# fg23_scan_view.py — szelessavu scan-vizeses az ESP32 SpyServer FFT-folyamabol,
-# SDR++ NELKUL. HA7DCD 2026-08-15.
+# fg23_scan_view.py — wideband scan waterfall from the ESP32 SpyServer FFT stream,
+# WITHOUT SDR++. HA7DCD 2026-08-15.
 #
-# Ugyanazt keri a szervertol, amit az SDR++ fg23_scan_source modul SCAN-modban:
+# Requests the same from the server as the SDR++ fg23_scan_source module in SCAN mode:
 #   STREAMING_MODE = FFT_ONLY (4), FFT_FREQUENCY, FFT_DECIMATION (=SPAN Hz),
 #   FFT_DISPLAY_PIXELS (=nbin), FFT_DB_OFFSET (=-floor), FFT_DB_RANGE,
 #   STREAMING_ENABLED = 1
-# es a MSG_TYPE_UINT8_FFT (301) uzeneteket rajzolja matplotlibbel.
+# and draws the MSG_TYPE_UINT8_FFT (301) messages with matplotlib.
 #
-# Hasznalat (egy sorban, PowerShell):
+# Usage (one line, PowerShell):
 #   py -3.14 fg23_scan_view.py --host 192.168.1.50 --center 149.8e6 --span 10e6 --nbin 320
-# Billentyuk az ablakban: q = kilep,  bal/jobb nyil = kozep +-span/4,
-#   fel/le nyil = span x2 / :2,  r = autoskala.
+# Keys in the window: q = quit,  left/right arrow = center +-span/4,
+#   up/down arrow = span x2 / :2,  r = autoscale.
 #
-# Fuggosegek: numpy, matplotlib (py -3.14 -m pip install matplotlib ha nincs).
+# Dependencies: numpy, matplotlib (py -3.14 -m pip install matplotlib if missing).
 
 import argparse, socket, struct, sys, threading, time, collections
 import numpy as np
@@ -34,7 +34,7 @@ class SpyScan:
         self.sock = socket.create_connection((host, port), timeout=5)
         self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self.center, self.span, self.nbin, self.floor, self.rng = center, span, nbin, floor, rng
-        self.lines = collections.deque(maxlen=400)   # legutobbi sorok (dB)
+        self.lines = collections.deque(maxlen=400)   # most recent rows (dB)
         self.n_lines = 0
         self.dev = None
         self.alive = True
@@ -62,7 +62,7 @@ class SpyScan:
         self.alive = False
         try:
             self._set(S_STREAMING_ENABLED, 0)
-            self._set(S_STREAMING_MODE, 1)                 # IQ_ONLY -> a FG23 W0-t kap
+            self._set(S_STREAMING_MODE, 1)                 # IQ_ONLY -> the FG23 receives W0
             time.sleep(0.2)
             self.sock.close()
         except OSError:
@@ -73,7 +73,7 @@ class SpyScan:
         while len(buf) < n:
             c = self.sock.recv(n - len(buf))
             if not c:
-                raise ConnectionError("bontva")
+                raise ConnectionError("disconnected")
             buf += c
         return buf
 
@@ -92,28 +92,28 @@ class SpyScan:
                     self.n_lines += 1
         except (OSError, ConnectionError) as e:
             if self.alive:
-                print("rx: kapcsolat megszakadt:", e, file=sys.stderr)
+                print("rx: connection lost:", e, file=sys.stderr)
             self.alive = False
 
 
 def main():
-    ap = argparse.ArgumentParser(description="FG23 scan-vizeses SpyServer FFT-folyambol")
+    ap = argparse.ArgumentParser(description="FG23 scan waterfall from the SpyServer FFT stream")
     ap.add_argument("--host", required=True)
     ap.add_argument("--port", type=int, default=5555)
     ap.add_argument("--center", type=float, default=149.8e6, help="Hz")
     ap.add_argument("--span", type=float, default=10e6, help="Hz")
     ap.add_argument("--nbin", type=int, default=320)
-    ap.add_argument("--floor", type=int, default=-130, help="dBm (0-as bin)")
+    ap.add_argument("--floor", type=int, default=-130, help="dBm (bin level 0)")
     ap.add_argument("--range", type=int, default=100, dest="rng", help="dB")
-    ap.add_argument("--rows", type=int, default=200, help="vizeses sorai")
-    ap.add_argument("--nogui", action="store_true", help="csak sor/s szamlalo, kep nelkul")
+    ap.add_argument("--rows", type=int, default=200, help="waterfall rows")
+    ap.add_argument("--nogui", action="store_true", help="rows/s counter only, no image")
     a = ap.parse_args()
 
     s = SpyScan(a.host, a.port, int(a.center), int(a.span), a.nbin, a.floor, a.rng)
     time.sleep(0.5)
     if s.dev:
         print("DeviceInfo: type=%d serial=%08X maxsps=%d decim=%d" % (s.dev[0], s.dev[1], s.dev[2], s.dev[4]))
-    print("scan: kozep %.6f MHz, span %.3f MHz, %d bin, %d dBm + %d dB" %
+    print("scan: center %.6f MHz, span %.3f MHz, %d bins, %d dBm + %d dB" %
           (a.center / 1e6, a.span / 1e6, a.nbin, a.floor, a.rng))
 
     if a.nogui:
@@ -121,7 +121,7 @@ def main():
             last = 0
             while s.alive:
                 time.sleep(2.0)
-                print("sorok: %d  (%.1f sor/s)" % (s.n_lines, (s.n_lines - last) / 2.0))
+                print("rows: %d  (%.1f rows/s)" % (s.n_lines, (s.n_lines - last) / 2.0))
                 last = s.n_lines
         except KeyboardInterrupt:
             pass
@@ -143,7 +143,7 @@ def main():
     ax_sp.set_ylabel("dBm")
     ax_sp.grid(True, alpha=0.3)
     ax_wf.set_xlabel("MHz")
-    ax_wf.set_ylabel("sor (idő ↓)")
+    ax_wf.set_ylabel("row (time ↓)")
     title = ax_sp.set_title("")
     state = {"rows": 0, "t0": time.time(), "n0": 0}
 
@@ -191,9 +191,9 @@ def main():
         if dt >= 2.0:
             rate = (s.n_lines - state["n0"]) / dt
             state["t0"], state["n0"] = time.time(), s.n_lines
-            title.set_text("kozep %.4f MHz  span %.2f MHz  %d bin   %.1f sor/s   ossz %d%s" %
+            title.set_text("center %.4f MHz  span %.2f MHz  %d bins   %.1f rows/s   total %d%s" %
                            (s.center / 1e6, s.span / 1e6, a.nbin, rate, s.n_lines,
-                            "" if s.alive else "   [KAPCSOLAT BONTVA]"))
+                            "" if s.alive else "   [CONNECTION LOST]"))
         return im, ln, title
 
     from matplotlib.animation import FuncAnimation

@@ -1,33 +1,33 @@
 /* SPDX-License-Identifier: MIT
  *
- * FG23 fazis-koherens I/Q burst capture
- * Simplicity SDK 2025.6.3 / RAIL 2.19.x — "RAIL - SoC Empty" projektbe
+ * FG23 phase-coherent I/Q burst capture
+ * Simplicity SDK 2025.6.3 / RAIL 2.19.x, for the "RAIL - SoC Empty" project
  *
- * A capture-mag a geckokapula projekt dsp_driver.c-jebol szarmazik:
- *   Copyright (c) 2017-2022 Tatu Peltola (OH2EAT) — MIT licenc
+ * The capture core is derived from dsp_driver.c of the geckokapula project:
+ *   Copyright (c) 2017-2022 Tatu Peltola (OH2EAT) - MIT license
  *   https://github.com/tejeez/geckokapula
- * Series 2 port es burst-dump:
- *   Copyright (c) 2026 Zoltan Doczi HA7DCD — MIT licenc
+ * Series 2 port and burst dump:
+ *   Copyright (c) 2026 Zoltan Doczi HA7DCD - MIT license
  *
- * ELHELYEZES: a SoC Empty sablonban az app_init() az app_init.c-be, az
- * app_process_action() az app_process.c-be valo — vagy az egesz mehet
- * egyetlen app.c-be, ha a sablon ures fuggvenyeit torlod.
+ * PLACEMENT: in the SoC Empty template app_init() belongs in app_init.c and
+ * app_process_action() in app_process.c; alternatively everything can go
+ * into a single app.c if the template's empty functions are removed.
  *
- * KOMPONENSEK (Software Components):
- *   - RAIL Utility, Initialization  (peldany: inst0; "Enable Setup of
- *     Radio Events" BE — ez adja a sl_rail_util_on_event routingot)
- *   - a sajat 144.489 MHz-es Radio Configurator PHY (base 144.489 MHz,
- *     ch spacing 1 MHz, 39 MHz crystal — a RAILtest-feasibility configja)
- *   - IO Stream: EUSART (peldany: vcom) + IO Stream: Retarget STDIO
+ * COMPONENTS (Software Components):
+ *   - RAIL Utility, Initialization  (instance: inst0; "Enable Setup of
+ *     Radio Events" ON - this provides the sl_rail_util_on_event routing)
+ *   - the custom 144.489 MHz Radio Configurator PHY (base 144.489 MHz,
+ *     ch spacing 1 MHz, 39 MHz crystal - the RAILtest feasibility config)
+ *   - IO Stream: EUSART (instance: vcom) + IO Stream: Retarget STDIO
  *
- * MERT BINARIS A DUMP ES MIERT sl_iostream_write:
- *   a retargetelt printf/stdout utvonal pufferelhet es LF-konverziot
- *   vegezhet, ami a binaris keretet elrontana — a payload ezert megy
- *   kozvetlenul sl_iostream_write-tal.
+ * WHY THE DUMP IS BINARY AND WHY sl_iostream_write:
+ *   the retargeted printf/stdout path may buffer and perform LF conversion,
+ *   which would corrupt the binary frame - the payload is therefore written
+ *   directly with sl_iostream_write.
  *
- * MINTAFORMATUM (geckokapula dsp.h + a mai RAILtest-forenzika):
- *   struct { int16_t q, i; } — Q ELOL, little-endian ("i16le" a
- *   Python oldalon). Az iq_view_stream.py IQB1 modja pont ezt varja.
+ * SAMPLE FORMAT (geckokapula dsp.h + RAILtest forensics):
+ *   struct { int16_t q, i; } - Q FIRST, little-endian ("i16le" on the
+ *   Python side). The IQB1 mode of iq_view_stream.py expects exactly this.
  */
 
 #include "rail.h"
@@ -40,31 +40,31 @@
 #include <stdint.h>
 #include <stdio.h>
 
-/* ---------------- konfiguracio ---------------- */
+/* ---------------- configuration ---------------- */
 
-/* Q elol! (geckokapula iq_in_t) */
+/* Q first! (geckokapula iq_in_t) */
 typedef struct {
   int16_t q;
   int16_t i;
 } iq_in_t;
 
-/* Burst hossza: 8192 komplex minta = 32 KiB RAM (a FG23B 64 KiB-jaba
- * boven belefer). 48 kHz I/Q-nal ~170 ms, 160 kHz-nel ~51 ms. */
+/* Burst length: 8192 complex samples = 32 KiB RAM (fits comfortably in the
+ * FG23B's 64 KiB). ~170 ms at 48 kHz I/Q, ~51 ms at 160 kHz. */
 #define CAPTURE_SAMPLES   8192u
 
-/* Esemenyenkent olvasott komplex mintak. A geckokapula 2-t olvasott
- * (audio-szinkron miatt); nekunk 64 minta / esemeny = 256 bajt jo,
- * ritkabb IRQ. */
+/* Complex samples read per event. geckokapula read 2 (for audio sync);
+ * here 64 samples / event = 256 bytes is adequate and gives a lower IRQ
+ * rate. */
 #define SAMPLES_PER_EVENT 64u
 #define THRESHOLD_BYTES   (SAMPLES_PER_EVENT * sizeof(iq_in_t))
 
-/* Series 2: az RX FIFO-t az app adja a RAILCb_SetupRxFifo-n keresztul. */
+/* Series 2: the application supplies the RX FIFO via RAILCb_SetupRxFifo. */
 #define RX_FIFO_BYTES     4096u
 
-/* A csatorna, amin a PHY 144.489 MHz-et ad (configtol fugg). */
+/* The channel on which the PHY yields 144.489 MHz (config dependent). */
 #define IQ_CHANNEL        0u
 
-/* ---------------- allapot ---------------- */
+/* ---------------- state ---------------- */
 
 static iq_in_t capture_buf[CAPTURE_SAMPLES];
 static volatile uint32_t capture_idx  = 0;
@@ -80,9 +80,9 @@ static uint8_t rx_fifo[RX_FIFO_BYTES] SL_ATTRIBUTE_ALIGN(4);
 static RAIL_Handle_t s_rail = NULL;
 
 /* ---------------- RX FIFO (Series 2) ----------------
- * Ha a linker "multiple definition of RAILCb_SetupRxFifo" hibat dob,
- * a projekt mar ad sajatot (pl. valamelyik pelda-forras) — akkor EZT
- * a fuggvenyt torold, es a masikban allitsd a meretet. */
+ * If the linker reports "multiple definition of RAILCb_SetupRxFifo", the
+ * project already provides one (e.g. from an example source) - in that
+ * case delete THIS function and set the size in the other one. */
 RAIL_Status_t RAILCb_SetupRxFifo(RAIL_Handle_t railHandle)
 {
   uint16_t size = RX_FIFO_BYTES;
@@ -90,10 +90,10 @@ RAIL_Status_t RAILCb_SetupRxFifo(RAIL_Handle_t railHandle)
   return st;
 }
 
-/* ---------------- esemeny-callback ----------------
- * ISR-kontextus (a RAIL majdnem mindig megszakitasbol hiv) — csak
- * FIFO-olvasas es indexeles, semmi mas. A geckokapula rail_callback()
- * kozvetlen leszarmazottja. */
+/* ---------------- event callback ----------------
+ * ISR context (RAIL almost always calls from an interrupt) - FIFO read
+ * and indexing only, nothing else. A direct descendant of geckokapula's
+ * rail_callback(). */
 void sl_rail_util_on_event(RAIL_Handle_t rail_handle, RAIL_Events_t events)
 {
   if (events & RAIL_EVENT_RX_FIFO_OVERFLOW) {
@@ -105,9 +105,9 @@ void sl_rail_util_on_event(RAIL_Handle_t rail_handle, RAIL_Events_t events)
     ++stat_events;
 
     if (!capturing) {
-      /* Folyamatos vetel, de nem gyujtunk: urritunk es eldobunk,
-       * hogy a FIFO sose csorduljon tul — igy a burst inditasa
-       * pillanatszeru es az elso mintatol koherens. */
+      /* Continuous reception without capturing: drain and discard so
+       * the FIFO never overflows - this makes the burst start
+       * instantaneous and coherent from the first sample. */
       uint8_t sink[THRESHOLD_BYTES];
       RAIL_ReadRxFifo(rail_handle, sink, sizeof sink);
       return;
@@ -131,8 +131,8 @@ void sl_rail_util_on_event(RAIL_Handle_t rail_handle, RAIL_Events_t events)
 }
 
 /* ---------------- burst dump ----------------
- * Onleiro keret: "IQB1" | u32 n | u32 fs_hint | u8 fmt(=1) | 3x pad |
- * payload | "IQE1" — az iq_view_stream.py --port/--file modja olvassa. */
+ * Self-describing frame: "IQB1" | u32 n | u32 fs_hint | u8 fmt(=1) | 3x pad |
+ * payload | "IQE1" - read by the --port/--file mode of iq_view_stream.py. */
 static void dump_capture(uint32_t fs_hint)
 {
   static const uint8_t hdr[4] = { 'I', 'Q', 'B', '1' };
@@ -150,7 +150,7 @@ static void dump_capture(uint32_t fs_hint)
   sl_iostream_write(sl_iostream_vcom_handle, trl, sizeof trl);
 }
 
-/* ---------------- init + fo ciklus ---------------- */
+/* ---------------- init + main loop ---------------- */
 
 void app_init(void)
 {
@@ -158,7 +158,7 @@ void app_init(void)
 
   RAIL_DataConfig_t dc = {
     .txSource = TX_PACKET_DATA,
-    .rxSource = RX_IQDATA_FILTLSB,   /* erros jelre valto: FILTMSB */
+    .rxSource = RX_IQDATA_FILTLSB,   /* for strong signals switch to FILTMSB */
     .txMethod = PACKET_MODE,
     .rxMethod = FIFO_MODE,
   };
@@ -173,23 +173,23 @@ void app_init(void)
   RAIL_StartRx(s_rail, IQ_CHANNEL, NULL);
 
   printf("\r\n# FG23 IQ burst capture (SiSDK 2025.6). "
-         "'c' = capture+dump, 's' = statusz\r\n");
+         "'c' = capture+dump, 's' = status\r\n");
 }
 
 void app_process_action(void)
 {
   char ch;
-  /* Nem-blokkolo olvasas a VCOM-rol. Ha a getchar megis blokkolna,
-   * kapcsold ki a blokkolast az iostream uart konfigban, vagy hivd:
+  /* Non-blocking read from VCOM. If getchar still blocks, disable
+   * blocking in the iostream UART config, or call
    * sl_iostream_uart_set_read_block(sl_iostream_uart_vcom_handle, false);
-   * az app_init vegen (#include "sl_iostream_uart.h" es a vcom uart
-   * handle extern deklaracioja mellett). */
+   * at the end of app_init (with #include "sl_iostream_uart.h" and an
+   * extern declaration of the vcom UART handle). */
   if (sl_iostream_getchar(sl_iostream_vcom_handle, &ch) == SL_STATUS_OK) {
     if (ch == 'c' && !capturing) {
       capture_idx  = 0;
       capture_bad  = false;
       capture_done = false;
-      capturing    = true;      /* a kovetkezo FIFO-esemenytol gyujt */
+      capturing    = true;      /* capture starts at the next FIFO event */
     } else if (ch == 's') {
       printf("# events=%lu short=%lu ovf=%lu idx=%lu rail=%p\r\n",
              (unsigned long)stat_events,
@@ -202,9 +202,9 @@ void app_process_action(void)
   if (capture_done) {
     capture_done = false;
     if (capture_bad) {
-      printf("# OVERFLOW a burst alatt — eldobva, probald ujra\r\n");
+      printf("# OVERFLOW during burst - discarded, retry\r\n");
     } else {
-      dump_capture(0 /* fs_hint: onkalibracio utan ird be Hz-ben */);
+      dump_capture(0 /* fs_hint: fill in Hz after self-calibration */);
     }
   }
 }

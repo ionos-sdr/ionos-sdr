@@ -1,19 +1,19 @@
 /* SPDX-License-Identifier: MIT
  *
- * cw_morse.c — CW (Morse) adó a FG23-on
- *   Copyright (c) 2026 Zoltan Doczi HA7DCD — MIT licenc
+ * cw_morse.c — CW (Morse) transmitter on the FG23
+ *   Copyright (c) 2026 Zoltan Doczi HA7DCD — MIT license
  *
- * PARIS standard: egy „szó” = 50 egység. Ezért
+ * PARIS standard: one "word" = 50 units. Hence
  *   unit_us = 1 200 000 / WPM
  * (12 WPM → 100 ms, 18 WPM → ~66.7 ms, 24 WPM → 50 ms).
  *
- * Keying: StartTxStream / StopTxStream. A RAIL stream indítási
- * késleltetése ~1–2 ms, ami 15+ WPM-nél még elfogadható (a
- * karakterek közötti szünet elnyeli). Ha később precízebb kell,
- * át lehet váltani PA-power kapcsolásra (RAIL_SetTxPowerDbm 0 ↔
- * célérték) — a stream akkor végig fut.
+ * Keying: StartTxStream / StopTxStream. The RAIL stream start latency
+ * is ~1–2 ms, still acceptable at 15+ WPM (absorbed by the
+ * inter-character gap). If more precision is needed later, keying can
+ * be switched to PA-power switching (RAIL_SetTxPowerDbm 0 ↔ target
+ * value) — the stream then runs continuously.
  *
- * Abort: a VCOM-ról jövő 'x' (vagy 'X') karakter. Nem kell Enter.
+ * Abort: an 'x' (or 'X') character from VCOM. No Enter required.
  */
 
 #include "cw_morse.h"
@@ -23,17 +23,17 @@
 #include <string.h>
 #include <ctype.h>
 
-/* ---------------- Morse tábla (ITU) ----------------
- * Bit-pack: a legalsó bit a legelső elem.
- * 0 = dit, 1 = dah. A hossz külön táblában (1..5).
- * Prosign-ök és írásjelek is.
+/* ---------------- Morse table (ITU) ----------------
+ * Bit-packed: the lowest bit is the first element.
+ * 0 = dit, 1 = dah. The length is stored separately (1..5).
+ * Prosigns and punctuation included.
  */
 typedef struct {
   uint8_t bits;   /* LSB first */
   uint8_t len;    /* 1..6 */
 } cw_code_t;
 
-/* Index: 'A'..'Z' = 0..25, '0'..'9' = 26..35, majd írásjelek. */
+/* Index: 'A'..'Z' = 0..25, '0'..'9' = 26..35, then punctuation. */
 static const cw_code_t CW_ALPHA[26] = {
   /* A */ { 0b01,    2 }, /* .-     */
   /* B */ { 0b1000,  4 }, /* -...   */
@@ -76,7 +76,7 @@ static const cw_code_t CW_DIGIT[10] = {
   /* 9 */ { 0b11110, 5 }, /* ----.  */
 };
 
-/* Írásjelek — a leggyakoribbak. */
+/* Punctuation — the most common ones. */
 static const cw_code_t CW_PERIOD   = { 0b010101, 6 }; /* .-.-.-  */
 static const cw_code_t CW_COMMA    = { 0b110011, 6 }; /* --..--  */
 static const cw_code_t CW_SLASH    = { 0b10010,  5 }; /* -..-.   */
@@ -101,7 +101,7 @@ static const cw_code_t *cw_lookup(char c, cw_code_t *tmp)
     case '+': return &CW_PLUS;
     case '-': return &CW_MINUS;
     case '@': return &CW_AT;
-    default:  return NULL;          /* szóköz / ismeretlen → szószünet */
+    default:  return NULL;          /* space / unknown → word gap */
   }
 }
 
@@ -113,11 +113,11 @@ static void cw_set_wpm(uint8_t wpm)
 {
   if (wpm < 5)  wpm = 5;
   if (wpm > 40) wpm = 40;
-  /* PARIS = 50 unit / szó → unit = 1.2 s / WPM */
+  /* PARIS = 50 units / word → unit = 1.2 s / WPM */
   s_unit_us = 1200000u / (uint32_t)wpm;
 }
 
-/* Pontos várakozás RAIL idővel. Közben poll-olja a VCOM-ot abortért. */
+/* Precise wait using RAIL time. Polls VCOM for an abort meanwhile. */
 static bool cw_delay_units(RAIL_Handle_t rail, uint32_t units)
 {
   (void)rail;
@@ -142,13 +142,13 @@ static void cw_key_up(RAIL_Handle_t rail)
   RAIL_StopTxStream(rail);
 }
 
-/* Egy karakter adása. Vissza: false = abort. */
+/* Send one character. Returns false = abort. */
 static bool cw_send_char(RAIL_Handle_t rail, uint16_t channel, const cw_code_t *code)
 {
   for (uint8_t i = 0; i < code->len; ++i) {
     bool dah = (code->bits >> i) & 1u;
     if (!cw_key_down(rail, channel)) {
-      printf("# CW: TX start hiba\r\n");
+      printf("# CW: TX start error\r\n");
       return false;
     }
     if (!cw_delay_units(rail, dah ? 3u : 1u)) {
@@ -156,7 +156,7 @@ static bool cw_send_char(RAIL_Handle_t rail, uint16_t channel, const cw_code_t *
       return false;
     }
     cw_key_up(rail);
-    /* elemközti szünet (1 unit), kivéve az utolsó után */
+    /* inter-element gap (1 unit), except after the last element */
     if (i + 1u < code->len) {
       if (!cw_delay_units(rail, 1u)) return false;
     }
@@ -164,7 +164,7 @@ static bool cw_send_char(RAIL_Handle_t rail, uint16_t channel, const cw_code_t *
   return true;
 }
 
-/* ---------------- nyilvános API ---------------- */
+/* ---------------- public API ---------------- */
 
 bool cw_morse_send(RAIL_Handle_t rail, uint16_t channel,
                    const char *text, uint8_t wpm)
@@ -173,10 +173,10 @@ bool cw_morse_send(RAIL_Handle_t rail, uint16_t channel,
 
   cw_set_wpm(wpm ? wpm : CW_DEFAULT_WPM);
 
-  printf("# CW TX %u WPM: \"%s\"  (x = megszakitas)\r\n",
+  printf("# CW TX %u WPM: \"%s\"  (x = abort)\r\n",
          (unsigned)(wpm ? wpm : CW_DEFAULT_WPM), text);
 
-  /* Először Idle + Stop, hogy tiszta legyen a rádió. */
+  /* Idle + Stop first, so the radio starts from a clean state. */
   RAIL_Idle(rail, RAIL_IDLE_ABORT, true);
   RAIL_StopTxStream(rail);
 
@@ -185,9 +185,10 @@ bool cw_morse_send(RAIL_Handle_t rail, uint16_t channel,
 
   for (const char *p = text; *p && ok; ++p) {
     if (*p == ' ' || *p == '\t') {
-      /* szószünet: 7 unit (a karakterközi 3-ból már 1 elment, ezért +4
-       * a következő karakter előtt fogjuk a 3-at, de egyszerűbb a
-       * szabványos 7 unit a szó között, és a karakterek között 3). */
+      /* word gap: 7 units (of the inter-character 3, 1 has already
+       * elapsed, so strictly +4 and the 3 before the next character;
+       * simpler to use the standard 7 units between words and 3
+       * between characters). */
       if (!cw_delay_units(rail, 7u)) { ok = false; break; }
       first = true;
       continue;
@@ -195,10 +196,10 @@ bool cw_morse_send(RAIL_Handle_t rail, uint16_t channel,
 
     cw_code_t tmp;
     const cw_code_t *code = cw_lookup(*p, &tmp);
-    if (!code) continue;            /* ismeretlen → kihagy */
+    if (!code) continue;            /* unknown → skip */
 
     if (!first) {
-      /* karakterközi szünet = 3 unit */
+      /* inter-character gap = 3 units */
       if (!cw_delay_units(rail, 3u)) { ok = false; break; }
     }
     first = false;
@@ -210,18 +211,18 @@ bool cw_morse_send(RAIL_Handle_t rail, uint16_t channel,
   }
 
   cw_key_up(rail);
-  /* A hívó (app.c) végzi a restart_rx()-et és a s_tx_active=false-ot.
-   * Itt csak a TX-et állítjuk le, hogy a frekvencia-korrekció
-   * (FREQ_CORR_TICK) és a FIFO reset a központi helyen maradjon. */
+  /* The caller (app.c) performs restart_rx() and s_tx_active=false.
+   * Only the TX is stopped here, so that the frequency correction
+   * (FREQ_CORR_TICK) and the FIFO reset stay in the central place. */
   RAIL_Idle(rail, RAIL_IDLE_ABORT, true);
 
-  printf("# CW %s\r\n", ok ? "kesz" : "MEGSZAKITVA");
+  printf("# CW %s\r\n", ok ? "done" : "ABORTED");
   return ok;
 }
 
 bool cw_morse_cq(RAIL_Handle_t rail, uint16_t channel, uint8_t wpm)
 {
-  /* Klasszikus CQ hívás + saját hívójel */
+  /* Classic CQ call + own callsign */
   char buf[48];
   snprintf(buf, sizeof buf, "CQ CQ CQ DE %s %s K", CW_MYCALL, CW_MYCALL);
   return cw_morse_send(rail, channel, buf, wpm);
@@ -229,7 +230,7 @@ bool cw_morse_cq(RAIL_Handle_t rail, uint16_t channel, uint8_t wpm)
 
 bool cw_morse_test(RAIL_Handle_t rail, uint16_t channel, uint8_t wpm)
 {
-  /* VFO / szint / frekvencia ellenőrzéshez: ismétlődő VVV + hívójel */
+  /* For VFO / level / frequency checks: repeated VVV + callsign */
   char buf[40];
   snprintf(buf, sizeof buf, "VVV VVV DE %s", CW_MYCALL);
   return cw_morse_send(rail, channel, buf, wpm);
@@ -237,7 +238,7 @@ bool cw_morse_test(RAIL_Handle_t rail, uint16_t channel, uint8_t wpm)
 
 bool cw_morse_beacon(RAIL_Handle_t rail, uint16_t channel, uint8_t wpm)
 {
-  /* Rövid beacon: hívójel + QTH hint (JN97) */
+  /* Short beacon: callsign + QTH hint (JN97) */
   char buf[48];
   snprintf(buf, sizeof buf, "DE %s %s JN97", CW_MYCALL, CW_MYCALL);
   return cw_morse_send(rail, channel, buf, wpm);

@@ -1,107 +1,109 @@
-# FG23 SDR — ESP32-S3 oldal
+# FG23 SDR — ESP32-S3 side
 
-HA7DCD / Cimbi. EFR32FG23 rádió → SPI → ESP32-S3 → USB / WiFi / rtl_tcp → SDR++.
+HA7DCD. EFR32FG23 radio → SPI → ESP32-S3 → USB / WiFi / rtl_tcp → SDR++.
 
-A teljes lánc, a mérési eredmények és a tervezési döntések a projekt
-státuszdokumentumában vannak (`FG23-SDR-allapot-2026-07-31.md`). Ez a fájl csak
-azt írja le, mi hol van és hogyan indul.
+The complete chain, the measurement results and the design decisions are in
+the project status document (`FG23-SDR-allapot-2026-07-31.md`). This file only
+describes what is where and how to start it.
 
-## Mappaszerkezet
+## Directory layout
 
 ```
 fg23-sdr/
-├─ platformio.ini      négy environment, lásd lentebb
+├─ platformio.ini      four environments, see below
 ├─ src/
-│  └─ main.cpp         a fő ESP32 firmware
+│  └─ main.cpp         the main ESP32 firmware
 ├─ bench/
-│  ├─ usb_bench.cpp    USB átviteli plafon mérése (nem kell hozzá FG23)
-│  └─ cs_probe.cpp     CS-láb próba: eljut-e a keretjel az ESP-ig
+│  ├─ usb_bench.cpp    USB throughput ceiling measurement (no FG23 needed)
+│  └─ cs_probe.cpp     CS pin probe: does the frame signal reach the ESP
 ├─ tools/
-│  ├─ iq_bridge.py     USB → TCP híd az asztali SDR++-hoz
-│  └─ usb_sink.py      a benchmark PC oldala
-└─ fg23/               a Silicon Labs oldal — NEM ez a projekt fordítja
+│  ├─ iq_bridge.py     USB → TCP bridge for desktop SDR++
+│  └─ usb_sink.py      the PC side of the benchmark
+└─ fg23/               the Silicon Labs side — NOT built by this project
    ├─ app.c
    ├─ iq_stream.c / .h
    └─ cmdlink.c / .h
 ```
 
-A `bench/` szándékosan **nincs** a `src/` alatt: a PlatformIO a `src/` alól
-mindent lefordítana, és akkor több `setup()`/`loop()` ütközne. Az
-environmentek `build_src_filter`-rel választják ki, melyik fájl épüljön.
+`bench/` is deliberately **not** under `src/`: PlatformIO would compile
+everything under `src/`, and several `setup()`/`loop()` pairs would collide.
+The environments select the file to build with `build_src_filter`.
 
-## Environmentek
+## Environments
 
-| environment | mit épít | mikor kell |
+| environment | builds | when to use |
 |---|---|---|
-| `esp32s3` | `src/main.cpp` | ez a normál firmware, ez a default |
-| `bench_hwcdc` | `bench/usb_bench.cpp`, `ARDUINO_USB_MODE=1` | USB-plafon, beépített USB-Serial/JTAG |
-| `bench_tiny` | `bench/usb_bench.cpp`, `ARDUINO_USB_MODE=0` | USB-plafon, TinyUSB OTG |
-| `probe_cs` | `bench/cs_probe.cpp` | ha "nincs adat" és a drótra gyanakszol |
+| `esp32s3` | `src/main.cpp` | the normal firmware, the default |
+| `bench_hwcdc` | `bench/usb_bench.cpp`, `ARDUINO_USB_MODE=1` | USB ceiling, built-in USB-Serial/JTAG |
+| `bench_tiny` | `bench/usb_bench.cpp`, `ARDUINO_USB_MODE=0` | USB ceiling, TinyUSB OTG |
+| `probe_cs` | `bench/cs_probe.cpp` | when there is "no data" and the wiring is suspect |
 
-VSCode-ban alul a státuszsávban válthatsz köztük, vagy a PlatformIO
-oldalsávban a *Project Tasks* alatt mindegyik kap saját Build/Upload/Monitor
-gombot.
+In VSCode switch between them in the status bar at the bottom, or under
+*Project Tasks* in the PlatformIO sidebar, where each gets its own
+Build/Upload/Monitor buttons.
 
-## Első indítás
+## First start
 
-1. `platformio.ini` → írd be a `monitor_port`-ot és az `upload_port`-ot. **A
-   CP2102 portja kell**, nem a forrasztott natív USB — különben a monitor
-   bináris szemetet fog mutatni.
-2. `src/main.cpp` → `WIFI_SSID` és `WIFI_PASS`. Ha nem jön össze 10 mp alatt,
-   magától saját AP-t nyit (SSID/jelszó a `secrets.h`-ban) — kocsiban ez a jó.
-3. Build + Upload az `esp32s3` environmenttel.
-4. A FG23 autostarttal indul, nem kell `i32`-t nyomni.
+1. `platformio.ini` → set `monitor_port` and `upload_port`. **The CP2102 port
+   is required**, not the soldered native USB — otherwise the monitor shows
+   binary garbage.
+2. `src/main.cpp` → `WIFI_SSID` and `WIFI_PASS`. If no connection is made
+   within 10 s, the firmware opens its own AP (SSID/password in `secrets.h`)
+   — suitable for mobile use.
+3. Build + Upload with the `esp32s3` environment.
+4. The FG23 starts with autostart; no `i32` command is needed.
 
-## Csatlakozás
+## Connecting
 
-| kliens | forrás | cím | formátum |
+| client | source | address | format |
 |---|---|---|---|
-| SDR++ asztali, python nélkül | Network / TCP / Client | `<ESP IP>:8888` | Int16 |
-| SDR++ asztali, USB-n | Network / TCP / Client | `127.0.0.1:8888` | Int16 |
+| SDR++ desktop, without Python | Network / TCP / Client | `<ESP IP>:8888` | Int16 |
+| SDR++ desktop, over USB | Network / TCP / Client | `127.0.0.1:8888` | Int16 |
 | SDR++ Android, SDR Touch | RTL-TCP | `<ESP IP>:1234` | 8 bit |
 
-Az USB-s úthoz: `python tools/iq_bridge.py COM4` — a natív USB portja, az
-Eszközkezelőben „Soros USB-eszköz", nem a CP2102.
+For the USB path: `python tools/iq_bridge.py COM4` — the native USB port,
+listed as "USB Serial Device" in the Device Manager, not the CP2102.
 
-## Az USB-plafon mérése
+## Measuring the USB ceiling
 
 ```
 1. bench_hwcdc → Upload
-2. Monitor a CP2102-n (115200)
-3. python tools/usb_sink.py COM4      <- a NATÍV USB portja!
-4. ~45 mp, aztán olvasd le mindkét oldalt
-5. ugyanez bench_tiny-nel
+2. Monitor on the CP2102 (115200)
+3. python tools/usb_sink.py COM4      <- the NATIVE USB port!
+4. ~45 s, then read both sides
+5. the same with bench_tiny
 ```
 
-Olvasó nélkül a mérés értelmetlen: az USB CDC-n a gazdagép kezdeményez, tehát
-`usb_sink.py` nélkül 0 kB/s-ot fogsz látni — nem a linkről, hanem arról, hogy
-senki nem olvas.
+Without a reader the measurement is meaningless: on USB CDC the host
+initiates, so without `usb_sink.py` 0 kB/s is shown — which says nothing about
+the link, only that nobody is reading.
 
-## A `fg23/` mappáról — olvasd el
+## About the `fg23/` directory — please read
 
-Ezek a fájlok **nem** ebben a projektben fordulnak. A Simplicity Studio saját
-projektmappával dolgozik, tehát ugyanaz a forrás fizikailag két helyen létezhet.
+These files are **not** compiled in this project. Simplicity Studio works with
+its own project folder, so the same source may physically exist in two places.
 
-**Válassz egy irányt és tartsd is magad hozzá.** Ha ez a git-elt másolat az
-igazság, akkor szerkesztés után innen másolod a Studio projektjébe. Ha a Studio
-projektje az igazság, akkor commit előtt onnan másolod ide. A kettő között
-oda-vissza szerkeszteni az, amiből néma eltérés lesz — pontosan ez okozta a
-2026-07-31-i éjszakai hajszát, ahol egy elavult forrásfájl EXP-térképe egy
-pozícióval el volt csúszva, és fél éjszakán át egy nem hajtott lábat mértünk.
+**Choose one direction and stick to it.** If this git-tracked copy is the
+source of truth, copy from here into the Studio project after editing. If the
+Studio project is the source of truth, copy from there to here before
+committing. Editing back and forth between the two is what produces silent
+divergence — exactly this caused the overnight hunt of 2026-07-31, where the
+EXP map of an outdated source file was shifted by one position, and half the
+night was spent measuring an undriven pin.
 
-A `cmdlink.c` alapból **ki van kapcsolva** (`CMDLINK_ENABLE 0` az `app.c`-ben)
-és még nincs hardveren mérve. Akkor kapcsold be, ha behúztad a drótot az ESP
-GPIO4 → FG23 PA06 / EXP 11 útra.
+`cmdlink.c` is **disabled** by default (`CMDLINK_ENABLE 0` in `app.c`) and has
+not yet been measured on hardware. Enable it once the wire for the ESP GPIO4
+→ FG23 PA06 / EXP 11 path is in place.
 
-## Bekötés
+## Wiring
 
-| WSTK EXP | FG23 | jel | → | ESP32-S3 |
+| WSTK EXP | FG23 | signal | → | ESP32-S3 |
 |---|---|---|---|---|
 | 15 | PC05 | SCLK | → | GPIO5 |
 | 10 | PC00 | MOSI | → | GPIO6 |
-| 13 | PA07 | CS (blokk-keret) | → | GPIO7 |
+| 13 | PA07 | CS (block frame) | → | GPIO7 |
 | 1 | GND | | → | GND |
-| 11 | PA06 | CMD (hangolás, opcionális) | ← | GPIO4 |
+| 11 | PA06 | CMD (tuning, optional) | ← | GPIO4 |
 
-Natív USB: kábel **D− → GPIO19**, **D+ → GPIO20**, **GND → GND**. A **VBUS-t
-ne kösd be**. A D+/D− felcserélése pontosan Windows Code 43-at ad.
+Native USB: cable **D− → GPIO19**, **D+ → GPIO20**, **GND → GND**. **Do not
+connect VBUS.** Swapping D+/D− produces exactly Windows Code 43.

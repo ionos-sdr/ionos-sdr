@@ -1,17 +1,17 @@
 #pragma once
-// FG23 scan-kepes SpyServer-kliens SDR++-hoz.
-// A gyari spyserver_client kiterjesztese: az IQ-uzeneteken tul a
-// STREAM_TYPE_FFT / MSG_TYPE_UINT8_FFT uzeneteket is fogadja, es a
-// spektrumsort egy callbacknek adja tovabb (a modul tolja a waterfallba).
+// FG23 scan-capable SpyServer client for SDR++.
+// An extension of the stock spyserver_client: in addition to the IQ messages
+// it also receives STREAM_TYPE_FFT / MSG_TYPE_UINT8_FFT messages and passes
+// each spectrum line to a callback (the module pushes it into the waterfall).
 //
-// Protokoll-megallapodas az ESP32-oldali szerverrel (spy_fft.h):
-//   SETTING_FFT_FREQUENCY      = kozepfrekvencia [Hz]
-//   SETTING_FFT_DECIMATION     = SPAN [Hz]  (nem decimacios index! uint32 elég)
-//   SETTING_FFT_DISPLAY_PIXELS = binek szama (nbin)
-//   SETTING_FFT_DB_OFFSET      = -floor_dBm  (pl. 130 -> a 0-as bin = -130 dBm)
-//   SETTING_FFT_DB_RANGE       = tartomany [dB] (pl. 100 -> 255-os bin = -30 dBm)
+// Protocol convention with the ESP32-side server (spy_fft.h):
+//   SETTING_FFT_FREQUENCY      = centre frequency [Hz]
+//   SETTING_FFT_DECIMATION     = SPAN [Hz]  (not a decimation index; uint32 is sufficient)
+//   SETTING_FFT_DISPLAY_PIXELS = number of bins (nbin)
+//   SETTING_FFT_DB_OFFSET      = -floor_dBm  (e.g. 130 -> bin value 0 = -130 dBm)
+//   SETTING_FFT_DB_RANGE       = range [dB] (e.g. 100 -> bin value 255 = -30 dBm)
 //   SETTING_FFT_FORMAT         = STREAM_FORMAT_UINT8
-//   MSG_TYPE_UINT8_FFT torzse: nbin darab uint8, dB = floor + v*range/255
+//   MSG_TYPE_UINT8_FFT body: nbin uint8 values, dB = floor + v*range/255
 
 #include <utils/networking.h>
 #include <spyserver_protocol.h>
@@ -23,11 +23,11 @@
 #include <condition_variable>
 
 namespace fg23 {
-    // Egy fogadott spektrumsor: dB-ertekek, es a fejlecbol kiolvasott meta.
+    // One received spectrum line: dB values plus metadata taken from the header.
     struct FFTLine {
-        std::vector<float> db;      // nbin darab, dB (abszolut, floor+range szerint)
+        std::vector<float> db;      // nbin values, dB (absolute, per floor+range)
         uint32_t seq = 0;
-        uint16_t flags = 0;         // MessageType felso 16 bit: kozepfrekvencia / 100 kHz
+        uint16_t flags = 0;         // MessageType upper 16 bits: centre frequency / 100 kHz
     };
 
     typedef std::function<void(const FFTLine&)> FFTHandler;
@@ -47,17 +47,17 @@ namespace fg23 {
         void close();
         bool isOpen();
 
-        // FFT-sor callback (a halozati olvaso szalon hivodik!)
+        // FFT line callback (invoked on the network reader thread!)
         void setFFTHandler(FFTHandler h) { fftHandler = h; }
 
-        // A UINT8_FFT dekodolasahoz: ugyanazt kell tudnia, amit a szervernek kuldtunk.
+        // For decoding UINT8_FFT: must match the values sent to the server.
         void setFFTScale(float floorDb, float rangeDb) { fftFloor = floorDb; fftRange = rangeDb; }
 
         int computeDigitalGain(int serverBits, int deviceGain, int decimationId);
 
         SpyServerDeviceInfo devInfo;
 
-        // Statisztika a menuhoz
+        // Statistics for the menu
         uint32_t fftLinesRx = 0;
         uint32_t iqMsgsRx = 0;
 

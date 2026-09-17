@@ -1,41 +1,40 @@
 /* SPDX-License-Identifier: MIT
  *
- * ui.h — gomb + menu-allapotgep az ESP32-S3-on
+ * ui.h — button + menu state machine on the ESP32-S3
  *   Copyright (c) 2026 Zoltan Doczi HA7DCD
  *
- * ================== KET KULON DOLOG ==================
+ * ================== TWO SEPARATE CONCEPTS ==================
  *
- * A menuben SZANDEKOSAN ket fogalom van, nem egy:
+ * The menu DELIBERATELY has two concepts, not one:
  *
- *   OLDAL (page)  — ami epp a kijelzon van. Ez valtozhat magatol is:
- *                   csomagvetelkor elore ugrik, tetlenseg utan visszater a
- *                   statuszra.
- *   UZEMMOD (mode)— melyik demodulator FUT. Ez RAGADOS: attol, hogy
- *                   atlapozol a statuszra, az APRS-dekoder tovabb dolgozik
- *                   es tovabb gatel.
+ *   PAGE          — what is currently on the display. It may change on its
+ *                   own: on packet reception it jumps forward, after
+ *                   inactivity it returns to the status page.
+ *   MODE          — which demodulator is RUNNING. This is STICKY: paging
+ *                   over to the status page does not stop the APRS decoder;
+ *                   it keeps decoding and keeps gating.
  *
- * Ha a ketto egy lenne, akkor minden alkalommal leallitanad az iGate-et,
- * amikor megnezed az IP-t. Ez pontosan az a fajta csendes mellekhatas,
- * amit el akarunk kerulni.
+ * If the two were one, the iGate would be stopped every time the IP is
+ * checked. That is exactly the kind of silent side effect to be avoided.
  *
- * ================== A GOMB ==================
+ * ================== THE BUTTON ==================
  *
- *   rovid nyomas  — kovetkezo oldal. Ha demod-oldalra ersz, az az
- *                   uzemmod BEKAPCSOL.
- *   hosszu nyomas — a demodulator KIKAPCSOL (uresjarat), es vissza a
- *                   statuszra. Igy egy mozdulattal fel tudod szabaditani a
- *                   CPU-t, ha valami mast mersz.
+ *   short press   — next page. Reaching a demodulator page TURNS ON that
+ *                   mode.
+ *   long press    — the demodulator is TURNED OFF (idle) and the display
+ *                   returns to the status page. One gesture frees the CPU
+ *                   when something else is being measured.
  *
- * A Heltec V3-on ez a PRG gomb a GPIO0-n. Strapping lab: BEKAPCSOLASKOR ne
- * tartsd nyomva, mert akkor letoltesi modba megy a chip. Futas kozben sima
- * bemenet, felhuzassal, aktiv alacsony.
+ * On the Heltec V3 this is the PRG button on GPIO0. Strapping pin: do NOT
+ * hold it during POWER-UP, or the chip enters download mode. At run time it
+ * is a plain input with pull-up, active low.
  *
- * ================== BOVITES ==================
+ * ================== EXTENDING ==================
  *
- * Uj demodulatorhoz: vegy fel egy enumot a UI_PAGE_* koze, egy sort a
- * ui.cpp tablazataba, es a main.cpp-ben ket helyen kezeld (feed + rajzolas).
- * A tablazat a EGYETLEN igazsag arrol, mi letezik — a nevek, a kesz/nem-kesz
- * allapot es a sorrend is onnan jon.
+ * For a new demodulator: add an enum among UI_PAGE_*, a row in the table
+ * in ui.cpp, and handle it in two places in main.cpp (feed + drawing).
+ * The table is the SINGLE source of truth about what exists — the names,
+ * the ready/not-ready state and the order all come from there.
  */
 
 #ifndef UI_H
@@ -45,41 +44,40 @@
 #include <stdbool.h>
 
 typedef enum {
-  UI_PAGE_STATUS = 0,   /* halozat, IP, portok — ez az indulo kep */
-  UI_PAGE_RF,           /* FIZIKAI parameterek: frekvencia, sav, rata */
-  UI_PAGE_SDR,          /* a stream statisztikaja */
-  UI_PAGE_SCAN,         /* ditherelt spektrum + waterfall (SPECLINE) */
+  UI_PAGE_STATUS = 0,   /* network, IP, ports — the start-up screen */
+  UI_PAGE_RF,           /* PHYSICAL parameters: frequency, band, rate */
+  UI_PAGE_SDR,          /* stream statistics */
+  UI_PAGE_SCAN,         /* dithered spectrum + waterfall (SPECLINE) */
   UI_PAGE_APRS,         /* AFSK1200 iGate */
-  UI_PAGE_CW,           /* CW Morse dekoder */
-  UI_PAGE_WSPR,         /* jovo */
-  UI_PAGE_FT8,          /* jovo */
+  UI_PAGE_CW,           /* CW Morse decoder */
+  UI_PAGE_WSPR,         /* future */
+  UI_PAGE_FT8,          /* future */
   UI_PAGE_COUNT
 } ui_page_t;
 
 void ui_init(void);
 
-/* A fo ciklusbol, minden korben. Kezeli a gombot es a tetlensegi
- * visszatereset. Nem blokkol. */
+/* From the main loop, every iteration. Handles the button and the idle
+ * return. Non-blocking. */
 void ui_tick(uint32_t now_ms);
 
-/* Az epp lathato oldal. */
+/* The currently visible page. */
 ui_page_t ui_page(void);
 
-/* A FUTO demodulator. UI_PAGE_STATUS = egyik sem. */
+/* The RUNNING demodulator. UI_PAGE_STATUS = none. */
 ui_page_t ui_mode(void);
 
-/* Kesz-e mar ez a demodulator, vagy csak hely van fenntartva neki. */
+/* Whether this demodulator is implemented, or only a placeholder. */
 bool ui_page_ready(ui_page_t p);
 
-/* Az oldal neve a fejlechez. */
+/* Page name for the header. */
 const char *ui_page_name(ui_page_t p);
 
-/* Kulso esemeny hatasara elore ugrik egy oldalra, es ott tartja
- * hold_ms ideig (pl. beerkezett APRS-csomag). Csak akkor lep, ha az adott
- * uzemmod fut. */
+/* On an external event, jump forward to a page and hold it for hold_ms
+ * (e.g. a received APRS packet). Only acts if the given mode is running. */
 void ui_flash(ui_page_t p, uint32_t hold_ms);
 
-/* Frissiteni kell-e a kijelzot? (oldalvaltas tortent) */
+/* Does the display need a refresh? (a page change happened) */
 bool ui_dirty(void);
 void ui_clear_dirty(void);
 

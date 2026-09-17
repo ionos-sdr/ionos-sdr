@@ -1,23 +1,23 @@
 /* SPDX-License-Identifier: MIT
  *
- * wspr_encode.c/.h — WSPR uzenet-kodolo (HA7DCD + Cimbi)
- *   Copyright (c) 2026 Zoltan Doczi HA7DCD — MIT licenc
+ * wspr_encode.c/.h — WSPR message encoder (HA7DCD)
+ *   Copyright (c) 2026 Zoltan Doczi HA7DCD — MIT license
  *
- * A K1JT-fele WSPR protokoll szabvanyos kodolasi lanca, a nyilvanos
- * specifikaciobol implementalva (fuggetlen C-implementacio; a
- * helyesseget az SM0YSR-fele Python referencia-kodoloval
- * keresztvalidaltuk a gazdagepen):
- *   1. uzenet-tomorites: hivojel (28 bit) + lokator (15) + dBm (7)
- *   2. konvolucios kodolas: K=32, r=1/2, Layland-Lushbaugh polinomok
- *      (0xF2D05351, 0xE4613C47), 31 zero-bit farokkal -> 162 bit
- *   3. bit-reverz interleaving
- *   4. szinkronvektor hozzaadasa: sym = sync + 2*data  (0..3)
+ * The standard encoding chain of K1JT's WSPR protocol, implemented from
+ * the public specification (independent C implementation; correctness
+ * was cross-validated on the host against the SM0YSR Python reference
+ * encoder):
+ *   1. message packing: callsign (28 bits) + locator (15) + dBm (7)
+ *   2. convolutional coding: K=32, r=1/2, Layland-Lushbaugh polynomials
+ *      (0xF2D05351, 0xE4613C47), 31 zero tail bits -> 162 bits
+ *   3. bit-reversal interleaving
+ *   4. sync vector added: sym = sync + 2*data  (0..3)
  */
 
 #include "wspr_encode.h"
 #include <string.h>
 
-/* 162 bites pszeudoveletlen szinkronvektor (WSPR szabvany) */
+/* 162-bit pseudo-random sync vector (WSPR standard) */
 static const uint8_t wspr_sync[162] = {
   1,1,0,0,0,0,0,0,1,0,0,0,1,1,1,0,0,0,1,0,0,1,0,1,1,1,
   1,0,0,0,0,0,0,0,1,0,0,1,0,1,0,0,
@@ -29,7 +29,7 @@ static const uint8_t wspr_sync[162] = {
   1,1,0,0,0,1,1,0,0,0
 };
 
-/* karakter -> index: '0'-'9' = 0-9, 'A'-'Z' = 10-35, ' ' = 36 */
+/* character -> index: '0'-'9' = 0-9, 'A'-'Z' = 10-35, ' ' = 36 */
 static int chidx(char c)
 {
   if (c >= '0' && c <= '9') return c - '0';
@@ -47,8 +47,8 @@ static int parity32(uint32_t x)
 bool wspr_encode(const char *callsign, const char *locator,
                  int dbm, uint8_t sym[162])
 {
-  /* --- hivojel normalizalas: a 3. karakter SZAMJEGY kell legyen;
-   * ha a 2. az, elore egy szokoz; jobbra szokozokkel 6-ra toltve --- */
+  /* --- callsign normalisation: the 3rd character MUST be a digit;
+   * if the 2nd is, prepend a space; right-padded with spaces to 6 --- */
   char cs[7];
   size_t len = strlen(callsign);
   if (len < 3 || len > 6) return false;
@@ -77,7 +77,7 @@ bool wspr_encode(const char *callsign, const char *locator,
   n_call = 27u * n_call + (uint32_t)(c4 - 10);
   n_call = 27u * n_call + (uint32_t)(c5 - 10);
 
-  /* --- lokator: 4 karakter, AA00..RR99 --- */
+  /* --- locator: 4 characters, AA00..RR99 --- */
   if (strlen(locator) != 4) return false;
   int L0 = locator[0] - 'A', L1 = locator[1] - 'A';
   int N2 = locator[2] - '0', N3 = locator[3] - '0';
@@ -86,20 +86,20 @@ bool wspr_encode(const char *callsign, const char *locator,
   uint32_t n_loc = (uint32_t)((179 - 10 * L0 - N2) * 180
                               + 10 * L1 + N3);
 
-  /* --- teljesitmeny: barmely 0..60 ervenyes szintre igazitva --- */
+  /* --- power: any 0..60 value, snapped to a valid level --- */
   if (dbm < 0 || dbm > 60) return false;
   static const int corr[10] = { 0, -1, 1, 0, -1, 2, 1, 0, -1, 1 };
   uint32_t n_dbm = (uint32_t)(dbm + corr[dbm % 10] + 64);
 
-  /* --- 50 bites uzenetszo --- */
+  /* --- 50-bit message word --- */
   uint64_t n = ((uint64_t)n_call << 22) | ((uint64_t)n_loc << 7)
              | (uint64_t)n_dbm;
 
-  /* --- konvolucios kodolas + interleaving egy menetben ---
-   * A 81 bites bemenet: az 50 bit MSB-tol, majd 31 zero-farok.
-   * A ket 32 bites shiftregiszter termeszetes csonkolasa megegyezik
-   * a polinom-maszkolassal. Az i-edik kimeneti bit a bit-reverz(byte)
-   * szerinti helyre kerul. */
+  /* --- convolutional coding + interleaving in one pass ---
+   * The 81-bit input: the 50 bits MSB-first, then a 31-bit zero tail.
+   * The natural truncation of the two 32-bit shift registers is
+   * equivalent to the polynomial masking. The i-th output bit goes to
+   * the position given by bit-reverse(byte). */
   uint8_t data[162];
   uint32_t r0 = 0, r1 = 0;
   int out_i = 0;

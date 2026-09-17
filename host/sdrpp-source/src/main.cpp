@@ -1,15 +1,15 @@
-// fg23_scan_source — SDR++ forras-modul a FG23/ESP32 SpyServerhez,
-// KET uzemmoddal:
-//   IQ   : hagyomanyos keskeny SpyServer-IQ (a demodulacio megy)
-//   SCAN : a szerver leptetett szelessavu spektrumsorokat kuld
-//          (MSG_TYPE_UINT8_FFT); a modul KOZVETLENUL a gui::waterfall-ba
-//          tolja oket. IQ ilyenkor nincs -> nincs hang, csak kep.
+// fg23_scan_source - SDR++ source module for the FG23/ESP32 SpyServer,
+// with TWO operating modes:
+//   IQ   : conventional narrowband SpyServer IQ (demodulation works)
+//   SCAN : the server sends stepped wideband spectrum lines
+//          (MSG_TYPE_UINT8_FFT); the module pushes them DIRECTLY into
+//          gui::waterfall. No IQ in this mode -> no audio, display only.
 //
-// Alap: source_modules/spyserver_source (Ryzerth). GPL-3.
+// Based on: source_modules/spyserver_source (Ryzerth). GPL-3.
 // HA7DCD / 2026-08.
 
 #ifndef NOMINMAX
-#define NOMINMAX   // windows.h min/max makroi ellen (MSVC)
+#define NOMINMAX   // guard against the windows.h min/max macros (MSVC)
 #endif
 #include <fg23_client.h>
 #include <imgui.h>
@@ -35,23 +35,23 @@ SDRPP_MOD_INFO{
     /* Max instances    */ 1
 };
 
-// ---- IQ formatumok (mint a gyariban) ----
+// ---- IQ formats (as in the stock module) ----
 const char* streamFormatStr = "UInt8\0Int16\0Float32\0";
 const SpyServerStreamFormat streamFormats[] = { SPYSERVER_STREAM_FORMAT_UINT8, SPYSERVER_STREAM_FORMAT_INT16, SPYSERVER_STREAM_FORMAT_FLOAT };
 const int streamFormatsBitCount[] = { 8, 16, 32 };
 
-// ---- SCAN-parameterek ----
-// A span-lista: ezt a szerver is ismeri (spy_fft.h), de a protokoll szerint
-// Hz-ben kuldjuk, tehat a szerver barmilyen erteket elfogadhat/kerekithet.
+// ---- SCAN parameters ----
+// The span list: the server also knows it (spy_fft.h), but per the protocol
+// it is sent in Hz, so the server may accept/round any value.
 const double scanSpans[] = { 2e6, 4e6, 8e6, 16e6, 32e6 };
 const char* scanSpansStr = "2 MHz\0" "4 MHz\0" "8 MHz\0" "16 MHz\0" "32 MHz\0";
 const int scanSpanCount = 5;
 
-const int scanNbins[] = { 320, 512, 640, 1000 };   // <= 1016 (egy SPECLINE-blokk)
+const int scanNbins[] = { 320, 512, 640, 1000 };   // <= 1016 (one SPECLINE block)
 const char* scanNbinsStr = "320\0" "512\0" "640\0" "1000\0";
 const int scanNbinCount = 4;
 
-const char* modeStr = "IQ (keskeny, hang)\0" "SCAN (szeles, csak kep)\0";
+const char* modeStr = "IQ (narrow, audio)\0" "SCAN (wide, display only)\0";
 enum { MODE_IQ = 0, MODE_SCAN = 1 };
 
 ConfigManager config;
@@ -98,24 +98,25 @@ public:
     bool isEnabled() { return enabled; }
 
 private:
-    // ================= WATERFALL-INJEKTALAS =================
-    // A halozati szalon hivodik. A waterfall nyers FFT-sora rawFFTSize
-    // hosszu (a Display menu "FFT size"-a, alapbol 65536); a nbin-es sort
-    // linearisan felhuzzuk erre a hosszra. Az SDR++ sajat FFT-je ilyenkor
-    // nem fut (nincs IQ), igy nem ir bele senki mas.
+    // ================= WATERFALL INJECTION =================
+    // Invoked on the network thread. The waterfall's raw FFT line is
+    // rawFFTSize long (the Display menu "FFT size", 65536 by default); the
+    // nbin-long line is stretched linearly to that length. The SDR++ built-in
+    // FFT does not run in this mode (no IQ), so nothing else writes to it.
     void onFFTLine(const fg23::FFTLine& L) {
         if (!running || mode != MODE_SCAN) { return; }
         int rawSize = rawFFTSize;
         if (rawSize <= 0) { return; }
 
-        // A szerver a sor kozepfrekvenciajat kuldi (100 kHz egyseg) a flags-ben.
-        // Atallas utan az elozo hangolashoz tartozo sorokat ELDOBJUK, kulonben a
-        // regi kozeppel mert sor az uj tengely ala kerulne (elcsuszott "torzo").
+        // The server sends the line's centre frequency (100 kHz units) in flags.
+        // After retuning, lines belonging to the previous tuning are DISCARDED;
+        // otherwise a line measured with the old centre would land under the new
+        // axis (a shifted ghost).
         if (L.flags != 0) {
             uint16_t want = (uint16_t)(((uint64_t)freq / 100000ull) & 0xFFFFull);
             if (L.flags != want) { staleLines++; return; }
         }
-        // Es a binszam is egyezzen a kerttel (nbin-valtas kozben).
+        // The bin count must also match the requested one (during an nbin change).
         if ((int)L.db.size() != scanNbins[scanNbinId]) { staleLines++; return; }
 
         float* buf = gui::waterfall.getFFTBuffer();
@@ -126,7 +127,7 @@ private:
             memcpy(buf, L.db.data(), nbin * sizeof(float));
         }
         else if (nbin > rawSize) {
-            // Tobb bin, mint pixel: max-decimalas (a csucsok ne vesszenek el)
+            // More bins than pixels: max decimation (so that peaks are not lost)
             for (int i = 0; i < rawSize; i++) {
                 int a = (int)((int64_t)i * nbin / rawSize);
                 int b = (int)((int64_t)(i + 1) * nbin / rawSize);
@@ -137,7 +138,7 @@ private:
             }
         }
         else {
-            // Kevesebb bin: linearis interpolacio
+            // Fewer bins: linear interpolation
             const float step = (float)(nbin - 1) / (float)(rawSize - 1);
             for (int i = 0; i < rawSize; i++) {
                 float x = i * step;
@@ -156,7 +157,7 @@ private:
         core::configManager.release();
     }
 
-    // ================= SOURCE HANDLEREK =================
+    // ================= SOURCE HANDLERS =================
     static void menuSelected(void* ctx) {
         auto* _this = (FG23ScanSourceModule*)ctx;
         core::setInputSampleRate(_this->effectiveSampleRate());
@@ -169,14 +170,14 @@ private:
         gui::mainWindow.playButtonLocked = false;
     }
 
-    // SCAN-modban a "mintavetel" = a span, hogy a waterfall tengelye kinyiljon.
+    // In SCAN mode the "sample rate" = the span, so that the waterfall axis widens.
     double effectiveSampleRate() {
         return (mode == MODE_SCAN) ? scanSpans[scanSpanId] : sampleRate;
     }
 
-    // SCAN-modban a vizeses dB-tartomanyat a floor/range-hez igazitjuk: az
-    // SDR++ alaperteke -70..0 dBFS, a mi abszolut dBm sorunk (-130..-30) az
-    // alatt lenne -> csak a legerosebb csucsok latszananak.
+    // In SCAN mode the waterfall dB range is aligned to floor/range: the SDR++
+    // default is -70..0 dBFS, and our absolute dBm line (-130..-30) would lie
+    // below it -> only the strongest peaks would be visible.
     void applyDisplayRange() {
         float lo = fftFloor + 5.0f;
         float hi = fftFloor + fftRange;
@@ -247,7 +248,7 @@ private:
         }
     }
 
-    // Modvaltas futas kozben: leallit, atallit, ujraindit.
+    // Mode change while running: stop, switch, restart.
     void switchMode(int newMode) {
         bool wasRunning = running;
         if (wasRunning) { stop(this); }
@@ -288,7 +289,7 @@ private:
             return;
         }
 
-        // ---- Mod ----
+        // ---- Mode ----
         SmGui::LeftLabel("Mode");
         SmGui::FillWidth();
         int m = _this->mode;
@@ -321,8 +322,8 @@ private:
                 config.acquire(); config.conf["fftRangeDb"] = _this->fftRange; config.release(true);
             }
             SmGui::Text("Status:"); SmGui::SameLine();
-            ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "SCAN  lines=%u  (eldobva %u)", _this->client->fftLinesRx, _this->staleLines);
-            SmGui::Text("(nincs hang scan-modban)");
+            ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "SCAN  lines=%u  (dropped %u)", _this->client->fftLinesRx, _this->staleLines);
+            SmGui::Text("(no audio in scan mode)");
         }
         else {
             if (_this->running) { style::beginDisabled(); }
@@ -359,7 +360,7 @@ private:
         }
     }
 
-    // ================= KAPCSOLODAS =================
+    // ================= CONNECTION =================
     std::string bwScaled(double bw) {
         char buf[64];
         if (bw >= 1e6) { sprintf(buf, "%.1lfMHz", bw / 1e6); }
@@ -412,7 +413,7 @@ private:
         }
     }
 
-    // ================= ALLAPOT =================
+    // ================= STATE =================
     std::string name;
     bool enabled = true;
     bool running = false;
@@ -434,7 +435,7 @@ private:
     float fftFloor = -130.0f;
     float fftRange = 100.0f;
     int rawFFTSize = 65536;
-    uint32_t staleLines = 0;   // eldobott (regi hangolasu / mas nbin) sorok
+    uint32_t staleLines = 0;   // dropped lines (old tuning / different nbin)
 
     dsp::stream<dsp::complex_t> stream;
     SourceManager::SourceHandler handler;

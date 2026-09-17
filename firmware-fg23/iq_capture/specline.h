@@ -1,26 +1,26 @@
 /* SPDX-License-Identifier: MIT
  *
- * specline.h — a szelessavu scan spektrumsoranak KOZOS blokkformatuma
+ * specline.h — SHARED block format of the wideband-scan spectrum line
  *   Copyright (c) 2026 Zoltan Doczi HA7DCD
  *
- * UGYANEZ A FAJL van a FG23 (Simplicity) es az ESP32 (PlatformIO) projektben.
- * Ha valtozik, MINDKETTOBEN cserelni kell.
+ * THE SAME FILE lives in both the FG23 (Simplicity) and the ESP32 (PlatformIO)
+ * project. If it changes, it must be replaced in BOTH.
  *
- * ELV: a SPECLINE egy 1040 bajtos blokk, PONTOSAN akkora es ugyanugy
- * keretezett (CS-keret, RDY, LDMA), mint az IQB2 I/Q-blokk. Igy az ESP32
- * SPI-slave DMA-ja, az ujrarendezo puffer es a RDY-kezfogas VALTOZATLANUL
- * mukodik — csak a magic mas, es a process() a magic alapjan agaztat.
+ * PRINCIPLE: a SPECLINE is a 1040-byte block of EXACTLY the same size and
+ * framing (CS frame, RDY, LDMA) as the IQB2 I/Q block. The ESP32 SPI-slave
+ * DMA, the reorder buffer and the RDY handshake therefore work UNCHANGED —
+ * only the magic differs, and process() branches on the magic.
  *
- * Fejlec (16 B, az iq_blk_hdr_t mezoi UGYANOTT, mas jelentessel):
+ * Header (16 B, the iq_blk_hdr_t fields at the SAME offsets, different meaning):
  *   magic     'S','P','C','1'  (0x31435053 LE)
- *   seq       blokk-sorszam (a spi_send_block irja, mint az IQ-nal)
- *   nbin      binek szama a payloadban (<= SPECLINE_MAX_BINS)
- *   flags     bit0 = utolso darab (chunk); bit8..15 = darab-index (most 0)
- *   f_center  a scan KOZEPFREKVENCIAJA Hz-ben
+ *   seq       block sequence number (written by spi_send_block, as for IQ)
+ *   nbin      number of bins in the payload (<= SPECLINE_MAX_BINS)
+ *   flags     bit0 = last chunk; bit8..15 = chunk index (currently 0)
+ *   f_center  CENTER FREQUENCY of the scan in Hz
  * Payload (1024 B):
- *   span_hz   u32   a scan teljes szelessege
- *   floor_dbm i16   a 0-as bin ertek dBm-ben (pl. -130)
- *   range_db  u16   a 255-os bin = floor + range (pl. 100)
+ *   span_hz   u32   total width of the scan
+ *   floor_dbm i16   value of bin 0 in dBm (e.g. -130)
+ *   range_db  u16   bin 255 = floor + range (e.g. 100)
  *   bins[SPECLINE_MAX_BINS] u8   dB = floor + v*range/255
  */
 
@@ -51,7 +51,7 @@ typedef struct __attribute__((packed)) {
   uint8_t  bins[SPECLINE_MAX_BINS];
 } specline_blk_t;
 
-/* Fordítási idejű ellenőrzés: a blokk pontosan akkora, mint az IQB2. */
+/* Compile-time check: the block is exactly the size of the IQB2 block. */
 typedef char specline_size_check[(sizeof(specline_blk_t) == SPECLINE_BLK_BYTES) ? 1 : -1];
 
 #endif /* SPECLINE_H */

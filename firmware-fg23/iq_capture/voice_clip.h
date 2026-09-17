@@ -1,8 +1,8 @@
 /* SPDX-License-Identifier: MIT
- * voice_clip.h — beagyazott hangminta az FM-teszthez
- * "This is a lovely day!" (flite slt, noi hang)
- * 8000 Hz, 8-bit elojeles PCM, 12320 minta (1.54 s)
- * Generalva: wav -> 3.4 kHz AA-szuro -> 8 kHz -> int8
+ * voice_clip.h - embedded speech sample for the NBFM TX test
+ * "This is a lovely day!" (flite, voice slt)
+ * 8000 Hz, 8-bit signed PCM, 12320 samples (1.54 s)
+ * Generated: wav -> 3.4 kHz anti-alias filter -> 8 kHz -> int8
  */
 #ifndef VOICE_CLIP_H
 #define VOICE_CLIP_H

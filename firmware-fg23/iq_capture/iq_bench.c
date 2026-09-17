@@ -1,104 +1,106 @@
 /* SPDX-License-Identifier: MIT
  *
- * iq_bench.c — FG23 folyamatos I/Q rata benchmark
- *   Copyright (c) 2026 Zoltan Doczi HA7DCD — MIT licenc
+ * iq_bench.c — FG23 continuous I/Q rate benchmark
+ *   Copyright (c) 2026 Zoltan Doczi HA7DCD — MIT license
  *
- * ================= MERESI ELV =================
+ * ================= MEASUREMENT PRINCIPLE =================
  *
- * A benchmark alatt SEMMI nem megy ki a UART-on. Ha kiirnank, a UART-ot
- * mernenk, nem a chipet. A mintak egy kis scratch-bufferbe mennek es ott
- * meg is halnak — csak szamlalunk.
+ * During the benchmark NOTHING is sent out on the UART. If we printed, we
+ * would be measuring the UART, not the chip. Samples go into a small
+ * scratch buffer and die there — we only count.
  *
- * Amit merunk:
- *   fs      — empirikusan: mintaszam / RAIL-ido. NEM az adatlapbol.
- *   OVR     — RAIL_EVENT_RX_FIFO_OVERFLOW szamlalo. Ez A plafon.
- *   peak    — mennyire telt meg a FIFO belepeskor. Ez a TARTALEK.
- *             A puszta "volt-e overrun" semmit nem mond arrol, hogy
- *             30%-on vagy 95%-on szaladsz.
- *   CPU%    — mennyit esz a capture ISR; a maradek a DSP-e.
+ * What is measured:
+ *   fs      — empirically: sample count / RAIL time. NOT from the datasheet.
+ *   OVR     — RAIL_EVENT_RX_FIFO_OVERFLOW counter. This is THE ceiling.
+ *   peak    — FIFO fill level on ISR entry. This is the HEADROOM.
+ *             A bare "was there an overrun" says nothing about whether
+ *             you are running at 30% or at 95%.
+ *   CPU%    — how much the capture ISR consumes; the rest is for the DSP.
  *
- * A CPU%-ot ugy merjuk, ahogy a SetFreqOffset benchmarknal: egy ismert
- * terhelo ciklus iteracioit szamoljuk radio nelkul (referencia), majd
- * capture kozben. A kulonbseg = elvett CPU.
+ * CPU% is measured as in the SetFreqOffset benchmark: iterations of a
+ * known load loop are counted without the radio (reference), then during
+ * capture. The difference = CPU taken.
  *
- * ================= AMI ELTER AZ app.c DRAIN-JETOL =================
+ * ================= HOW THIS DIFFERS FROM THE app.c DRAIN =================
  *
- * Az app.c "eldobo" aga esemenyenkent PONTOSAN egyszer olvas
- * THRESHOLD_BYTES-ot. Ha a mintarata akkora, hogy ket ISR belepes kozott
- * ennel tobb gyulik, a FIFO monoton telik es a tulcsordulas garantalt —
- * fuggetlenul attol, hogy a CPU birna-e. Az itteni drain URESIG olvas,
- * igy a valodi szilicium/CPU plafont meri, nem ezt a mesterseges korlatot.
+ * The app.c "discard" branch reads EXACTLY once THRESHOLD_BYTES per event.
+ * If the sample rate is such that more than that accumulates between two
+ * ISR entries, the FIFO fills monotonically and overflow is guaranteed —
+ * regardless of whether the CPU could keep up. The drain here reads UNTIL
+ * EMPTY, so it measures the real silicon/CPU ceiling, not that artificial
+ * limit.
  *
  * ================= FLOAT PRINTF =================
  *
- * Az app.c sehol nem hasznal %f-et — a Silabs projektek alapertelmezett
- * "tiny printf"-je nem tud lebegopontot kiirni. Ezert itt MINDEN kiiras
- * egesz szamokkal megy, kezi tizedessel. Ne tegyel bele %f-et.
+ * app.c uses %f nowhere — the default "tiny printf" of Silabs projects
+ * cannot print floating point. Therefore EVERY printout here uses
+ * integers with a manual decimal point. Do not add %f.
  */
 
 #include "iq_bench.h"
 #include <stdio.h>
 #include <string.h>
 
-/* ---------------- konfiguracio ---------------- */
+/* ---------------- configuration ---------------- */
 
-/* Threshold-sweep lepesek. A threshold az ALMOST_FULL kivaltasi szintje:
- * kicsi -> suru ISR (nagy CPU), nagy -> kevesebb tartalek az overrunig.
- * Az app.c jelenlegi erteke 256 (64 minta) — az a kozepso pont. */
-/* A LEGBIZTONSAGOSABB ponttal kezdunk (ritka ISR) es haladunk a suru fele.
- * Igy ha egy alacsony threshold telitodest okoz, a fenti pontok adatai
- * mar megvannak. */
+/* Threshold sweep steps. The threshold is the ALMOST_FULL trigger level:
+ * small -> frequent ISR (high CPU), large -> less headroom before overrun.
+ * The current app.c value is 256 (64 samples) — that is the middle point. */
+/* Start with the SAFEST point (rare ISR) and progress towards the dense
+ * end. This way, if a low threshold causes saturation, the data of the
+ * higher points is already available. */
 static const uint16_t bench_thresholds[] = { 2048, 1024, 512, 256, 128 };
 #define BENCH_NUM_THR (sizeof(bench_thresholds)/sizeof(bench_thresholds[0]))
 
-/* Scratch: ide olvasunk es itt haljon meg. Nem kell nagy — koronkent
- * ujraolvasunk, amig a FIFO ki nem urul. */
+/* Scratch: samples are read here and die here. Need not be large — we
+ * read repeatedly in rounds until the FIFO is empty. */
 #define BENCH_SCRATCH 2048u
 
-/* Meddig urritsuk a FIFO-t? NEM nullaig: 400 ksps-en 4 bajt 10 us-onkent
- * erkezik, egy ciklus-iteracio meg ~2 us — az `avail >= 4` feltetel soha
- * nem lenne hamis (ez volt az elso beragadas). 128 bajt = 320 us utanpotlas,
- * bosegesen a ciklusido folott, tehat garantaltan kilep. */
+/* How far to drain the FIFO? NOT to zero: at 400 ksps 4 bytes arrive every
+ * 10 us, while one loop iteration is ~2 us — the `avail >= 4` condition
+ * would never become false (this was the first lock-up). 128 bytes = 320 us
+ * of refill, comfortably above the loop time, so it is guaranteed to exit. */
 #define BENCH_MIN_DRAIN 128u
 
-/* ---------------- allapot ---------------- */
+/* ---------------- state ---------------- */
 
 static volatile bool     b_running   = false;
 static volatile uint32_t b_bytes     = 0;
 static volatile uint32_t b_events    = 0;
 static volatile uint32_t b_overflows = 0;
 static volatile uint16_t b_peak      = 0;
-static volatile uint16_t b_threshold = 256;   /* az aktualis meresi pont */
+static volatile uint16_t b_threshold = 256;   /* the current measurement point */
 
-/* Ha igaz, a drain NULL celcimmel hivja a RAIL_ReadRxFifo-t: elvileg
- * "eldobas masolas nelkul", azaz csak az olvasomutato lep. A BUFC
- * ugyanis RAM-ba ir (datasheet 3.2.6: zero-copy), tehat a mintak mar
- * a helyukon vannak — a masolas felesleges munka. */
+/* If true, the drain calls RAIL_ReadRxFifo with a NULL destination: in
+ * theory "discard without copying", i.e. only the read pointer advances.
+ * The BUFC writes into RAM (datasheet 3.2.6: zero-copy), so the samples
+ * are already in place — copying is wasted work. */
 static volatile bool b_zerocopy = false;
 
-/* A meres hataridejet MAGA AZ ISR orzi. Ha a mintarata olyan magas, hogy
- * a capture ISR a CPU-t 100%-ban elviszi, a fociklus SOHA nem jut elore —
- * es ha a leallas feltetele ott lenne, a rendszer orokre beragadna. Ezert
- * az ISR minden belepeskor megnezi, lejart-e az ido, es o allitja le a
- * radiot. Innen a fociklus magatol feleled. */
+/* The measurement deadline is guarded BY THE ISR ITSELF. If the sample
+ * rate is so high that the capture ISR takes 100% of the CPU, the main
+ * loop NEVER progresses — and if the stop condition lived there, the
+ * system would lock up forever. So the ISR checks on every entry whether
+ * time is up, and it stops the radio. From there the main loop revives
+ * on its own. */
 static volatile RAIL_Time_t b_deadline = 0;
 static volatile bool        b_starved  = false;
 
 static uint32_t b_scratch_words[BENCH_SCRATCH / 4];
 #define b_scratch ((uint8_t *)b_scratch_words)
 
-/* Terhelo ciklus referenciaja, iteracio/s radio nelkul. */
+/* Load loop reference, iterations/s without the radio. */
 static uint32_t b_base_iters_per_s = 0;
 
-/* Optimalizacio ellen. */
+/* Against optimisation. */
 static volatile uint32_t b_sink = 0;
 
-/* ---------------- terhelo ciklus ---------------- */
+/* ---------------- load loop ---------------- */
 
-/* Szandekosan egyszeru egesz MAC-lanc. Nem a valodi blocker-FFT-t
- * utanozza, hanem egy STABIL, ismetelheto merce, amivel a capture ISR
- * CPU-lopasa megfoghato. Egeszekkel megy, hogy az FPU jelenlete vagy
- * hianya ne torzitsa a merest. */
+/* Deliberately simple integer MAC chain. It does not imitate the real
+ * blocker FFT; it is a STABLE, repeatable yardstick with which the CPU
+ * stolen by the capture ISR can be measured. Integer-only, so that the
+ * presence or absence of an FPU does not distort the measurement. */
 static uint32_t bench_load_spin(uint32_t microseconds)
 {
   RAIL_Time_t t0 = RAIL_GetTime();
@@ -106,7 +108,7 @@ static uint32_t bench_load_spin(uint32_t microseconds)
   uint32_t a = 1103515245u, c = 12345u, x = 1u;
 
   while ((RAIL_GetTime() - t0) < microseconds) {
-    /* 16 muvelet / iteracio, hogy a RAIL_GetTime() ne dominaljon */
+    /* 16 operations / iteration, so that RAIL_GetTime() does not dominate */
     x = x * a + c;  x = x * a + c;  x = x * a + c;  x = x * a + c;
     x = x * a + c;  x = x * a + c;  x = x * a + c;  x = x * a + c;
     x = x * a + c;  x = x * a + c;  x = x * a + c;  x = x * a + c;
@@ -117,7 +119,7 @@ static uint32_t bench_load_spin(uint32_t microseconds)
   return iters;
 }
 
-/* ---------------- RAIL esemeny ---------------- */
+/* ---------------- RAIL event ---------------- */
 
 bool iq_bench_active(void) { return b_running; }
 
@@ -125,42 +127,42 @@ bool iq_bench_on_event(RAIL_Handle_t rail, RAIL_Events_t events)
 {
   if (!b_running) return false;
 
-  /* Lejart-e a meresi ablak? Ha igen, LE A RADIOVAL — kulonben egy
-   * telitett ISR-nel a fociklus soha nem venne eszre a hatarido vegét. */
+  /* Has the measurement window expired? If so, RADIO OFF — otherwise
+   * with a saturated ISR the main loop would never notice the deadline. */
   if ((int32_t)(RAIL_GetTime() - b_deadline) >= 0) {
-    /* NEM RAIL_Idle: azt callback-kontextusbol hivni nem biztonsagos, es
-     * a thr=128-as pontnal pont ezen ragadt be. Helyette leMASKOLJUK a
-     * FIFO-esemenyeket — nincs tobb belepes, a fociklus feleled, es a
-     * rendes leallitast o vegzi el fo-kontextusban. */
+    /* NOT RAIL_Idle: calling it from callback context is unsafe, and at
+     * the thr=128 point this is exactly where it locked up. Instead the
+     * FIFO events are MASKED — no more entries, the main loop revives and
+     * performs the proper shutdown in main context. */
     RAIL_ConfigEvents(rail,
                       RAIL_EVENT_RX_FIFO_ALMOST_FULL
                       | RAIL_EVENT_RX_FIFO_OVERFLOW,
                       RAIL_EVENTS_NONE);
     b_running = false;
-    b_starved = true;      /* az ISR zarta le, nem a fociklus */
+    b_starved = true;      /* closed by the ISR, not by the main loop */
     return true;
   }
 
   if (events & RAIL_EVENT_RX_FIFO_OVERFLOW) {
     ++b_overflows;
-    /* Az overflow utan a FIFO tartalma ertelmetlen — uritsuk es menjunk
-     * tovabb. Nem allunk le: azt akarjuk tudni, MENNYI overrun van,
-     * nem csak azt, hogy volt-e. */
+    /* After an overflow the FIFO contents are meaningless — flush and
+     * continue. We do not stop: we want to know HOW MANY overruns there
+     * are, not just whether there was one. */
     RAIL_ResetFifo(rail, false, true);
   }
 
   if (events & RAIL_EVENT_RX_FIFO_ALMOST_FULL) {
-    /* ELOSZOR a kitoltottseg — ez a tartalek-metrika. Ha elobb
-     * olvasnank, mar nem latnank, milyen melyen volt a FIFO. */
+    /* Fill level FIRST — this is the headroom metric. If we read first,
+     * we would no longer see how deep the FIFO was. */
     uint16_t avail = RAIL_GetRxFifoBytesAvailable(rail);
     if (avail > b_peak) b_peak = avail;
 
     ++b_events;
 
-    /* A threshold ALA urritunk, nem nullara — es kemeny iteracio-
-     * korlattal. Egy `while (avail >= 4)` ciklus itt VEGTELEN lenne:
-     * 160 ksps-en 4 bajt 6 us-onkent erkezik, tehat mire kiolvassuk es
-     * ujra megkerdezzuk, mar megint van benne. Az ISR sose lepne ki. */
+    /* Drain BELOW the threshold, not to zero — and with a hard iteration
+     * limit. A `while (avail >= 4)` loop would be INFINITE here: at
+     * 160 ksps 4 bytes arrive every 6 us, so by the time we read and
+     * query again, there is data again. The ISR would never exit. */
     uint8_t guard = 32u;              /* 32 * 256 B = 8 KiB > FIFO */
     while (avail >= BENCH_MIN_DRAIN && guard--) {
       uint16_t chunk = (avail > BENCH_SCRATCH) ? BENCH_SCRATCH : avail;
@@ -175,10 +177,10 @@ bool iq_bench_on_event(RAIL_Handle_t rail, RAIL_Events_t events)
     }
   }
 
-  return true;   /* az app.c capture-aga maradjon ki */
+  return true;   /* the app.c capture branch must be skipped */
 }
 
-/* ---------------- egy meres ---------------- */
+/* ---------------- one measurement ---------------- */
 
 typedef struct {
   uint16_t threshold;
@@ -188,8 +190,8 @@ typedef struct {
   uint32_t overflows;
   uint16_t peak;
   uint32_t fs_hz;
-  uint32_t fill_permille;   /* peak / 4096, ezrelekben */
-  uint32_t cpu_permille;    /* elvett CPU, ezrelekben  */
+  uint32_t fill_permille;   /* peak / 4096, in per mille */
+  uint32_t cpu_permille;    /* CPU taken, in per mille  */
   uint32_t ev_per_s;
 } bench_res_t;
 
@@ -220,16 +222,16 @@ static void bench_one(RAIL_Handle_t rail,
 
   RAIL_Time_t t1 = RAIL_GetTime();
 
-  /* SORREND! Eloszor a radiot allitjuk le, es CSAK utana adjuk vissza a
-   * vezerlest az app.c-nek. Forditva versenyhelyzet van: amint b_running
-   * hamis, az esemenyek az app.c dran-agara mennek, ami `avail >= 256`
-   * feltetellel dolgozik — ha a meresi kuszob ennel kisebb (128), soha
-   * nem lep be, nem urit, es az esemeny vegtelenul ujra elsul. A
-   * RAIL_Idle fokontextusban var, tehat sose fejezodik be. Ez volt a
-   * thr=128-as befagyas. */
+  /* ORDER MATTERS! Stop the radio first, and ONLY then hand control back
+   * to app.c. The other way round there is a race: as soon as b_running
+   * is false, events go to the app.c drain branch, which works with an
+   * `avail >= 256` condition — if the measurement threshold is lower
+   * (128), it never enters, never drains, and the event fires again
+   * endlessly. RAIL_Idle waits in main context, so it never completes.
+   * This was the thr=128 freeze. */
   RAIL_Idle(rail, RAIL_IDLE_ABORT, true);
   b_running = false;
-  /* Ha az ISR maszkolta le magat (telitodes), itt fegyverezzuk ujra. */
+  /* If the ISR masked itself (saturation), re-arm here. */
   RAIL_ConfigEvents(rail, RAIL_EVENTS_ALL,
                     RAIL_EVENT_RX_FIFO_ALMOST_FULL
                     | RAIL_EVENT_RX_FIFO_OVERFLOW);
@@ -240,13 +242,13 @@ static void bench_one(RAIL_Handle_t rail,
   r->overflows   = b_overflows;
   r->peak        = b_peak;
 
-  /* fs: 4 bajt = 1 komplex minta.
-   * A RAIL-ido a HFXO-bol (39 MHz) szarmazik — ugyanabbol az
-   * orajel-tartomanybol, mint a mintaveteli ora. Amit itt merunk, az
-   * tehat a DEKIMACIOS ARANY (fs = 39 MHz / N), nem ket fuggetlen ora
-   * osszehasonlitasa. Ezert determinisztikus es ismetelheto. */
+  /* fs: 4 bytes = 1 complex sample.
+   * RAIL time is derived from the HFXO (39 MHz) — the same clock domain
+   * as the sampling clock. What is measured here is therefore the
+   * DECIMATION RATIO (fs = 39 MHz / N), not a comparison of two
+   * independent clocks. Hence it is deterministic and repeatable. */
   if (r->duration_us > 0u) {
-    /* (bytes/4) * 1e6 / us  —  64 biten, hogy ne csorduljon tul */
+    /* (bytes/4) * 1e6 / us  —  in 64 bits, so it does not overflow */
     uint64_t num = (uint64_t)(r->bytes / 4u) * 1000000ull;
     r->fs_hz    = (uint32_t)(num / r->duration_us);
     r->ev_per_s = (uint32_t)(((uint64_t)r->events * 1000000ull)
@@ -272,29 +274,29 @@ void iq_bench_sweep(RAIL_Handle_t rail,
 {
   bench_res_t r;
 
-  /* CPU referencia: radio kikapcsolva */
+  /* CPU reference: radio off */
   RAIL_Idle(rail, RAIL_IDLE_ABORT, true);
-  printf("# CPU referencia (radio KI, 2 s)...\r\n");
-  (void)bench_load_spin(200000u);              /* bemelegites */
+  printf("# CPU reference (radio OFF, 2 s)...\r\n");
+  (void)bench_load_spin(200000u);              /* warm-up */
   b_base_iters_per_s = bench_load_spin(2000000u) / 2u;
-  printf("# referencia: %lu iter/s\r\n",
+  printf("# reference: %lu iter/s\r\n",
          (unsigned long)b_base_iters_per_s);
 
   printf("#\r\n");
   printf("# ===== FG23 I/Q sustained-rate benchmark =====\r\n");
-  printf("# %lu s/pont, csatorna %u, FIFO 4096 B\r\n",
+  printf("# %lu s/point, channel %u, FIFO 4096 B\r\n",
          (unsigned long)seconds, (unsigned)channel);
   printf("#\r\n");
-  printf("# minden pont %lu mp-ig NEMA (a UART zavarna a merest)\r\n",
+  printf("# each point is SILENT for %lu s (the UART would disturb the measurement)\r\n",
          (unsigned long)seconds);
   printf("# ---------------------------------------------------\r\n");
 
   for (unsigned k = 0; k < BENCH_NUM_THR; k++) {
-    /* Haladasjelzes: a meres alatt SEMMI nem mehet ki a UART-ra (kulonben
-     * a UART-ot mernenk), ezert a pont ELOTT szolunk, hogy ne nezzen ki
-     * fagyasnak. A '.' sorvege nelkul megy, igy a sor vegen jon a mert
-     * adat ugyanabba a sorba. */
-    printf("  [%u/%u] thr=%u, %lu mp ... ",
+    /* Progress indication: during the measurement NOTHING may go out on
+     * the UART (otherwise we would measure the UART), so we announce the
+     * point BEFORE it, so it does not look like a freeze. The '.' goes
+     * without a line end, so the measured data lands on the same line. */
+    printf("  [%u/%u] thr=%u, %lu s ... ",
            k + 1u, (unsigned)BENCH_NUM_THR,
            (unsigned)bench_thresholds[k], (unsigned long)seconds);
 
@@ -312,34 +314,34 @@ void iq_bench_sweep(RAIL_Handle_t rail,
            (unsigned long)(r.cpu_permille / 10u),
            (unsigned long)(r.cpu_permille % 10u),
            (r.overflows > 0u) ? "  <-- OVERRUN"
-                              : (b_starved ? "  <-- CPU TELITVE" : ""));
+                              : (b_starved ? "  <-- CPU SATURATED" : ""));
   }
 
   printf("# ---------------------------------------------------\r\n");
-  printf("#  OVR>0      -> ez a pont NEM tarthato\r\n");
-  printf("#  fill>70%%   -> hatarhelyzet, jitterre erzekeny\r\n");
-  printf("#  fs         -> EZT ird az SDR++ sample rate mezojebe\r\n");
-  printf("#  CPU%%       -> ennyit esz a capture; a tobbi a DSP-e\r\n");
+  printf("#  OVR>0      -> this point is NOT sustainable\r\n");
+  printf("#  fill>70%%   -> marginal, sensitive to jitter\r\n");
+  printf("#  fs         -> enter THIS into the SDR++ sample rate field\r\n");
+  printf("#  CPU%%       -> consumed by the capture; the rest is for the DSP\r\n");
 
-  /* Vissza az app.c allapotaba, hogy a 'c' capture ugy mukodjon,
-   * ahogy eddig. */
+  /* Back to the app.c state, so that the 'c' capture works as before. */
   RAIL_SetRxFifoThreshold(rail, restore_thresh);
   RAIL_ResetFifo(rail, false, true);
   RAIL_StartRx(rail, channel, NULL);
-  printf("# threshold visszaallitva %u-ra, RX ujraindult\r\n",
+  printf("# threshold restored to %u, RX restarted\r\n",
          (unsigned)restore_thresh);
 }
 
 
-/* ================= NULL-olvasas proba + osszehasonlitas =================
+/* ================= NULL-read trial + comparison =================
  *
- * 1. lepes — PROBA (veszelytelen): egyetlen NULL-os olvasas, elotte-utana
- *    kiolvasott FIFO-szinttel. Ha a RAIL megis MASOLNA a NULL-ra, az
- *    hardfault lenne — ezert csak EGY hivas, 64 bajtra, es utana rogton
- *    ellenorzunk. Ha a board tullep rajta es kiirja a sort, az ut nyitva.
+ * Step 1 — TRIAL (harmless): a single NULL read, with the FIFO level read
+ *    before and after. If RAIL DID copy to NULL, that would be a hard
+ *    fault — hence only ONE call, for 64 bytes, checked immediately
+ *    afterwards. If the board gets past it and prints the line, the path
+ *    is open.
  *
- * 2. lepes — MERES: ugyanaz a threshold ket futasban, masolassal es
- *    anelkul. A CPU% kulonbsege maga a valasz.
+ * Step 2 — MEASUREMENT: the same threshold in two runs, with and without
+ *    copying. The difference in CPU% is the answer itself.
  */
 
 void iq_bench_zerocopy_test(RAIL_Handle_t rail,
@@ -347,11 +349,11 @@ void iq_bench_zerocopy_test(RAIL_Handle_t rail,
                             uint32_t seconds,
                             uint16_t restore_thresh)
 {
-  printf("\r\n# ===== zero-copy (NULL) teszt =====\r\n");
+  printf("\r\n# ===== zero-copy (NULL) test =====\r\n");
 
-  /* ---------- 1. PROBA ---------- */
+  /* ---------- 1. TRIAL ---------- */
   RAIL_Idle(rail, RAIL_IDLE_ABORT, true);
-  /* Esemenyek KI: hagyjuk a FIFO-t magatol megtelni, ne dranelje senki. */
+  /* Events OFF: let the FIFO fill up by itself, nobody drains it. */
   RAIL_ConfigEvents(rail,
                     RAIL_EVENT_RX_FIFO_ALMOST_FULL
                     | RAIL_EVENT_RX_FIFO_OVERFLOW,
@@ -359,32 +361,32 @@ void iq_bench_zerocopy_test(RAIL_Handle_t rail,
   RAIL_ResetFifo(rail, false, true);
   RAIL_StartRx(rail, channel, NULL);
 
-  /* 5 ms: 400 ksps-en boven megtelik a 4096 bajt (2.56 ms) */
+  /* 5 ms: at 400 ksps the 4096 bytes fill up easily (2.56 ms) */
   RAIL_Time_t t = RAIL_GetTime() + 5000u;
   while ((int32_t)(RAIL_GetTime() - t) < 0) { }
 
-  /* A RADIOT LEALLITJUK a meres elott! Kulonben kozben tolt: 928 ksps-en
-   * 3.7 MB/s, tehat a ket olvasas kozotti par mikroszekundum alatt is
-   * beesik 8-10 bajt, es a mutato-lepes latszolag kevesebbnek tunik.
-   * Ez volt az elso, teves "NEM tamogatott" eredmeny oka. */
+  /* STOP THE RADIO before the measurement! Otherwise it keeps filling:
+   * at 928 ksps that is 3.7 MB/s, so even in the few microseconds between
+   * the two reads 8-10 bytes arrive, and the pointer step appears smaller.
+   * This was the cause of the first, false "NOT supported" result. */
   RAIL_Idle(rail, RAIL_IDLE_ABORT, true);
 
   uint16_t avail0 = RAIL_GetRxFifoBytesAvailable(rail);
-  printf("#  proba: elotte avail=%u (radio megallitva)\r\n",
+  printf("#  trial: before avail=%u (radio stopped)\r\n",
          (unsigned)avail0);
 
-  uint16_t got = RAIL_ReadRxFifo(rail, NULL, 64u);   /* <-- A KERDES */
+  uint16_t got = RAIL_ReadRxFifo(rail, NULL, 64u);   /* <-- THE QUESTION */
 
   uint16_t avail1 = RAIL_GetRxFifoBytesAvailable(rail);
 
   uint16_t moved = (avail0 > avail1) ? (uint16_t)(avail0 - avail1) : 0u;
-  printf("#  proba: visszaadott=%u  utana avail=%u  -> a mutato %u bajtot lepett\r\n",
+  printf("#  trial: returned=%u  after avail=%u  -> the pointer advanced %u bytes\r\n",
          (unsigned)got, (unsigned)avail1, (unsigned)moved);
 
-  /* Allo radional ennek pontosnak kell lennie. */
+  /* With the radio stopped this must be exact. */
   bool ok = (got == 64u) && (moved == 64u);
   if (!ok) {
-    printf("#  -> NEM tamogatott (a mutato nem lepett) — marad a masolas\r\n");
+    printf("#  -> NOT supported (the pointer did not advance) — copying stays\r\n");
     RAIL_ConfigEvents(rail, RAIL_EVENTS_ALL,
                       RAIL_EVENT_RX_FIFO_ALMOST_FULL
                       | RAIL_EVENT_RX_FIFO_OVERFLOW);
@@ -393,27 +395,27 @@ void iq_bench_zerocopy_test(RAIL_Handle_t rail,
     RAIL_StartRx(rail, channel, NULL);
     return;
   }
-  printf("#  -> MUKODIK: a mutato masolas nelkul lepett\r\n#\r\n");
+  printf("#  -> WORKS: the pointer advanced without copying\r\n#\r\n");
 
   RAIL_ConfigEvents(rail, RAIL_EVENTS_ALL,
                     RAIL_EVENT_RX_FIFO_ALMOST_FULL
                     | RAIL_EVENT_RX_FIFO_OVERFLOW);
 
-  /* ---------- 2. MERES ---------- */
+  /* ---------- 2. MEASUREMENT ---------- */
   if (b_base_iters_per_s == 0u) {
-    printf("# CPU referencia (radio KI, 2 s)...\r\n");
+    printf("# CPU reference (radio OFF, 2 s)...\r\n");
     (void)bench_load_spin(200000u);
     b_base_iters_per_s = bench_load_spin(2000000u) / 2u;
-    printf("# referencia: %lu iter/s\r\n", (unsigned long)b_base_iters_per_s);
+    printf("# reference: %lu iter/s\r\n", (unsigned long)b_base_iters_per_s);
   }
 
   bench_res_t r;
-  const uint16_t thr = 1024u;          /* a valasztott munkapont */
+  const uint16_t thr = 1024u;          /* the chosen operating point */
 
   for (int pass = 0; pass < 2; pass++) {
     b_zerocopy = (pass == 1);
-    printf("  %-12s thr=%u, %lu mp ... ",
-           b_zerocopy ? "NULL (zero)" : "masolassal",
+    printf("  %-12s thr=%u, %lu s ... ",
+           b_zerocopy ? "NULL (zero)" : "with copy",
            (unsigned)thr, (unsigned long)seconds);
 
     bench_one(rail, channel, thr, seconds, &r);
@@ -431,5 +433,5 @@ void iq_bench_zerocopy_test(RAIL_Handle_t rail,
   RAIL_SetRxFifoThreshold(rail, restore_thresh);
   RAIL_ResetFifo(rail, false, true);
   RAIL_StartRx(rail, channel, NULL);
-  printf("# kesz — a ket CPU%% kulonbsege a masolas ara\r\n");
+  printf("# done — the difference of the two CPU%% values is the cost of copying\r\n");
 }

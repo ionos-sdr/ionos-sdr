@@ -1,21 +1,22 @@
 /* SPDX-License-Identifier: MIT
  *
- * cmdlink.h — masodik parancsbemenet a FG23-on (ESP32 -> FG23)
+ * cmdlink.h — second command input on the FG23 (ESP32 -> FG23)
  *   Copyright (c) 2026 Zoltan Doczi HA7DCD
  *
- * MIRE VALO: amikor a telefonrol (SDR++ Android, rtl_tcp) atteker a
- * frekvencian, az ESP32 egy "F433775" sort kuld ide, es a FG23 athangol.
- * Enelkul a lanc egyiranyu: a telefon lat, de nem tud vezerelni.
+ * PURPOSE: when the user tunes from the phone (SDR++ Android, rtl_tcp),
+ * the ESP32 sends an "F433775" line here and the FG23 retunes. Without
+ * this the chain is one-way: the phone can see but cannot control.
  *
- * EGY DROT: ESP32 GPIO4 (TX)  ->  FG23 PA06 = EXP 11 (RX). Kozos GND mar
- * van. Visszairany nem kell — a FG23 a VCOM-on beszel.
+ * ONE WIRE: ESP32 GPIO4 (TX)  ->  FG23 PA06 = EXP 11 (RX). Common GND is
+ * already present. No return path is needed — the FG23 talks on VCOM.
  *
- * A bejovo sorokat UGYANARRA a handle_line()-ra adjuk, ami a terminalt is
- * kiszolgalja, tehat MINDEN parancs elerheto a telefonrol is, nem csak a
- * hangolas. Egy parser, egy viselkedes — nem lehet ket kulon igazsag.
+ * Incoming lines go to the SAME handle_line() that serves the terminal, so
+ * EVERY command is available from the phone as well, not just tuning. One
+ * parser, one behaviour — there cannot be two separate truths.
  *
- * FIGYELEM: ez a modul MEG NINCS HARDVEREN LEMERVE. A vonal bekotese es a
- * cmdlink_poll() bekapcsolasa elott a lanc tokeletesen mukodik nelkule is.
+ * NOTE: this module has NOT YET BEEN VERIFIED ON HARDWARE. Until the line
+ * is wired and cmdlink_poll() is enabled, the chain works perfectly
+ * without it.
  */
 
 #ifndef CMDLINK_H
@@ -24,22 +25,22 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-/* A parancs-feldolgozo, amit a beerkezo teljes sorra hivunk.
- * Az app.c-ben ez a handle_line(). */
+/* Command handler called with each complete incoming line.
+ * In app.c this is handle_line(). */
 typedef void (*cmdlink_line_fn)(const char *line);
 
-/* Inicializalas. app_init()-bol, a GPIO ora bekapcsolasa utan. */
+/* Initialisation. From app_init(), after the GPIO clock is enabled. */
 void cmdlink_init(cmdlink_line_fn on_line);
 
-/* A fo ciklusbol. Nem blokkol: legfeljebb annyi karaktert olvas, amennyi
- * epp a FIFO-ban van. Visszaad: true, ha egy TELJES sort feldolgozott.
+/* From the main loop. Non-blocking: reads at most as many characters as
+ * are currently in the FIFO. Returns true if a COMPLETE line was processed.
  *
- * FONTOS: a stream futasa alatt is szabad hivni — a hangolas maga allitja
- * le es inditja ujra a streamet, ha kell. */
+ * IMPORTANT: may also be called while the stream is running — tuning
+ * itself stops and restarts the stream when needed. */
 bool cmdlink_poll(void);
 
-/* Hany sort kaptunk eddig, es hany karakter veszett el keret-/paritashiba
- * miatt. Diagnosztikahoz ('s' parancs). */
+/* Number of lines received so far, and number of characters lost to
+ * framing/parity errors. For diagnostics ('s' command). */
 void cmdlink_stats(uint32_t *lines, uint32_t *errors);
 
 #endif /* CMDLINK_H */

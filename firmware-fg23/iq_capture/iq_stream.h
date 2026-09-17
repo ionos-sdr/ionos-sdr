@@ -1,24 +1,26 @@
 /* SPDX-License-Identifier: MIT
  *
- * iq_stream.h — folyamatos, decimalt I/Q stream SPI-n az ESP32-S3-nak
- *   Copyright (c) 2026 Zoltan Doczi HA7DCD — MIT licenc
+ * iq_stream.h — continuous, decimated I/Q stream over SPI to the ESP32-S3
+ *   Copyright (c) 2026 Zoltan Doczi HA7DCD — MIT license
  *
- * ELV (a 2026-07-31-i meresek alapjan):
- *   - A BUFC RAM-ba ir (datasheet 3.2.6, zero-copy), ezert a mintakat
- *     HELYBEN olvassuk a RAIL RX FIFO-jabol, es csak a RAIL olvaso-
- *     mutatojat leptetjuk RAIL_ReadRxFifo(rail, NULL, n)-nel. Igy nincs
- *     masolas: 1 Msps-en 74.7% helyett 11.3% CPU.
- *   - Ketfokozatu CIC decimator viszi le a ratat.
- *   - Egypolusu DC-notch a kimeneti ratan: a vevo DC-offszetje kulonben a
- *     decimalt sav kozepen ul, es unity gainnel racsra viszi a lancot.
- *   - A kimenet SPI-n megy, BLOKKOKBAN, sajat fejleccel es SORSZAMMAL.
+ * PRINCIPLE (based on the 2026-07-31 measurements):
+ *   - The BUFC writes into RAM (datasheet 3.2.6, zero-copy), so samples
+ *     are read IN PLACE from the RAIL RX FIFO, and only the RAIL read
+ *     pointer is advanced with RAIL_ReadRxFifo(rail, NULL, n). No copy:
+ *     11.3% CPU instead of 74.7% at 1 Msps.
+ *   - A two-stage CIC decimator brings the rate down.
+ *   - Single-pole DC notch at the output rate: otherwise the receiver's
+ *     DC offset sits in the middle of the decimated band and, at unity
+ *     gain, drives the chain into clipping.
+ *   - The output goes over SPI in BLOCKS, with its own header and
+ *     SEQUENCE NUMBER.
  *
- * MIERT NEM I2S: a FG23 USART-janak CS-e nem tud valodi word selectet
- * adni — mert kitoltes 33.6% az 50% helyett, mind a nyolc keretezesi
- * kombinacioban. Reszletek az iq_stream.c fejleceben.
+ * WHY NOT I2S: the CS of the FG23 USART cannot produce a true word
+ * select — measured duty cycle 33.6% instead of 50%, in all eight framing
+ * combinations. Details in the iq_stream.c header.
  *
- * KIMENETI FORMATUM: 16 bajt fejlec + 256 komplex minta, interleaved
- * int16 little-endian, I ELOL. A levagas +-32767, SOHA nem -32768.
+ * OUTPUT FORMAT: 16-byte header + 256 complex samples, interleaved int16
+ * little-endian, I FIRST. Clipping is at +-32767, NEVER -32768.
  */
 
 #ifndef IQ_STREAM_H
@@ -28,65 +30,66 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-/* Egyszeri beallitas app_init()-bol: a RAIL RX FIFO bufferet adjuk at,
- * hogy helyben tudjunk belole olvasni. */
+/* One-time setup from app_init(): the RAIL RX FIFO buffer is passed so
+ * that it can be read in place. */
 void iq_stream_init(const uint8_t *fifo_base, uint16_t fifo_bytes);
 
-/* Fut-e eppen a stream. */
+/* Whether the stream is currently running. */
 bool iq_stream_active(void);
 
-/* A synth finom-offszete tickben (1 tick = 4.6492 Hz a FG23-on).
+/* Fine offset of the synth in ticks (1 tick = 4.6492 Hz on the FG23).
  *
- * MIERT KELL EZ A MODULNAK: a modul tobb helyen is ujrainditja az RX-et
- * (start, stop, es FIFO-overflow utani helyreallitas), a RAIL_StartRx
- * pedig NEM orzi meg a frekvencia-offszetet. Enelkul a stream inditasa
- * eldobta a kristalykalibraciot ES az 'F' paranccsal beallitott hangolast
- * — a doboz csendben ~1.9 kHz-cel melle vett, es az 'F' hatastalan volt
- * futo stream mellett. Az app.c minden hangolasnal hivja. */
+ * WHY THIS MODULE NEEDS IT: the module restarts RX in several places
+ * (start, stop, and recovery after a FIFO overflow), and RAIL_StartRx does
+ * NOT preserve the frequency offset. Without this, starting the stream
+ * discarded the crystal calibration AND the tuning set with the 'F'
+ * command — the unit silently received ~1.9 kHz off, and 'F' had no
+ * effect while the stream was running. app.c calls it on every tune. */
 void iq_stream_set_freq_tick(int32_t tick);
 
-/* Az sl_rail_util_on_event()-bol hivando. True = kezeltuk, az app.c
- * capture-aga maradjon ki. */
+/* To be called from sl_rail_util_on_event(). True = handled, the app.c
+ * capture branch must be skipped. */
 bool iq_stream_on_event(RAIL_Handle_t rail, RAIL_Events_t events);
 
-/* Inditas. decim = TELJES decimacio, 8..4096 (8-ra kerekitve lefele).
- * out_shift: extra erosites kettohatvanyban (0 = nincs). */
+/* Start. decim = TOTAL decimation, 8..4096 (rounded down to a multiple
+ * of 8). out_shift: extra gain as a power of two (0 = none). */
 void iq_stream_start(RAIL_Handle_t rail, uint16_t channel,
                      uint16_t decim, uint8_t out_shift);
 
-/* Leallitas + statisztika (levagas, blokk-eldobas, utolso blokk tartalma). */
+/* Stop + statistics (clipping, dropped blocks, contents of the last block). */
 void iq_stream_stop(RAIL_Handle_t rail, uint16_t channel);
 
-/* A fo ciklusbol kell hivni: ez az SPI blokk-kuldo allapotgep.
- * Visszaad: true, ha a stream aktiv (a fo ciklus ne csinaljon mast). */
+/* Must be called from the main loop: this is the SPI block-sender state
+ * machine. Returns true if the stream is active (the main loop should do
+ * nothing else). */
 bool iq_stream_pump(void);
 
-/* A VALODI kimeneti mintavetel adott decimacional, a modulban beallitott
- * IQ_STREAM_FS_IN_HZ alapjan. Azert fuggveny, hogy a bemeneti rata EGY
- * helyen legyen definialva — kulonben a kiirt es a tenyleges ertek
- * elcsuszik egymastol. */
+/* The ACTUAL output sample rate for a given decimation, based on the
+ * IQ_STREAM_FS_IN_HZ set in the module. A function so that the input rate
+ * is defined in ONE place — otherwise the printed and the actual value
+ * drift apart. */
 uint32_t iq_stream_out_sps(uint16_t decim);
 
-/* Lab-teszt ('g'): a harom vonalat kulon frekvencian billegteti sima
- * GPIO-kent (CS 1 kHz, SCLK 2 kHz, MOSI 4 kHz).
+/* Pin test ('g'): toggles the three lines as plain GPIO at separate
+ * frequencies (CS 1 kHz, SCLK 2 kHz, MOSI 4 kHz).
  *
- * KETTOS HASZNA: egyreszt a fizikai bekotest ellenorzi periferia nelkul,
- * masreszt mindharom lab PONTOSAN 50%-on billeg, tehat KITOLTES-
- * REFERENCIA is: 3.3 V-os logikanal a multimeter DC atlaga 1.65 V kell
- * legyen mindharmon. Ez a meres fogta meg az I2S word select hibajat. */
+ * TWO USES: it checks the physical wiring without the peripheral, and all
+ * three pins toggle at EXACTLY 50%, so it is also a DUTY-CYCLE REFERENCE:
+ * with 3.3 V logic the multimeter DC average must be 1.65 V on all three.
+ * This measurement is what caught the I2S word select fault. */
 void iq_stream_pin_test(uint32_t seconds);
 
-/* Orajel- es route-diagnosztika (VCOM EUSART + SPI USART) ('v'). */
+/* Clock and route diagnostics (VCOM EUSART + SPI USART) ('v'). */
 void iq_stream_dump_uart_cfg(void);
 
 
-/* ---- EXT-MOD (scan.c): idegen 1040 bajtos blokk kuldese az SPI-n, RAIL
- * RX-stream nelkul. Kizarja a normal streamet (iq_stream_active() false
- * kell legyen). A blokk formatuma: specline.h. ---- */
-void iq_stream_ext_begin(void);            /* SPI/LDMA felall, CS inaktiv */
-void iq_stream_ext_end(void);              /* SPI le, CS marad hajtott magas */
-bool iq_stream_ext_busy(void);             /* megy-e epp egy blokk */
-void iq_stream_ext_pump(void);             /* a kuldes lezarasa (CS fel) */
-bool iq_stream_ext_send(const void *blk);  /* true = elindult; false = ujra */
+/* ---- EXT MODE (scan.c): send a foreign 1040-byte block over SPI without
+ * a RAIL RX stream. Mutually exclusive with the normal stream
+ * (iq_stream_active() must be false). Block format: specline.h. ---- */
+void iq_stream_ext_begin(void);            /* SPI/LDMA up, CS inactive */
+void iq_stream_ext_end(void);              /* SPI down, CS stays driven high */
+bool iq_stream_ext_busy(void);             /* whether a block is in flight */
+void iq_stream_ext_pump(void);             /* completes the send (CS up) */
+bool iq_stream_ext_send(const void *blk);  /* true = started; false = retry */
 
 #endif /* IQ_STREAM_H */

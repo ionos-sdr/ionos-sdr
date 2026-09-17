@@ -1,18 +1,18 @@
 /* SPDX-License-Identifier: MIT
  *
- * scan.c — szelessavu RSSI-panadapter (leptetett scan) a FG23-on
+ * scan.c — wideband RSSI panadapter (stepped scan) on the FG23
  *   Copyright (c) 2026 Zoltan Doczi HA7DCD
  *
- * Lasd scan.h. Allapotgep:
- *   IDLE  -> (scan_start) -> SWEEP : binenkent hangol + RSSI, s_line-ba
- *   SWEEP -> (utolso bin)  -> SEND  : a kesz sort SPECLINE-kent kikuldi
- *   SEND  -> (elkuldve)    -> SWEEP : uj sor
+ * See scan.h. State machine:
+ *   IDLE  -> (scan_start) -> SWEEP : tune + RSSI per bin, into s_line
+ *   SWEEP -> (last bin)    -> SEND  : send the finished line as a SPECLINE
+ *   SEND  -> (sent)        -> SWEEP : new line
  *
  * 2026-08-15:
- *  - SetFreqOffset minden binben (kristaly + residual).
- *  - Teljes Idle+StartRx csak ha a cel a jelenlegi csatorna ±OFFSET_MAX
- *    ablakán kivul esik. Egy StartRx így ~150 kHz-et fed le offset-tel,
- *    16 MHz-en ~110 restart (a regi 641 helyett).
+ *  - SetFreqOffset in every bin (crystal + residual).
+ *  - Full Idle+StartRx only if the target falls outside the ±OFFSET_MAX
+ *    window of the current channel. One StartRx thus covers ~150 kHz with
+ *    offset; ~110 restarts over 16 MHz (instead of the former 641).
  */
 
 #include "scan.h"
@@ -22,16 +22,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-/* ---- hangolhato parameterek ---- */
+/* ---- tunable parameters ---- */
 #define SCAN_AVG_US_DEF       100u
 #define SCAN_RSSI_WAIT_US_DEF 400u
 #define SCAN_BINS_PER_CALL    48u
 #define SCAN_RSSI_SLICE_US    250u
 #define SCAN_MIN_NBIN         100u
 
-/* A synth fine-offset tartomanya ±16383 tick. Biztonsagi tartalekkal
- * ±15000 tick-et hasznalunk (~±70 kHz @ 4.65 Hz/tick). Ezen belul
- * nincs szukseg uj StartRx-re, csak SetFreqOffset-re. */
+/* The synth fine-offset range is ±16383 ticks. With a safety margin
+ * ±15000 ticks are used (~±70 kHz @ 4.65 Hz/tick). Within this no new
+ * StartRx is needed, only SetFreqOffset. */
 #define SCAN_OFFSET_TICK_MAX  15000
 
 #define SCAN_M_AVG   0u
@@ -43,7 +43,7 @@ static uint32_t s_avg_us    = SCAN_AVG_US_DEF;
 static uint32_t s_wait_us   = SCAN_RSSI_WAIT_US_DEF;
 static uint8_t  s_method    = SCAN_METHOD_DEF;
 
-/* ---- allapot ---- */
+/* ---- state ---- */
 static RAIL_Handle_t s_rail = NULL;
 static scan_grid_t   s_grid;
 static bool          s_active = false;
@@ -75,12 +75,12 @@ static uint32_t s_t_line_start = 0;
 static uint32_t s_last_line_us = 0;
 static bool     s_warned_grid = false;
 
-/* measure_bin: szeles offset-ablak allapota */
+/* measure_bin: wide offset-window state */
 static uint16_t s_last_ch  = 0xFFFFu;
 static bool     s_rx_live  = false;
 static uint32_t s_restarts = 0;
 
-/* ---- segedek ---- */
+/* ---- helpers ---- */
 
 static int32_t corr_tick_for_khz(uint32_t khz)
 {
@@ -96,23 +96,23 @@ static uint32_t bin_freq_hz(uint16_t i)
   return (uint32_t)f;
 }
 
-/* Csatorna kozepfrekvenciaja Hz-ben. */
+/* Channel center frequency in Hz. */
 static uint32_t ch_center_hz(uint16_t ch)
 {
   return (uint32_t)((uint64_t)s_grid.base_khz * 1000ull
                   + (uint64_t)ch * (uint64_t)s_grid.spacing_khz * 1000ull);
 }
 
-/* Cel-Hz -> ch + tick.
- * Ha prefer_ch ervenyes (nem 0xFFFF) es a residual belefer a
- * SCAN_OFFSET_TICK_MAX ablakba, azt a csatornat tartjuk (nincs restart).
- * Kulonben a legkozelebbi racspontot valasztjuk. */
+/* Target Hz -> ch + tick.
+ * If prefer_ch is valid (not 0xFFFF) and the residual fits within the
+ * SCAN_OFFSET_TICK_MAX window, that channel is kept (no restart).
+ * Otherwise the nearest grid point is chosen. */
 static bool freq_to_ch_tick(uint32_t hz, uint16_t prefer_ch,
                             uint16_t *ch_out, int32_t *tick_out)
 {
   int32_t corr = corr_tick_for_khz((uint32_t)(hz / 1000u));
 
-  /* 1) Probaljuk a preferalt csatornat (szeles offset-ablak). */
+  /* 1) Try the preferred channel (wide offset window). */
   if (prefer_ch != 0xFFFFu && s_grid.spacing_khz > 0) {
     int64_t center = (int64_t)ch_center_hz(prefer_ch);
     int64_t res_hz = (int64_t)hz - center;
@@ -124,7 +124,7 @@ static bool freq_to_ch_tick(uint32_t hz, uint16_t prefer_ch,
     }
   }
 
-  /* 2) Legkozelebbi racspont (vagy tiszta offset, ha nincs racs). */
+  /* 2) Nearest grid point (or pure offset if there is no grid). */
   int64_t d_hz = (int64_t)hz - (int64_t)s_grid.base_khz * 1000;
   int32_t ch = 0;
   int64_t res_hz;
@@ -154,14 +154,14 @@ static uint8_t dbm_to_u8(int16_t dbm)
   return (uint8_t)v;
 }
 
-/* Egy bin merese. Szeles offset-ablak: amig a cel a jelenlegi ch
- * ±70 kHz-es tartomanyaban van, csak SetFreqOffset, nincs Idle. */
+/* Measure one bin. Wide offset window: as long as the target is within
+ * ±70 kHz of the current ch, only SetFreqOffset, no Idle. */
 static void measure_bin(uint16_t i)
 {
   uint16_t ch; int32_t tick;
   uint32_t hz = bin_freq_hz(i);
 
-  /* prefer: ha fut a RX, proba a jelenlegi csatornaval */
+  /* prefer: if RX is running, try the current channel */
   uint16_t prefer = s_rx_live ? s_last_ch : 0xFFFFu;
 
   if (!freq_to_ch_tick(hz, prefer, &ch, &tick)) {
@@ -169,8 +169,8 @@ static void measure_bin(uint16_t i)
     s_line.bins[i] = 0;
     if (!s_warned_grid) {
       s_warned_grid = true;
-      printf("# scan: %lu Hz a racson kivul (base %lu kHz, %u ch x %u kHz) "
-             "— ezek a binek padlot kapnak\r\n",
+      printf("# scan: %lu Hz outside the grid (base %lu kHz, %u ch x %u kHz) "
+             "— these bins get the floor value\r\n",
              (unsigned long)hz, (unsigned long)s_grid.base_khz,
              (unsigned)(s_grid.max_channel + 1u), (unsigned)s_grid.spacing_khz);
     }
@@ -205,7 +205,7 @@ static void measure_bin(uint16_t i)
     s_rx_live = false;
     if (!s_warned_grid) {
       s_warned_grid = true;
-      printf("# scan: a RAIL NEM fogadja el a %u. csatornat "
+      printf("# scan: RAIL does NOT accept channel %u "
              "(status 0x%02X).\r\n",
              (unsigned)ch, (unsigned)st_start);
     }
@@ -229,7 +229,7 @@ static void measure_bin(uint16_t i)
 
   if (s_diag_stat < 2u) {
     s_diag_stat++;
-    printf("# scan meres: mod=%u ch=%u tick=%ld restart=%u start_status=%d rq=%d (%d dBm)\r\n",
+    printf("# scan measure: method=%u ch=%u tick=%ld restart=%u start_status=%d rq=%d (%d dBm)\r\n",
            (unsigned)s_method, (unsigned)ch, (long)tick, (unsigned)need_restart,
            (int)st_start, (int)rq,
            (int)(rq == RAIL_RSSI_INVALID ? -999 : rq / 4));
@@ -269,7 +269,7 @@ void scan_set_timing(uint32_t avg_us, uint32_t wait_us)
   if (avg_us  > 20000u) avg_us  = 20000u;
   if (wait_us > 50000u) wait_us = 50000u;
   s_avg_us = avg_us; s_wait_us = wait_us;
-  printf("# scan idozites: atlagolas %lu us, varakozas max %lu us, mod %u\r\n",
+  printf("# scan timing: averaging %lu us, wait max %lu us, method %u\r\n",
          (unsigned long)s_avg_us, (unsigned long)s_wait_us, (unsigned)s_method);
 }
 
@@ -278,10 +278,10 @@ void scan_set_method(uint8_t m)
   if (m > SCAN_M_POLL) m = SCAN_M_POLL;
   s_method = m;
   s_diag_stat = 0;
-  printf("# scan meresi mod = %u (%s)\r\n", (unsigned)m,
+  printf("# scan measurement method = %u (%s)\r\n", (unsigned)m,
          (m == SCAN_M_AVG) ? "StartAverageRssi" :
-         (m == SCAN_M_BLOCK) ? "StartRx + blokkolo GetRssiAlt"
-                             : "StartRx + pollozo GetRssiAlt");
+         (m == SCAN_M_BLOCK) ? "StartRx + blocking GetRssiAlt"
+                             : "StartRx + polling GetRssiAlt");
 }
 
 void scan_set_scale(int16_t floor_dbm, uint16_t range_db)
@@ -319,13 +319,13 @@ bool scan_start(uint32_t center_khz, uint32_t span_khz, uint16_t nbin)
     iq_stream_ext_begin();
     s_lines_sent = 0; s_lines_skip = 0; s_rssi_invalid = 0; s_out_of_grid = 0;
     s_active = true;
-    printf("# scan indul: kozep %lu kHz, span %lu kHz, %u bin, "
-           "lepes %lu Hz, skala %d dBm + %u dB (offset-ablak ±%d tick)\r\n",
+    printf("# scan start: center %lu kHz, span %lu kHz, %u bins, "
+           "step %lu Hz, scale %d dBm + %u dB (offset window ±%d ticks)\r\n",
            (unsigned long)center_khz, (unsigned long)span_khz, (unsigned)nbin,
            (unsigned long)((uint64_t)span_khz * 1000ull / nbin),
            (int)s_floor_dbm, (unsigned)s_range_db, SCAN_OFFSET_TICK_MAX);
   } else {
-    printf("# scan atallitva: kozep %lu kHz, span %lu kHz, %u bin\r\n",
+    printf("# scan reconfigured: center %lu kHz, span %lu kHz, %u bins\r\n",
            (unsigned long)center_khz, (unsigned long)span_khz, (unsigned)nbin);
   }
   s_t_line_start = (uint32_t)RAIL_GetTime();
@@ -348,8 +348,8 @@ void scan_stop(void)
   }
   iq_stream_ext_end();
   RAIL_Idle(s_rail, RAIL_IDLE_ABORT, true);
-  printf("# scan leallt: %lu sor kikuldve, %lu halasztott, "
-         "%lu ervenytelen RSSI, %lu racson kivuli bin, utolso sor %lu ms\r\n",
+  printf("# scan stopped: %lu lines sent, %lu deferred, "
+         "%lu invalid RSSI, %lu bins outside the grid, last line %lu ms\r\n",
          (unsigned long)s_lines_sent, (unsigned long)s_lines_skip,
          (unsigned long)s_rssi_invalid, (unsigned long)s_out_of_grid,
          (unsigned long)(s_last_line_us / 1000u));
@@ -389,8 +389,8 @@ void scan_process(void)
   if (s_bin >= s_nbin) {
     if (s_diag_lines < 3u) {
       s_diag_lines++;
-      printf("# scan sor %lu: %u bin, %lu ervenytelen, %lu ervenyes "
-             "(min %d dBm, max %d dBm), %lu ms, restart %lu\r\n",
+      printf("# scan line %lu: %u bins, %lu invalid, %lu valid "
+             "(min %d dBm, max %d dBm), %lu ms, restarts %lu\r\n",
              (unsigned long)(s_lines_sent + 1u), (unsigned)s_nbin,
              (unsigned long)s_line_inv, (unsigned long)s_line_ok,
              (int)s_line_min, (int)s_line_max,
@@ -419,10 +419,10 @@ void scan_process(void)
 
 void scan_print_stats(void)
 {
-  printf("# scan idozites: atlagolas %lu us, varakozas max %lu us, mod %u\r\n",
+  printf("# scan timing: averaging %lu us, wait max %lu us, method %u\r\n",
          (unsigned long)s_avg_us, (unsigned long)s_wait_us, (unsigned)s_method);
-  printf("# scan=%d kozep=%lu kHz span=%lu kHz nbin=%u  sor=%lu "
-         "halasztott=%lu rssi_inv=%lu racson_kivul=%lu  sor_ido=%lu ms\r\n",
+  printf("# scan=%d center=%lu kHz span=%lu kHz nbin=%u  lines=%lu "
+         "deferred=%lu rssi_inv=%lu out_of_grid=%lu  line_time=%lu ms\r\n",
          (int)s_active, (unsigned long)s_center_khz, (unsigned long)s_span_khz,
          (unsigned)s_nbin, (unsigned long)s_lines_sent,
          (unsigned long)s_lines_skip, (unsigned long)s_rssi_invalid,

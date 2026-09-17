@@ -1,32 +1,32 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
 #
-# iq_bridge.py — ESP32-S3 nativ USB -> TCP, SDR++ szamara
+# iq_bridge.py — ESP32-S3 native USB -> TCP, for SDR++
 #   Copyright (c) 2026 Zoltan Doczi HA7DCD
 #
-# Beolvassa az ESP32 nativ USB CDC portjarol a 1040 bajtos I/Q blokkokat,
-# levagja a 16 bajtos fejlecet, es a nyers int16 mintakat kiszolgalja TCP-n.
+# Reads the 1040-byte I/Q blocks from the ESP32 native USB CDC port, strips
+# the 16-byte header, and serves the raw int16 samples over TCP.
 #
-#   antenna -> FG23 -> SPI -> ESP32-S3 -> USB -> [EZ] -> TCP -> SDR++
+#   antenna -> FG23 -> SPI -> ESP32-S3 -> USB -> [THIS] -> TCP -> SDR++
 #
-# HASZNALAT
+# USAGE
 #   python iq_bridge.py COM7
 #   python iq_bridge.py /dev/ttyACM0 --port 8888
 #
-# SDR++ BEALLITAS
+# SDR++ SETTINGS
 #   Source      : Network
 #   Protocol    : TCP
 #   Mode        : Client
 #   Host        : 127.0.0.1
 #   Port        : 8888
 #   Sample type : Int16
-#   Sample rate : a script kiirja a fejlecbol (i32 -> 12500)
+#   Sample rate : the script prints it from the header (i32 -> 12500)
 #
-# MIERT MEGY AT A FEJLEC AZ USB-N, ha ugyis levagjuk:
-#   - a magicre barmikor ujra lehet szinkronizalni, tehat egy elveszett
-#     bajt nem csusztatja el vegleg a folyamot;
-#   - a sorszambol itt is latszik a vesztes, fuggetlenul attol, amit az
-#     ESP mer. Ket fuggetlen pont ugyanarra a szamra.
+# WHY THE HEADER GOES OVER USB if it is stripped anyway:
+#   - the magic allows resynchronisation at any time, so a lost byte does
+#     not shift the stream permanently;
+#   - the sequence number shows the loss here too, independently of what
+#     the ESP measures. Two independent points for the same figure.
 
 import argparse
 import socket
@@ -37,7 +37,7 @@ import time
 try:
     import serial  # pyserial
 except ImportError:
-    sys.exit("Hianyzik a pyserial:  pip install pyserial")
+    sys.exit("pyserial is missing:  pip install pyserial")
 
 MAGIC = b"IQB2"          # 0x32425149 little-endian
 HDR = 16
@@ -60,11 +60,11 @@ class Stats:
 
     def line(self):
         dt = max(time.time() - self.t0, 1e-6)
-        return (f"{self.blocks/dt:6.1f} blokk/s  "
+        return (f"{self.blocks/dt:6.1f} blocks/s  "
                 f"{self.blocks*SAMPLES/dt:8.0f} sps  "
-                f"csucs={self.peak:6d}  "
-                f"VESZTETT={self.lost}  ujraszink={self.resync}  "
-                f"TCP {self.tx/1024/dt:6.1f} kB/s eldobas={self.dropped}  "
+                f"peak={self.peak:6d}  "
+                f"LOST={self.lost}  resync={self.resync}  "
+                f"TCP {self.tx/1024/dt:6.1f} kB/s dropped={self.dropped}  "
                 f"[fs_in={self.fs} decim={self.decim}]")
 
     def reset(self):
@@ -74,8 +74,8 @@ class Stats:
 
 
 class TcpServer:
-    """Egyetlen klienst szolgal ki. Ha nincs kliens, csendben eldobjuk az
-    adatot — igy a soros olvasas soha nem torlodik meg."""
+    """Serves a single client. Without a client the data is silently
+    discarded — so the serial read never backs up."""
 
     def __init__(self, host, port):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -97,7 +97,7 @@ class TcpServer:
                     except OSError:
                         pass
                 self.client = c
-            print(f"\n>>> SDR++ csatlakozott: {addr[0]}:{addr[1]}")
+            print(f"\n>>> SDR++ connected: {addr[0]}:{addr[1]}")
 
     def send(self, data):
         with self.lock:
@@ -108,7 +108,7 @@ class TcpServer:
             c.sendall(data)
             return len(data)
         except OSError:
-            print("\n<<< SDR++ lecsatlakozott")
+            print("\n<<< SDR++ disconnected")
             with self.lock:
                 if self.client is c:
                     self.client = None
@@ -117,21 +117,21 @@ class TcpServer:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("device", help="pl. COM7 vagy /dev/ttyACM0")
+    ap.add_argument("device", help="e.g. COM7 or /dev/ttyACM0")
     ap.add_argument("--port", type=int, default=8888)
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--baud", type=int, default=921600,
-                    help="nativ USB CDC-nel ertelmetlen, de nem art")
+                    help="meaningless for native USB CDC, but harmless")
     args = ap.parse_args()
 
     ser = serial.Serial(args.device, args.baud, timeout=1)
     srv = TcpServer(args.host, args.port)
     st = Stats()
 
-    print(f"soros : {args.device}")
+    print(f"serial: {args.device}")
     print(f"TCP   : {args.host}:{args.port}  (SDR++ -> Network, TCP, Client)")
-    print("SDR++ : Sample type = Int16, a mintavetelt lentrol olvasd le")
-    print("varakozas az elso blokkra...\n")
+    print("SDR++ : Sample type = Int16, read the sample rate from the line below")
+    print("waiting for the first block...\n")
 
     buf = bytearray()
     last_seq = None
@@ -144,9 +144,9 @@ def main():
 
         while True:
             if not synced:
-                # Ujraszinkronizalas: megkeressuk a magicet. Igy egy
-                # elveszett bajt vagy egy odateveszett szoveges sor nem
-                # csusztatja el veglegesen a folyamot.
+                # Resynchronisation: search for the magic. Thus a lost
+                # byte or a stray text line does not shift the stream
+                # permanently.
                 i = buf.find(MAGIC)
                 if i < 0:
                     if len(buf) > 4 * BLK:
@@ -173,10 +173,10 @@ def main():
 
             if last_seq is not None:
                 d = (seq - last_seq) & 0xFFFFFFFF
-                # A stream ujrainditasakor a FG23 nullazza a sorszamot, es a
-                # kulonbseg egy hatalmas szam lesz. Az NEM vesztes — a regi
-                # valtozat ezt tobb ezer elveszett blokknak szamolta, es az
-                # elso statisztika-sor mindig ijesztoen nezett ki.
+                # On stream restart the FG23 resets the sequence number and
+                # the difference becomes a huge number. That is NOT loss — the
+                # old version counted it as thousands of lost blocks, and the
+                # first statistics line always looked alarming.
                 if 1 < d < 100000:
                     st.lost += d - 1
             last_seq = seq
@@ -184,7 +184,7 @@ def main():
 
             payload = blk[HDR:HDR + nsamp * 4]
 
-            # csucs (csak a statisztikahoz, minden 8. minta eleg)
+            # peak (statistics only, every 8th sample is enough)
             for k in range(0, len(payload), 32):
                 v = int.from_bytes(payload[k:k + 2], "little", signed=True)
                 if abs(v) > st.peak:
@@ -207,4 +207,4 @@ if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print("\nvege")
+        print("\ndone")

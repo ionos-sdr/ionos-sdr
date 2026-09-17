@@ -1,10 +1,10 @@
-/* tft.cpp - lasd tft.h
+/* tft.cpp - see tft.h
  *
- * A waterfall-architektura a fg23waterfallbench-bol jon, ahol meg is lett
- * merve: 135 us/sor CPU (map + push), 0,09% terheles 6,7 sor/s mellett.
- * A kulcs NEM a CPU volt, hanem hogy a TE-varakozas ne PORGETVE tortenjen.
- * Itt nincs TE-drot (a 47 az RGB-e), ezert szoftveres TE megy: a 0x45
- * (Get Scanline) megmondja, hol jar a pasztazas.
+ * The waterfall architecture comes from fg23waterfallbench, where it was
+ * also measured: 135 us/row CPU (map + push), 0.09% load at 6.7 rows/s.
+ * The key was NOT the CPU, but that the TE wait must not be a BUSY SPIN.
+ * There is no TE wire here (pin 47 belongs to the RGB LED), so software TE
+ * is used: 0x45 (Get Scanline) reports where the scan is.
  */
 
 #define LGFX_USE_V1
@@ -20,7 +20,7 @@
 #define TFT_OUT Serial0
 #endif
 
-/* ---- labak: ugyanaz a bekotes, mint a waterfall-benchben ---- */
+/* ---- pins: the same wiring as in the waterfall bench ---- */
 #define PIN_SCK    12
 #define PIN_MOSI   11
 #define PIN_MISO   13
@@ -28,16 +28,16 @@
 #define PIN_DC     14
 #define PIN_RST     9
 #define PIN_BL     21
-#define PIN_TE     48                 /* HARDVERES TE. A 47-en az RGB LED van,
-                                       * ket kimenet nem lehet egy droton. */
+#define PIN_TE     48                 /* HARDWARE TE. Pin 47 carries the RGB LED;
+                                       * two outputs cannot share one wire. */
 #define TFT_FREQ   40000000
 
 #define W         240
 #define H         320
-#define HDR_H      50                 /* fix fejlec */
+#define HDR_H      50                 /* fixed header */
 #define TFA       HDR_H
-#define VSA       (H - HDR_H)         /* 270 gorgetett sor */
-#define BFA         0                 /* TFA + VSA + BFA == 320 KOTELEZO */
+#define VSA       (H - HDR_H)         /* 270 scrolled rows */
+#define BFA         0                 /* TFA + VSA + BFA == 320 MANDATORY */
 
 class LGFX : public lgfx::LGFX_Device {
 public:
@@ -47,7 +47,7 @@ public:
     LGFX(void) {
         {
             auto c = _bus.config();
-            c.spi_host    = SPI2_HOST;      /* az FG23 slave a SPI3-on van */
+            c.spi_host    = SPI2_HOST;      /* the FG23 slave is on SPI3 */
             c.spi_mode    = 0;
             c.freq_write  = TFT_FREQ;
             c.freq_read   = 16000000;
@@ -71,7 +71,7 @@ public:
             c.memory_width     = W;
             c.memory_height    = H;
             c.dummy_read_pixel = 8;
-            c.dummy_read_bits  = 0;   /* 2026-08-18-i MADCTL-teszt */
+            c.dummy_read_bits  = 0;   /* MADCTL test of 2026-08-18 */
             c.readable         = true;
             c.invert           = false;
             c.rgb_order        = false;
@@ -87,10 +87,10 @@ static LGFX  lcd;
 static bool  s_ok = false;
 bool tft_ok(void) { return s_ok; }
 
-/* A PANELT KET TASK HASZNALJA: a tft_task irja a waterfall-sorokat, a
- * loop() 2 mp-enkent a fejlecet. Mutex NELKUL a ket parancsfolyam
- * egymasba er, es egy elrontott vezerloparancs az EGESZ panelt feketebe
- * viszi (fejlecestul). 2026-08-19: pontosan ez tortent. */
+/* THE PANEL IS USED BY TWO TASKS: tft_task writes the waterfall rows,
+ * loop() writes the header every 2 s. WITHOUT a mutex the two command
+ * streams interleave, and one corrupted control command turns the WHOLE
+ * panel black (header included). 2026-08-19: exactly that happened. */
 static SemaphoreHandle_t s_lcd_mtx = NULL;
 
 static inline void lcd_lock(void)
@@ -102,7 +102,7 @@ static inline void lcd_unlock(void)
     if (s_lcd_mtx) xSemaphoreGive(s_lcd_mtx);
 }
 
-/* ---- nyers vezerlo-parancsok (a LovyanGFX nem exponalja) ---- */
+/* ---- raw control commands (LovyanGFX does not expose them) ---- */
 static inline void raw_cmd(uint8_t c) { lcd._bus.writeCommand(c, 8); }
 static inline void raw_dat(uint8_t d) { lcd._bus.writeData(d, 8); }
 
@@ -121,12 +121,13 @@ static inline void vscrsadd_inTx(uint16_t vsp)
     raw_dat(vsp >> 8); raw_dat(vsp & 0xFF);
 }
 
-/* ===================== paletta =========================================
- * TISZTA szingradiens 0..255. A dinamika-illesztes NEM ide van sutve,
- * hanem futasidoben tortenik (auto_scale). A benchben WF_FLOOR/WF_GAIN
- * volt beleegetve, de az a HAMIS generatorhoz volt hangolva: valodi adaton
- * (zajpadlo -79..-101 dBm a -120+70 dB-es ablakban = 60..160 nyers ertek)
- * telitesbe vitte a palettat -> eloszor egyszinu sarga, majd fehér kep. */
+/* ===================== palette =========================================
+ * PURE colour gradient 0..255. The dynamic-range fitting is NOT baked in
+ * here but done at run time (auto_scale). The bench had WF_FLOOR/WF_GAIN
+ * hard-coded, but that was tuned to the FAKE generator: on real data
+ * (noise floor -79..-101 dBm in the -120+70 dB window = raw values
+ * 60..160) it saturated the palette -> first a uniform yellow, then a
+ * white image. */
 static lgfx::rgb565_t pal[256];
 
 static void build_palette(void)
@@ -145,11 +146,11 @@ static void build_palette(void)
     }
 }
 
-/* ---- automatikus dinamika-illesztes ----
- * Soronkent a MINIMUM es a 90. PERCENTILIS (nem a max: egy eros vivo ne
- * nyomja le az egesz kepet), lassan kovetve, hogy a vizeses ne
- * "lelegezzen". Igy barmilyen zajpadlohoz es barmilyen floor/range
- * beallitashoz magatol illeszkedik. */
+/* ---- automatic dynamic-range fitting ----
+ * Per row the MINIMUM and the 90th PERCENTILE (not the max: a strong
+ * carrier must not push down the whole image), tracked slowly so the
+ * waterfall does not "breathe". It thus adapts by itself to any noise
+ * floor and any floor/range setting. */
 static float s_lo = 40.0f, s_hi = 200.0f;
 static bool  s_autoscale = true;
 
@@ -157,7 +158,7 @@ void tft_set_autoscale(bool on)
 {
     if (on == s_autoscale) return;
     s_autoscale = on;
-    if (!on) { s_lo = 0.0f; s_hi = 255.0f; }   /* atmenet 1:1-re */
+    if (!on) { s_lo = 0.0f; s_hi = 255.0f; }   /* switch to 1:1 */
 }
 
 static void auto_scale(const uint8_t *row)
@@ -166,9 +167,10 @@ static void auto_scale(const uint8_t *row)
     static uint16_t hist[256];
     memset(hist, 0, sizeof hist);
 
-    /* A NULLA bineket KIHAGYJUK: azok a hangolasi racson kivul esnek, es a
-     * FG23 padlot (0) ad rajuk. Ha beleszamolnank, a skala lo=0-ra allna,
-     * a valodi jel kilogna a paletta tetejere -> magenta/feher kep. */
+    /* ZERO bins are SKIPPED: they fall outside the tuning grid, and the
+     * FG23 reports floor (0) for them. If counted, the scale would settle at
+     * lo=0 and the real signal would overshoot the top of the palette ->
+     * magenta/white image. */
     uint16_t nvalid = 0;
     uint8_t  mn = 255;
     for (int i = 0; i < W; i++) {
@@ -177,23 +179,23 @@ static void auto_scale(const uint8_t *row)
         hist[v]++; nvalid++;
         if (v < mn) mn = v;
     }
-    if (nvalid < 10) return;                  /* tul keves adat - tartjuk a regit */
+    if (nvalid < 10) return;                  /* too little data - keep the old one */
 
     int cel = (nvalid * 9) / 10, acc = 0, p90 = 255;
     for (int v = 1; v < 256; v++) { acc += hist[v]; if (acc >= cel) { p90 = v; break; } }
 
     float lo = (float)mn;
-    float hi = (float)p90 + 12.0f;            /* fejter a csucsoknak */
+    float hi = (float)p90 + 12.0f;            /* headroom for the peaks */
     if (hi < lo + 20.0f) hi = lo + 20.0f;
 
     s_lo = s_lo * 0.90f + lo * 0.10f;
     s_hi = s_hi * 0.90f + hi * 0.10f;
 
-    /* diagnosztika 2 mp-enkent: mit lat a skalazo */
+    /* diagnostics every 2 s: what the scaler sees */
     static uint32_t t_dbg = 0;
     if (millis() - t_dbg > 2000) {
         t_dbg = millis();
-        TFT_OUT.printf("TFT: ervenyes=%u/%d min=%u p90=%d | skala lo=%.0f hi=%.0f\n",
+        TFT_OUT.printf("TFT: valid=%u/%d min=%u p90=%d | scale lo=%.0f hi=%.0f\n",
                        nvalid, W, mn, p90, s_lo, s_hi);
     }
 }
@@ -208,22 +210,22 @@ static inline uint8_t scale_px(uint8_t v)
     return (uint8_t)t;
 }
 
-/* ===================== sor-atadas a taskhoz ============================ */
-static uint8_t             s_row[W];          /* dB-ertekek, mar 240-re skalazva */
+/* ===================== row hand-over to the task ======================= */
+static uint8_t             s_row[W];          /* dB values, already scaled to 240 */
 static volatile bool       s_row_full = false;
-static lgfx::rgb565_t      s_line[W];         /* szinre valtva                   */
+static lgfx::rgb565_t      s_line[W];         /* converted to colour             */
 static TaskHandle_t        s_task = NULL;
 static volatile uint32_t   s_drop = 0;
 static uint16_t            s_vsp  = TFA;
 
 uint32_t tft_dropped(void) { return s_drop; }
 
-/* nbin -> 240 kepont, MAX-tartassal (spektrumnal ez a helyes, nem atlag:
- * egy keskeny vivo nem tunhet el a leskalazasban) */
+/* nbin -> 240 pixels with MAX-hold (correct for a spectrum, unlike an
+ * average: a narrow carrier must not vanish in the downscaling) */
 void tft_push_specline(const uint8_t *bins, uint16_t nbin)
 {
     if (!s_ok || !bins || nbin == 0) return;
-    if (s_row_full) { s_drop++; return; }     /* a kijelzo sosem lassit */
+    if (s_row_full) { s_drop++; return; }     /* the display never slows the radio */
 
     for (int x = 0; x < W; x++) {
         uint32_t a = (uint32_t)x * nbin / W;
@@ -238,15 +240,16 @@ void tft_push_specline(const uint8_t *bins, uint16_t nbin)
     if (s_task) xTaskNotifyGive(s_task);
 }
 
-/* ===================== hardveres TE ======================================
- * A panel 22. tuje (TE) a GPIO48-on. A megszakitas csak ertesit, a task
- * BLOKKOL ra - nem porget. Ez volt a kulcs a benchben: a porgetve varo
- * valtozat soronkent 9,4 ms-ot evett a CPU-bol, a blokkolo nullat.
+/* ===================== hardware TE =======================================
+ * Panel pin 22 (TE) on GPIO48. The interrupt only signals; the task
+ * BLOCKS on it - no spinning. This was the key in the bench: the spinning
+ * variant consumed 9.4 ms of CPU per row, the blocking one zero.
  *
- * Miert kell egyaltalan: az a frame-memoria sor, amit felulirunk, a kiiras
- * pillanataban MEG a gordulo terulet aljan latszik (o a legregebbi sor).
- * Ha kozben ott pasztaz a panel, az uj sor vilagos pontjai felvillannak
- * az also soron - ez volt az "alsó pixelsor villog". */
+ * Why it is needed at all: the frame-memory row being overwritten is, at
+ * the moment of writing, STILL visible at the bottom of the scroll area
+ * (it is the oldest row). If the panel is scanning there at that moment,
+ * the bright points of the new row flash on the bottom row - this was the
+ * "bottom pixel row flickers" symptom. */
 static SemaphoreHandle_t s_te_sem = NULL;
 
 static void IRAM_ATTR te_isr(void)
@@ -259,29 +262,29 @@ static void IRAM_ATTR te_isr(void)
 static void wait_te(void)
 {
     if (!s_te_sem) return;
-    xSemaphoreTake(s_te_sem, 0);                    /* regi jelzes eldobasa */
-    xSemaphoreTake(s_te_sem, pdMS_TO_TICKS(50));    /* a kovetkezo V-blank  */
+    xSemaphoreTake(s_te_sem, 0);                    /* discard a stale signal */
+    xSemaphoreTake(s_te_sem, pdMS_TO_TICKS(50));    /* the next V-blank     */
 }
 
-/* ===================== kijelzo-task ==================================== */
+/* ===================== display task ==================================== */
 static void tft_task(void *arg)
 {
     (void)arg;
     for (;;) {
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);   /* BLOKKOL, nem porget */
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);   /* BLOCKS, no spinning */
         if (!s_row_full) continue;
 
         auto_scale(s_row);
-        /* A 0 = "racson kivul, nincs meres" -> sotetszurke, hogy latszodjon,
-         * meddig ter a valodi sav. Nem fekete, mert az osszekeverdne a
-         * zajpadloval. */
+        /* 0 = "outside the grid, no measurement" -> dark grey, so the extent
+         * of the real band is visible. Not black, because that would blend
+         * with the noise floor. */
         for (int i = 0; i < W; i++) {
             s_line[i] = (s_row[i] == 0) ? lgfx::rgb565_t(40, 40, 40)
                                         : pal[scale_px(s_row[i])];
         }
-        s_row_full = false;                        /* a puffer ujra irhato */
+        s_row_full = false;                        /* the buffer may be written again */
 
-        /* uj sor a gordulo terulet TETEJERE, aztan leptetes */
+        /* new row at the TOP of the scroll area, then step */
         uint16_t new_vsp = (s_vsp == TFA) ? (uint16_t)(TFA + VSA - 1)
                                           : (uint16_t)(s_vsp - 1);
         wait_te();
@@ -298,7 +301,7 @@ static void tft_task(void *arg)
     }
 }
 
-/* ===================== inicializalas =================================== */
+/* ===================== initialisation ================================== */
 void tft_init(void)
 {
     s_lcd_mtx = xSemaphoreCreateMutex();
@@ -306,7 +309,7 @@ void tft_init(void)
     digitalWrite(PIN_BL, HIGH);
 
     if (!lcd.init()) {
-        TFT_OUT.println("TFT: init SIKERTELEN (bekotes? tap? JP jumper?)");
+        TFT_OUT.println("TFT: init FAILED (wiring? power? JP jumper?)");
         s_ok = false;
         return;
     }
@@ -315,19 +318,19 @@ void tft_init(void)
     lcd.fillScreen(TFT_BLACK);
     build_palette();
 
-    /* A kijelzon minden szoveg ANGOL - a termek neve Ionos SDR. */
+    /* All text on the display is ENGLISH - the product name is Ionos SDR. */
     lcd.setTextColor(TFT_CYAN, TFT_BLACK);
     lcd.setTextSize(2);
     lcd.setCursor(6, 4);
     lcd.print("Ionos SDR");
     lcd.drawFastHLine(0, HDR_H - 1, W, TFT_DARKGREY);
 
-    /* gorgetesi terulet: a fejlec fix, alatta minden gordul */
+    /* scroll area: the header is fixed, everything below scrolls */
     vscrdef(TFA, VSA, BFA);
     s_vsp = TFA;
 
-    /* TEARING EFFECT bekapcsolasa a panelon (0x35, mode 0 = csak V-blank),
-     * es a GPIO48 megszakitas. Enelkul az also pixelsor villog. */
+    /* Enable TEARING EFFECT on the panel (0x35, mode 0 = V-blank only),
+     * and the GPIO48 interrupt. Without it the bottom pixel row flickers. */
     lcd.startWrite();
     raw_cmd(0x35); raw_dat(0x00);
     lcd.endWrite();
@@ -336,23 +339,23 @@ void tft_init(void)
     pinMode(PIN_TE, INPUT);
     attachInterrupt(digitalPinToInterrupt(PIN_TE), te_isr, RISING);
 
-    /* Elo-e a TE? 200 ms alatt ~60-110 elnek kell jonnie. */
+    /* Is TE alive? ~60-110 edges must arrive within 200 ms. */
     {
         uint32_t n = 0, t0 = millis();
         while (millis() - t0 < 200) {
             if (xSemaphoreTake(s_te_sem, pdMS_TO_TICKS(20)) == pdTRUE) n++;
         }
-        TFT_OUT.printf("TFT: TE (panel 22 -> GPIO%d): %lu el / 200 ms -> %s\n",
+        TFT_OUT.printf("TFT: TE (panel 22 -> GPIO%d): %lu edges / 200 ms -> %s\n",
                        PIN_TE, (unsigned long)n,
-                       n > 5 ? "EL, hasznaljuk" : "NEM JON - ellenorizd a drotot");
+                       n > 5 ? "ALIVE, using it" : "NOT ARRIVING - check the wire");
     }
 
     xTaskCreatePinnedToCore(tft_task, "tft", 4096, NULL, 1, &s_task, 0);
-    TFT_OUT.printf("TFT: ILI9341 el (SPI2, 40 MHz, %dx%d, fejlec %d px, "
-                   "waterfall %d sor)\n", W, H, HDR_H, VSA);
+    TFT_OUT.printf("TFT: ILI9341 alive (SPI2, 40 MHz, %dx%d, header %d px, "
+                   "waterfall %d rows)\n", W, H, HDR_H, VSA);
 }
 
-/* ===================== frekvenciaskala ================================= */
+/* ===================== frequency scale ================================= */
 static uint32_t s_cf_hz = 0, s_span_hz = 0;
 static bool     s_scale_dirty = false;
 
@@ -377,24 +380,24 @@ static void draw_scale(void)
     lcd.setTextSize(1);
     lcd.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
 
-    snprintf(b, sizeof b, "%.3f", lo);          /* bal szel */
+    snprintf(b, sizeof b, "%.3f", lo);          /* left edge */
     lcd.setCursor(2, 40);
     lcd.print(b);
 
-    snprintf(b, sizeof b, "%.3f MHz", cf);      /* kozep */
+    snprintf(b, sizeof b, "%.3f MHz", cf);      /* centre */
     lcd.setCursor(W / 2 - 27, 40);
     lcd.print(b);
 
-    snprintf(b, sizeof b, "%.3f", hi);          /* jobb szel */
+    snprintf(b, sizeof b, "%.3f", hi);          /* right edge */
     lcd.setCursor(W - 38, 40);
     lcd.print(b);
 
-    /* oszto-vonalkak a skala alatt: 5 reszre */
+    /* tick marks below the scale: 5 divisions */
     for (int i = 0; i <= 4; i++)
         lcd.drawFastVLine(i * (W - 1) / 4, 47, 2, TFT_DARKGREY);
 }
 
-/* ===================== fejlec ========================================== */
+/* ===================== header ========================================== */
 static void mezo(int x, int y, const char *cimke, const char *ertek, uint16_t szin)
 {
     lcd.setTextSize(1);
@@ -426,7 +429,7 @@ void tft_show(const tft_stat_t *s)
     snprintf(b, sizeof b, "%u%%", s->terheles_pct);
     mezo(196, 20, "LOAD", b, (s->terheles_pct > 80) ? TFT_ORANGE : TFT_WHITE);
 
-    /* IP a cim melle, kicsiben */
+    /* IP next to the title, small */
     lcd.setTextSize(1);
     lcd.setTextColor(s->lost ? TFT_RED : TFT_DARKGREY, TFT_BLACK);
     lcd.setCursor(150, 6);
@@ -434,6 +437,6 @@ void tft_show(const tft_stat_t *s)
     else         snprintf(b, sizeof b, "%s        ", s->ip ? s->ip : "-");
     lcd.print(b);
 
-    draw_scale();          /* csak akkor rajzol, ha valtozott a sav */
+    draw_scale();          /* draws only when the band changed */
     lcd_unlock();
 }

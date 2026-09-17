@@ -1,8 +1,8 @@
 param(
     [string]$Ip    = '192.168.1.81',
     [string]$Plan  = 'Bs100,600,100,15',
-    [int]   $Masodperc = 0,          # 0 = a Plan alapjan szamolja
-    [string]$Cimke = 'meres',
+    [int]   $Masodperc = 0,          # 0 = derived from the Plan
+    [string]$Cimke = 'bench',
     [string]$Com   = 'COM10'
 )
 $ErrorActionPreference = 'Stop'
@@ -10,7 +10,7 @@ $proj = 'C:\Users\RF\Documents\PlatformIO\Projects\FG23-SDR-ESP32-S3-streaming'
 $src = (Get-ChildItem 'G:\*\Python_Measurements\WSPR\RF_measurements\wifi_sink.py').FullName
 Copy-Item $src (Join-Path $proj 'wifi_sink.py') -Force
 
-# idotartam becslese a rampabol: lepcsok * (dwell + warm 2s) + tartalek
+# duration estimate from the ramp: steps * (dwell + 2 s warm-up) + margin
 if ($Masodperc -le 0) {
     if ($Plan -match '^Bs(\d+),(\d+),(\d+),(\d+)') {
         $n = [math]::Floor(([int]$Matches[2] - [int]$Matches[1]) / [int]$Matches[3]) + 1
@@ -23,7 +23,7 @@ $espLog  = Join-Path $proj ($Cimke + '_' + $stamp + '_esp.log')
 $sinkLog = Join-Path $proj ($Cimke + '_' + $stamp + '_sink.log')
 $csv     = Join-Path $proj ($Cimke + '_' + $stamp + '.csv')
 
-Write-Output ("cel: $Ip   terv: $Plan   ido: $Masodperc s   cimke: $Cimke")
+Write-Output ("target: $Ip   plan: $Plan   duration: $Masodperc s   label: $Cimke")
 
 $p = New-Object System.IO.Ports.SerialPort $Com,115200,'None',8,'One'
 $p.DtrEnable = $false
@@ -35,7 +35,7 @@ $p.WriteLine('B0')
 Start-Sleep -Milliseconds 800
 [void]$p.ReadExisting()
 $p.WriteLine($Plan)
-Write-Output "-> $Plan elkuldve"
+Write-Output "-> $Plan sent"
 
 Start-Sleep -Milliseconds 800
 $proc = Start-Process -FilePath 'python' `
@@ -43,7 +43,7 @@ $proc = Start-Process -FilePath 'python' `
     -WorkingDirectory $proj -RedirectStandardOutput $sinkLog `
     -RedirectStandardError (Join-Path $proj 'bench_sink.err') `
     -NoNewWindow -PassThru
-Write-Output ('-> nyelo elindult, PID ' + $proc.Id)
+Write-Output ('-> sink started, PID ' + $proc.Id)
 
 $sb = New-Object System.Text.StringBuilder
 $vege = (Get-Date).AddSeconds($Masodperc)
@@ -67,10 +67,10 @@ while ((-not $proc.HasExited) -and ($w -lt 25)) { Start-Sleep -Seconds 1; $w++ }
 if (-not $proc.HasExited) { $proc.Kill() }
 
 Write-Output '=== ESP ==='
-(Select-String -Path $espLog -Pattern 'BENCH-STEP|BENCH-END|nincs adat').Line
-Write-Output '=== NYELO ==='
+(Select-String -Path $espLog -Pattern 'BENCH-STEP|BENCH-END|no data').Line
+Write-Output '=== SINK ==='
 Get-Content $sinkLog -Tail 30
-Write-Output '=== NYELO HIBA ==='
+Write-Output '=== SINK ERRORS ==='
 Get-Content (Join-Path $proj 'bench_sink.err') -Tail 8
 Write-Output ''
-Write-Output ("fajlok: " + $csv)
+Write-Output ("files: " + $csv)

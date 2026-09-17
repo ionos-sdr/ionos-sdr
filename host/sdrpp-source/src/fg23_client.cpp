@@ -44,8 +44,8 @@ namespace fg23 {
     }
 
     int ClientClass::computeDigitalGain(int serverBits, int deviceGain, int decimationId) {
-        // A FG23-szerver DeviceType-ja tetszoleges (RTLSDR-t hirdetunk a
-        // kompatibilitasert); a digitalis gain csak a decimaciotol fugg.
+        // The FG23 server's DeviceType is arbitrary (RTLSDR is advertised for
+        // compatibility); the digital gain depends only on the decimation.
         return decimationId * 3.01f;
     }
 
@@ -99,16 +99,16 @@ namespace fg23 {
             _this->readSize(sizeof(SpyServerMessageHeader) - count, &buf[count]);
         }
 
-        // Vedelem: a szerver ne tudjon a puffernel nagyobbat igerni
+        // Guard: the server must not announce a body larger than the buffer
         if (_this->receivedHeader.BodySize > SPYSERVER_MAX_MESSAGE_BODY_SIZE) {
-            flog::error("fg23: tul nagy uzenettorzs ({0}), bontas", _this->receivedHeader.BodySize);
+            flog::error("fg23: message body too large ({0}), disconnecting", _this->receivedHeader.BodySize);
             _this->client->close();
             return;
         }
 
         int size = _this->readSize(_this->receivedHeader.BodySize, _this->readBuf);
         if (size <= 0) {
-            flog::warn("fg23: kapcsolat bontva");
+            flog::warn("fg23: connection closed");
             return;
         }
 
@@ -123,7 +123,7 @@ namespace fg23 {
             }
             _this->deviceInfoCnd.notify_all();
         }
-        // ---------------- IQ (valtozatlan a gyarihoz kepest) ----------------
+        // ---------------- IQ (unchanged from the stock client) ----------------
         else if (mtype == SPYSERVER_MSG_TYPE_UINT8_IQ) {
             int sampCount = _this->receivedHeader.BodySize / 2;
             float gain = pow(10, (double)mflags / 20.0);
@@ -149,7 +149,7 @@ namespace fg23 {
             _this->output->swap(sampCount);
             _this->iqMsgsRx++;
         }
-        // ---------------- FFT: EZ AZ UJ RESZ ----------------
+        // ---------------- FFT: the new part ----------------
         else if (mtype == SPYSERVER_MSG_TYPE_UINT8_FFT) {
             int nbin = _this->receivedHeader.BodySize;
             if (nbin >= SPYSERVER_MIN_DISPLAY_PIXELS && nbin <= SPYSERVER_MAX_DISPLAY_PIXELS && _this->fftHandler) {
@@ -168,7 +168,7 @@ namespace fg23 {
             }
         }
         else if (mtype == SPYSERVER_MSG_TYPE_DINT4_FFT) {
-            // 4 bites pakolt valtozat: ket bin egy bajtban (also nibble = elso).
+            // 4-bit packed variant: two bins per byte (low nibble = first).
             int nbin = _this->receivedHeader.BodySize * 2;
             if (nbin >= SPYSERVER_MIN_DISPLAY_PIXELS && nbin <= SPYSERVER_MAX_DISPLAY_PIXELS && _this->fftHandler) {
                 FFTLine& L = _this->fftLine;
@@ -186,7 +186,7 @@ namespace fg23 {
                 _this->fftHandler(L);
             }
         }
-        // CLIENT_SYNC, PONG, INT24_IQ, AF: figyelmen kivul hagyva
+        // CLIENT_SYNC, PONG, INT24_IQ, AF: ignored
 
         _this->client->readAsync(sizeof(SpyServerMessageHeader), (uint8_t*)&_this->receivedHeader, dataHandler, _this);
     }

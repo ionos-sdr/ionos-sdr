@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: MIT
- * cw_rx.h — CW dekóder (IQ keverés + envelope + timing)
+ * cw_rx.h — CW decoder (IQ mixing + envelope + timing)
  */
 #ifndef CW_RX_H
 #define CW_RX_H

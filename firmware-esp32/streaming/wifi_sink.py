@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-wifi_sink.py - a wifi_bench.cpp fuggetlen meropontja
+wifi_sink.py - the independent measurement point for wifi_bench.cpp
 
-HA7DCD / Kolibri.  Amit ez mer, es amit az ESP nem tud merni:
+HA7DCD.  What this measures, and what the ESP cannot:
 
-  * a TENYLEGES beerkezesi rata a PC/telefon oldalan,
-  * a keretek kozti szunetek eloszlasa - TCP nem VESZIT, hanem MEGALL,
-    es az SDR++ szaggatasa pontosan ez: a >50 ms-os lyukak szama,
-  * az adat epsege (minta-ellenorzes), ha valaha gyanu merul fel.
+  * the ACTUAL arrival rate on the PC/phone side,
+  * the distribution of inter-frame gaps - TCP does not LOSE, it STALLS,
+    and SDR++ stuttering is exactly that: the number of >50 ms gaps,
+  * data integrity (pattern check), should suspicion ever arise.
 
-A lepcso-indexet a keretfejlec hozza, tehat a nyelo FUGGETLENUL is tud
-lepcsonkent osszesiteni - nem kell a ket oldalt kezzel osszefesulni.
-Opcionalisan a soros konzolt is olvassa (--serial COM10), es a BENCH-STEP
-sorokbol beemeli az SPI-vesztesegszamlalokat ugyanabba a tablazatba.
+The step index comes in the frame header, so the sink can aggregate per
+step INDEPENDENTLY - no manual merging of the two sides is needed.
+Optionally it also reads the serial console (--serial COM10) and pulls the
+SPI loss counters from the BENCH-STEP lines into the same table.
 
-Hasznalat:
+Usage:
     python wifi_sink.py 192.168.1.50
     python wifi_sink.py 192.168.1.50 --port 7777 --csv bench.csv --serial COM10
     python wifi_sink.py 192.168.1.50 --check --gap-ms 20 --plot
@@ -37,7 +37,7 @@ assert HDR_LEN == 24, HDR_LEN
 MAGIC = b"WBN1"
 MAX_BLK = 8192
 
-# ugyanaz a minta, mint a wb_fill_pattern()-ben
+# the same pattern as in wb_fill_pattern()
 PATTERN = bytes(((i * 31 + 7) & 0xFF) for i in range(MAX_BLK))
 
 STOP = threading.Event()
@@ -45,7 +45,7 @@ STOP = threading.Event()
 
 # --------------------------------------------------------------------------
 class StepAcc:
-    """Egy lepcso osszesitoje a nyelo oldalarol."""
+    """Aggregator of one step from the sink side."""
 
     def __init__(self, step, offered_kBps):
         self.step = step
@@ -56,7 +56,7 @@ class StepAcc:
         self.seq_gaps = 0
         self.t_first = None
         self.t_last = None
-        self.gaps = []          # keretek kozti szunetek [ms]
+        self.gaps = []          # inter-frame gaps [ms]
 
     def add(self, nbytes, t, gap_ms, bad):
         if self.t_first is None:
@@ -94,17 +94,17 @@ class StepAcc:
 
 # --------------------------------------------------------------------------
 def serial_reader(port, baud, esp_steps, echo):
-    """A soros konzolrol beemeli a BENCH-STEP sorokat (opcionalis)."""
+    """Pulls the BENCH-STEP lines from the serial console (optional)."""
     try:
         import serial  # pyserial
     except ImportError:
-        print("! pyserial nincs telepitve, a --serial kimarad "
+        print("! pyserial is not installed, --serial is skipped "
               "(pip install pyserial)", file=sys.stderr)
         return
     try:
         ser = serial.Serial(port, baud, timeout=0.5)
     except Exception as exc:
-        print(f"! soros port nem nyithato ({port}): {exc}", file=sys.stderr)
+        print(f"! cannot open serial port ({port}): {exc}", file=sys.stderr)
         return
     kv = re.compile(r"(\w+)=(-?[\d.]+)")
     while not STOP.is_set():
@@ -119,8 +119,8 @@ def serial_reader(port, baud, esp_steps, echo):
         if line.startswith("BENCH-STEP:"):
             d = {k: (float(v) if "." in v else int(v))
                  for k, v in kv.findall(line)}
-            if "lep" in d:
-                esp_steps[int(d["lep"])] = d
+            if "step" in d:
+                esp_steps[int(d["step"])] = d
     ser.close()
 
 
@@ -133,14 +133,14 @@ def run(args):
             args=(args.serial, args.baud, esp_steps, not args.quiet),
             daemon=True).start()
 
-    print(f"-> csatlakozas {args.host}:{args.port} ...")
+    print(f"-> connecting to {args.host}:{args.port} ...")
     s = socket.create_connection((args.host, args.port), timeout=10)
     s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     if args.rcvbuf:
         s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, args.rcvbuf)
     s.settimeout(args.timeout)
-    print("   kapcsolat all, varom a kereteket "
-          f"(ablak {args.window}s, lyuk-kuszob {args.gap_ms} ms)")
+    print("   connected, waiting for frames "
+          f"(window {args.window}s, gap threshold {args.gap_ms} ms)")
 
     buf = bytearray()
     steps = {}                  # step -> StepAcc
@@ -164,27 +164,27 @@ def run(args):
             try:
                 chunk = s.recv(args.recv)
             except socket.timeout:
-                print("! idotullepes - az ESP nem kuld "
-                      "(vege a menetnek, vagy megallt)")
+                print("! timeout - the ESP is not sending "
+                      "(run finished, or it stalled)")
                 break
             if not chunk:
-                print("-> a kapcsolat lezarult")
+                print("-> connection closed")
                 break
             buf += chunk
             total_bytes += len(chunk)
             now = time.perf_counter()
 
-            # --- keretek kifejtese ---
+            # --- frame extraction ---
             while True:
                 if len(buf) < HDR_LEN:
                     break
                 if bytes(buf[:4]) != MAGIC:
-                    # ujraszinkron: keressuk a kovetkezo magicet
+                    # resync: search for the next magic
                     idx = buf.find(MAGIC, 1)
                     if idx < 0:
                         del buf[:max(0, len(buf) - 3)]
                         break
-                    print(f"! szinkronvesztes, {idx} bajt eldobva")
+                    print(f"! sync lost, {idx} bytes discarded")
                     del buf[:idx]
                     continue
                 magic, seq, ln, t_us, step, flags, rate = struct.unpack(
@@ -213,12 +213,12 @@ def run(args):
                         _print_step(steps[cur_step], args, esp_steps, rows)
                     cur_step = step
                     last_seq = None
-                    print(f"\n=== lepcso {step}: felkinalt "
+                    print(f"\n=== step {step}: offered "
                           f"{rate} kB/s ({rate/4:.0f} ksps int16) ===")
 
-                if flags & 1:          # bemelegites: nem szamit sehova
+                if flags & 1:          # warm-up: counted nowhere
                     last_seq = seq
-                    win_t0 = now       # az ablak is csak utana indul
+                    win_t0 = now       # the window also starts only afterwards
                     win_bytes = win_frames = win_drop = 0
                     win_gapmax = 0.0
                     t_prev = None
@@ -237,7 +237,7 @@ def run(args):
                     if gap_ms > args.gap_ms:
                         win_drop += 1
 
-            # --- ablak-riport ---
+            # --- window report ---
             dt = now - win_t0
             if dt >= args.window:
                 kBps = win_bytes / 1000.0 / dt
@@ -245,12 +245,12 @@ def run(args):
                     print(f"   {kBps:8.1f} kB/s  "
                           f"= {kBps*1000/4:8.0f} sps int16 "
                           f"/ {kBps*1000/2:8.0f} sps int8  "
-                          f"ker={win_frames:6d}  lyukmax={win_gapmax:7.2f} ms  "
-                          f"lyuk>{args.gap_ms}ms={win_drop}")
+                          f"frames={win_frames:6d}  gapmax={win_gapmax:7.2f} ms  "
+                          f"gap>{args.gap_ms}ms={win_drop}")
                 win_t0, win_bytes, win_frames = now, 0, 0
                 win_gapmax, win_drop = 0.0, 0
     except KeyboardInterrupt:
-        print("\n-> megszakitva")
+        print("\n-> interrupted")
     finally:
         STOP.set()
         s.close()
@@ -268,23 +268,23 @@ def _print_step(acc, args, esp_steps, rows):
     for k in ("lost", "dup", "ovf", "spydrop", "eagain", "tmax", "dtmax", "ring"):
         r["esp_" + k] = e.get(k, "")
     rows.append(r)
-    print(f"--- lepcso {r['step']} osszegzes: "
-          f"felkinalt {r['offered_kBps']} kB/s -> elert {r['ach_kBps']} kB/s "
-          f"({r['sps16']} sps int16), lyuk p99={r['gap_p99_ms']} ms "
-          f"max={r['gap_max_ms']} ms, kiesesek={r['dropouts']}"
+    print(f"--- step {r['step']} summary: "
+          f"offered {r['offered_kBps']} kB/s -> achieved {r['ach_kBps']} kB/s "
+          f"({r['sps16']} sps int16), gap p99={r['gap_p99_ms']} ms "
+          f"max={r['gap_max_ms']} ms, dropouts={r['dropouts']}"
           + (f", SPI lost={r['esp_lost']}" if r["esp_lost"] != "" else ""))
 
 
 def _final(rows, args, dur, total):
     print("\n" + "=" * 78)
-    print(f"osszesen {total/1e6:.2f} MB / {dur:.1f} s = "
-          f"{total/1000.0/dur:.1f} kB/s atlag")
+    print(f"total {total/1e6:.2f} MB / {dur:.1f} s = "
+          f"{total/1000.0/dur:.1f} kB/s average")
     if not rows:
-        print("nem jott ertekelheto lepcso")
+        print("no evaluable step received")
         return
 
-    hdr = ("lep", "felk.kB/s", "elert", "sps16", "lyuk_p99", "lyuk_max",
-           "kieses", "SPIlost", "dup", "ovf", "eagain")
+    hdr = ("step", "off.kB/s", "achieved", "sps16", "gap_p99", "gap_max",
+           "dropout", "SPIlost", "dup", "ovf", "eagain")
     print("\n{:>4} {:>10} {:>9} {:>9} {:>9} {:>9} {:>7} {:>8} {:>5} {:>5} {:>7}"
           .format(*hdr))
     for r in rows:
@@ -293,17 +293,17 @@ def _final(rows, args, dur, total):
                       r["gap_p99_ms"], r["gap_max_ms"], r["dropouts"],
                       r["esp_lost"], r["esp_dup"], r["esp_ovf"], r["esp_eagain"]))
 
-    # --- a terd: a legnagyobb rata, ahol meg minden tiszta ---
+    # --- the knee: the highest rate at which everything is still clean ---
     clean = [r for r in rows
              if r["dropouts"] == 0 and r["bad"] == 0
              and (r["esp_lost"] in ("", 0))]
     if clean:
         best = max(clean, key=lambda r: r["ach_kBps"])
-        print(f"\n>> TERD: {best['ach_kBps']} kB/s tisztan "
+        print(f"\n>> KNEE: {best['ach_kBps']} kB/s clean "
               f"= {best['sps16']} sps int16 / {best['sps8']} sps int8")
     else:
-        print("\n>> minden lepcson volt kieses vagy SPI-veszteseg - "
-              "kezdd lejjebb, vagy nezd meg a Bset core/prio ertekeket")
+        print("\n>> every step had dropouts or SPI loss - "
+              "start lower, or check the Bset core/prio values")
 
     if args.csv:
         keys = list(rows[0].keys())
@@ -321,7 +321,7 @@ def _plot(rows):
     try:
         import matplotlib.pyplot as plt
     except ImportError:
-        print("! matplotlib nincs, a --plot kimarad")
+        print("! matplotlib missing, --plot is skipped")
         return
     off = [r["offered_kBps"] for r in rows]
     ach = [r["ach_kBps"] for r in rows]
@@ -329,17 +329,17 @@ def _plot(rows):
     lost = [r["esp_lost"] if r["esp_lost"] != "" else 0 for r in rows]
 
     fig, ax = plt.subplots(2, 1, figsize=(9, 7), sharex=True)
-    ax[0].plot(off, ach, "o-", label="elert")
+    ax[0].plot(off, ach, "o-", label="achieved")
     ax[0].plot(off, off, "k--", lw=0.8, label="ideal")
     ax[0].set_ylabel("kB/s")
     ax[0].grid(alpha=0.3)
     ax[0].legend()
-    ax[0].set_title("WiFi atviteli plafon es a lanc ara")
+    ax[0].set_title("WiFi throughput ceiling and the cost to the chain")
 
-    ax[1].plot(off, drop, "s-", label="kliens-kiesesek")
-    ax[1].plot(off, lost, "^-", label="SPI blokkveszteseg")
-    ax[1].set_xlabel("felkinalt rata [kB/s]")
-    ax[1].set_ylabel("darab / lepcso")
+    ax[1].plot(off, drop, "s-", label="client dropouts")
+    ax[1].plot(off, lost, "^-", label="SPI block loss")
+    ax[1].set_xlabel("offered rate [kB/s]")
+    ax[1].set_ylabel("count / step")
     ax[1].grid(alpha=0.3)
     ax[1].legend()
     plt.tight_layout()
@@ -348,23 +348,23 @@ def _plot(rows):
 
 # --------------------------------------------------------------------------
 def main():
-    p = argparse.ArgumentParser(description="wifi_bench nyelo")
+    p = argparse.ArgumentParser(description="wifi_bench sink")
     p.add_argument("host")
     p.add_argument("--port", type=int, default=7777)
     p.add_argument("--window", type=float, default=1.0,
-                   help="riportablak masodpercben")
+                   help="report window in seconds")
     p.add_argument("--gap-ms", type=float, default=50.0,
-                   help="ennel hosszabb keretszunet = kieses (SDR++ szaggatas)")
+                   help="inter-frame gap longer than this = dropout (SDR++ stutter)")
     p.add_argument("--check", action="store_true",
-                   help="payload-minta ellenorzese (lassabb)")
+                   help="verify the payload pattern (slower)")
     p.add_argument("--recv", type=int, default=65536,
-                   help="recv() puffermeret")
+                   help="recv() buffer size")
     p.add_argument("--rcvbuf", type=int, default=0,
-                   help="SO_RCVBUF (0 = rendszer alapertelmezes)")
+                   help="SO_RCVBUF (0 = system default)")
     p.add_argument("--timeout", type=float, default=15.0)
     p.add_argument("--csv", default=None)
     p.add_argument("--serial", default=None,
-                   help="ESP konzol portja (pl. COM10) a BENCH-STEP sorokhoz")
+                   help="ESP console port (e.g. COM10) for the BENCH-STEP lines")
     p.add_argument("--baud", type=int, default=115200)
     p.add_argument("--plot", action="store_true")
     p.add_argument("--quiet", action="store_true")

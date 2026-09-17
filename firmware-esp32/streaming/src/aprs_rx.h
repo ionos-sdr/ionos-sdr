@@ -1,24 +1,25 @@
 /* SPDX-License-Identifier: MIT
  *
- * aprs_rx.h — AFSK1200 demodulator + AX.25 dekoder + APRS-IS feltolto
+ * aprs_rx.h — AFSK1200 demodulator + AX.25 decoder + APRS-IS uploader
  *   Copyright (c) 2026 Zoltan Doczi HA7DCD
  *
- * A FG23-tol erkezo I/Q blokkokbol csinal APRS-csomagot, es felkuldi az
- * APRS-IS-re WiFin. Nem kell hozza hangkartya, sem kulso TNC — a teljes
- * lanc az ESP32-ben fut:
+ * Builds APRS packets from the I/Q blocks arriving from the FG23 and uploads
+ * them to APRS-IS over WiFi. No sound card or external TNC is required — the
+ * whole chain runs on the ESP32:
  *
- *   int16 I/Q  ->  FM discr (skalazott) -> 9600 Hz (frac)
- *              ->  LibAPRS delay-multiply + LPF + fazisablak
+ *   int16 I/Q  ->  FM discr (scaled) -> 9600 Hz (frac)
+ *              ->  LibAPRS delay-multiply + LPF + phase window
  *              ->  NRZI -> HDLC (left-shift) -> AX.25 -> APRS-IS
  *   Pair with aprs_rx_v2.cpp (2026-08-08).
  *
- * TERHELES: 50 ksps bemeneten nagysagrendileg 1-2% egy magbol. A
- * korrelator bitenkent ~44 szorzas-osszeadas, az atan2 kozelites ~15
- * muvelet mintankent. A 240 MHz-es S3-nak ez nem meres.
+ * LOAD: at 50 ksps input roughly 1-2% of one core. The correlator is ~44
+ * multiply-accumulates per bit, the atan2 approximation ~15 operations per
+ * sample. Negligible for the 240 MHz S3.
  *
- * MIERT NINCS SQUELCH: a csomagradio hagyomanyosan NYITOTT zajzarral megy.
- * A szures a CRC dolga — ami atmegy a 16 bites FCS-en, az jo, ami nem, azt
- * eldobjuk. Egy zajzar csak a gyenge csomagok elejet vagna le.
+ * WHY NO SQUELCH: packet radio traditionally runs with an OPEN squelch.
+ * Filtering is the job of the CRC — whatever passes the 16-bit FCS is good,
+ * whatever does not is discarded. A squelch would only clip the start of
+ * weak packets.
  */
 
 #ifndef APRS_RX_H
@@ -27,26 +28,26 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-/* Inicializalas. A WiFi felallasa UTAN hivd. */
+/* Initialisation. Call AFTER WiFi is up. */
 void aprs_rx_init(void);
 
-/* Egy blokknyi I/Q. Az iq tomb interleaved int16 (I,Q,I,Q,...), nsamp
- * KOMPLEX minta. Az sps a bemeneti mintavetel — ha valtozik, a modul
- * magatol ujraszamolja a szuroit. */
+/* One block of I/Q. The iq array is interleaved int16 (I,Q,I,Q,...), nsamp
+ * is the number of COMPLEX samples. sps is the input sample rate — if it
+ * changes, the module recomputes its filters automatically. */
 void aprs_rx_feed(const int16_t *iq, int nsamp, uint32_t sps);
 
-/* A fo ciklusbol. Kezeli az APRS-IS kapcsolatot (ujracsatlakozas,
- * keepalive). Nem blokkol. */
+/* From the main loop. Manages the APRS-IS connection (reconnect,
+ * keepalive). Non-blocking. */
 void aprs_rx_tick(uint32_t now_ms);
 
-/* Statisztika a kijelzohoz es a diagnosztikahoz. */
-uint32_t aprs_rx_frames(void);     /* ervenyes, CRC-helyes keretek */
-uint32_t aprs_rx_bad(void);        /* CRC-hibas keretek */
-uint32_t aprs_rx_gated(void);      /* APRS-IS-re felkuldott csomagok */
-bool     aprs_rx_is_online(void);  /* el-e az APRS-IS kapcsolat */
-const char *aprs_rx_last(void);      /* az utolso keret TNC2-ben */
-const char *aprs_rx_last_call(void); /* az utolso adoallomas hivojele */
-const char *aprs_rx_last_info(void); /* az utolso keret info-mezoje */
-uint32_t    aprs_rx_last_ms(void);   /* millis() az utolso keretnel, 0=meg nincs */
+/* Statistics for the display and diagnostics. */
+uint32_t aprs_rx_frames(void);     /* valid, CRC-correct frames */
+uint32_t aprs_rx_bad(void);        /* CRC-failed frames */
+uint32_t aprs_rx_gated(void);      /* packets uploaded to APRS-IS */
+bool     aprs_rx_is_online(void);  /* whether the APRS-IS connection is alive */
+const char *aprs_rx_last(void);      /* the last frame in TNC2 format */
+const char *aprs_rx_last_call(void); /* callsign of the last transmitting station */
+const char *aprs_rx_last_info(void); /* info field of the last frame */
+uint32_t    aprs_rx_last_ms(void);   /* millis() at the last frame, 0=none yet */
 
 #endif /* APRS_RX_H */

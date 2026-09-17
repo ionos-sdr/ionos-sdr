@@ -1,35 +1,35 @@
 /* SPDX-License-Identifier: MIT
  *
- * spyserver.h — SpyServer-kompatibilis szerver az ESP32-S3-on
+ * spyserver.h — SpyServer-compatible server on the ESP32-S3
  *   Copyright (c) 2026 Zoltan Doczi HA7DCD
  *
- * ================== MIERT EZ, ES NEM RTL_TCP ==================
+ * ================== WHY THIS, AND NOT RTL_TCP ==================
  *
- * Az rtl_tcp ket dologban rossz nekunk:
- *   - 8 BITES. A 16 bites mintaink felet eldobjuk.
- *   - NINCS BENNE RATA-EGYEZTETES. A kliens fix RTL-ratakat felte1telez, a
- *     legkisebb 250 ksps — ezert kellett egesz szorzoval felmintavetelezni,
- *     amitol interpolacios kepek lettek a spektrumban.
+ * rtl_tcp is unsuitable for two reasons:
+ *   - 8-BIT. Half of our 16-bit samples would be discarded.
+ *   - NO RATE NEGOTIATION. The client assumes fixed RTL rates, the lowest
+ *     being 250 ksps — hence the need for integer upsampling, which
+ *     produced interpolation images in the spectrum.
  *
- * A SpyServer mindkettot megoldja:
- *   - MSG_TYPE_INT16_IQ: NATIV 16 bit.
- *   - A DeviceInfo-ban az ESZKOZ mondja meg a MaximumSampleRate-et es a
- *     decimacios fokozatok szamat, a kliens ebbol epiti a ratalistat. Ha
- *     50000-et hirdetunk, az SDR++-ban 50 kHz lesz. Nincs felmintavetelezes.
+ * SpyServer solves both:
+ *   - MSG_TYPE_INT16_IQ: NATIVE 16 bit.
+ *   - In DeviceInfo the DEVICE announces MaximumSampleRate and the number
+ *     of decimation stages, and the client builds its rate list from that.
+ *     Advertising 50000 yields 50 kHz in SDR++. No upsampling.
  *
- * Nem SDR++-specifikus: SDR#, SDRangel es a tobbi kliens is beszeli.
+ * Not SDR++-specific: SDR#, SDRangel and the other clients speak it too.
  *
- * ================== ALLAPOT: NINCS HARDVEREN LEMERVE ==================
+ * ================== STATUS: NOT MEASURED ON HARDWARE ==================
  *
- * Ez specifikacio alapjan keszult, tesztelesi lehetoseg nelkul. A regi
- * rtl_tcp ag ERINTETLENUL megmarad az 1234-en — ha ez nem indul be elsore,
- * ott a mukodo ut.
+ * Written from the specification, without the possibility of testing. The
+ * old rtl_tcp branch remains UNTOUCHED on port 1234 — if this does not come
+ * up at first attempt, that is the known-working path.
  *
- * ================== BAJTSORREND ==================
+ * ================== BYTE ORDER ==================
  *
- * A protokoll a strukturakat NYERSEN kuldi, little-endianban. Az ESP32 is
- * little-endian, tehat a structok kozvetlenul kiirhatok. Minden mezo
- * uint32, ezert kitoltes (padding) sincs.
+ * The protocol sends the structures RAW, little-endian. The ESP32 is also
+ * little-endian, so the structs can be written out directly. Every field is
+ * uint32, so there is no padding either.
  */
 
 #ifndef SPYSERVER_H
@@ -39,11 +39,12 @@
 #include <stdbool.h>
 #include "specline.h"
 
-/* A kliens hangolast kert. A main.cpp koti ossze a cmdlinkkel. */
+/* The client requested tuning. main.cpp wires this to the command link. */
 typedef void (*spy_tune_fn)(uint32_t hz);
 
-/* A kliens scan-modot ker / leallit / atparameterez (SETTING_FFT_* +
- * STREAMING_MODE FFT-bit). A main.cpp a cmdlinken tovabbadja a FG23-nak:
+/* The client requests / stops / reconfigures scan mode (SETTING_FFT_* +
+ * STREAMING_MODE FFT bit). main.cpp forwards it to the FG23 over the
+ * command link:
  *   want=true  -> "W<kHz>,<span_kHz>,<nbin>,<floor>,<range>"
  *   want=false -> "W0"  */
 typedef void (*spy_scan_fn)(bool want, uint32_t center_hz, uint32_t span_hz,
@@ -51,25 +52,25 @@ typedef void (*spy_scan_fn)(bool want, uint32_t center_hz, uint32_t span_hz,
 
 void spy_init(uint16_t port, spy_tune_fn on_tune, spy_scan_fn on_scan);
 
-/* Scan-mod: kell-e most sor a kliensnek; egy SPECLINE tovabbitasa. */
+/* Scan mode: whether the client currently wants rows; forward one SPECLINE. */
 bool spy_scan_wanted(void);
 void spy_send_specline(const specline_blk_t *line);
 uint32_t spy_fft_lines(void);
 
-/* A bemeneti I/Q rata. Ez lesz a hirdetett MaximumSampleRate. */
+/* The input I/Q rate. This becomes the advertised MaximumSampleRate. */
 void spy_set_rate(uint32_t sps);
 
-/* Az aktualis hangolas, hogy a ClientSync helyes erteket adjon. */
+/* The current tuning, so that ClientSync reports the correct value. */
 void spy_set_freq(uint32_t hz);
 
-/* Egy blokknyi nyers int16 I/Q (interleaved), nsamp komplex minta. */
+/* One block of raw int16 I/Q (interleaved), nsamp complex samples. */
 void spy_feed(const int16_t *iq, int nsamp);
 
-/* A fo ciklusbol: kapcsolatkezeles, parancsok, kuldes. Nem blokkol. */
+/* From the main loop: connection handling, commands, sending. Non-blocking. */
 void spy_tick(uint32_t now_ms);
 
 bool     spy_connected(void);
-uint32_t spy_out_sps(void);     /* a decimacio utani, TENYLEG kuldott rata */
+uint32_t spy_out_sps(void);     /* the rate ACTUALLY sent, after decimation */
 uint32_t spy_dropped(void);
 
 #endif /* SPYSERVER_H */

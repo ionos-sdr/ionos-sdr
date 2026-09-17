@@ -1,14 +1,14 @@
-/* iq_fft.h - keskenysavu I/Q -> waterfall-sor az LCD-re
+/* iq_fft.h - narrowband I/Q -> waterfall row for the LCD
  *
- * A SPECLINE (scan) a FG23 szeles panoramaja. Ez a modul a MASIK forrast
- * adja: a folyamatos 50 ksps-os I/Q folyambol szamol FFT-t, es ugyanabba a
- * tft_push_specline() bemenetbe tolja. Igy a panel akkor is mutat valamit,
- * amikor nem fut scan - a hangolt +-25 kHz-et.
+ * The SPECLINE (scan) is the FG23's wide panorama. This module provides the
+ * OTHER source: it computes an FFT from the continuous 50 ksps I/Q stream
+ * and feeds it into the same tft_push_specline() input. Thus the panel shows
+ * something even when no scan is running - the tuned +-25 kHz.
  *
- * Koltseg: 256 pontos komplex FFT ~120 us az S3-on (float, radix-2).
- * Alapbol minden 12. blokkbol szamolunk -> ~16 sor/s, ~0,2% CPU.
- * A hivas az SPI-fogadobol jon, ezert MINDEN itteni munka szamit: ezert van
- * a ritkitas, es ezert nem masolunk feleslegesen.
+ * Cost: a 256-point complex FFT is ~120 us on the S3 (float, radix-2).
+ * By default every 12th block is processed -> ~16 rows/s, ~0.2% CPU.
+ * The call comes from the SPI receiver, so ALL work here counts: hence the
+ * decimation, and hence no unnecessary copies.
  */
 #pragma once
 #include <stdint.h>
@@ -18,29 +18,29 @@
 extern "C" {
 #endif
 
-/* Egy nyers I/Q blokk payloadja (256 minta, int16 Q-first). */
+/* Payload of one raw I/Q block (256 samples, int16 Q-first). */
 void iq_fft_push_block(const uint8_t *payload);
 
-/* A hangolas es a mintavetel - a frekvenciaskalahoz. */
+/* Tuning and sample rate - for the frequency scale. */
 void iq_fft_set_tuning(uint32_t center_hz, uint32_t sps);
 
-/* be/ki. Ha a scan fut, azt erdemes elonyben reszesiteni. */
+/* on/off. While a scan is running, the scan should take precedence. */
 void iq_fft_enable(bool on);
 bool iq_fft_enabled(void);
 
-/* Hany blokkonkent szamoljunk (1..64). Nagyobb = ritkabb, kevesebb CPU. */
+/* Compute every n-th block (1..64). Larger = sparser, less CPU. */
 void iq_fft_set_decim(uint8_t n);
 
-/* ---- parancsok (true = ez a modul kezelte a sort) ----------------------
- *   F                 statusz
- *   Fset k=v ...      n=<256|512|1024>  FFT hossz (1024: 48,8 Hz/bin)
- *                     win=<0|1>   0 = Hann, 1 = Nuttall (-92 dBc szivargas)
- *                     lift=<dB>   a zaj ennyivel a padlo folott kezd szint
- *                                 kapni. NEGATIV = vilagosabb zaj.
- *                     range=<dB>  ennyi dB feszul a teljes palettara
- *                     alpha=<%>   EMA suly (kisebb = simabb, lomhabb)
- *                     dec=<n>     hany adagonkent rajzoljunk sort
- *                     inv=<0|1>   spektrum tukrozes (I/Q konvencio)
+/* ---- commands (true = this module handled the line) --------------------
+ *   F                 status
+ *   Fset k=v ...      n=<256|512|1024>  FFT length (1024: 48.8 Hz/bin)
+ *                     win=<0|1>   0 = Hann, 1 = Nuttall (-92 dBc leakage)
+ *                     lift=<dB>   noise starts getting a level this many dB
+ *                                 above the floor. NEGATIVE = brighter noise.
+ *                     range=<dB>  this many dB spans the whole palette
+ *                     alpha=<%>   EMA weight (smaller = smoother, slower)
+ *                     dec=<n>     draw a row every n blocks
+ *                     inv=<0|1>   spectrum mirroring (I/Q convention)
  */
 bool iq_fft_cmd(const char *line);
 

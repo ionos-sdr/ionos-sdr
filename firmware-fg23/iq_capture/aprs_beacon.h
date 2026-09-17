@@ -1,13 +1,14 @@
 /* SPDX-License-Identifier: MIT
  *
- * aprs_beacon.h — AX.25/APRS direkt-FSK bacon motor FG23-ra
- *   Copyright (c) 2026 Zoltan Doczi HA7DCD — MIT licenc
+ * aprs_beacon.h — AX.25/APRS direct-FSK beacon engine for FG23
+ *   Copyright (c) 2026 Zoltan Doczi HA7DCD — MIT license
  *
- * A vivot RAIL_SetTxStream(CARRIER_WAVE) adja, a mark/space szimbolumot
- * RAIL_SetFreqOffset lepteti — a T2-ben mert fazisfolytonossag miatt ez
- * tiszta, direkt-FSK (G3RUH-szeru), NEM audio-AFSK. A Direwolf -B 1200
- * modja dekodolja. CSAK DUMMY LOAD / CSILLAPITAS — a durva rács miatt a
- * jel meg nem sav-kesz, elesbe csak PA+szuro es meres utan!
+ * The carrier comes from RAIL_SetTxStream(CARRIER_WAVE); the mark/space
+ * symbol is stepped with RAIL_SetFreqOffset — thanks to the phase
+ * continuity measured in T2 this is clean direct FSK (G3RUH-like), NOT
+ * audio AFSK. Direwolf decodes it in -B 1200 mode. DUMMY LOAD / ATTENUATOR
+ * ONLY — because of the coarse frequency grid the signal is not yet
+ * band-ready; on-air use only after PA + filter and measurement!
  */
 #ifndef APRS_BEACON_H
 #define APRS_BEACON_H
@@ -15,23 +16,23 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-/* Egy elore-osszeallitott AX.25 keret bitfolyama (NRZI+stuffing utan),
- * amit a fo ciklus 1200 baudon leptet ki offszet-valtassal. */
+/* Bit stream of a pre-built AX.25 frame (after NRZI + stuffing), which
+ * the main loop clocks out at 1200 baud by switching the offset. */
 typedef struct {
-  uint8_t  bits[1024];  /* egy-bit-per-bajt, 0/1 (NRZI-kodolt) */
-  uint16_t nbits;       /* ervenyes bitek szama */
+  uint8_t  bits[1024];  /* one bit per byte, 0/1 (NRZI-encoded) */
+  uint16_t nbits;       /* number of valid bits */
 } aprs_frame_t;
 
-/* AX.25 UI keret osszeallitasa APRS-poziciobol/statuszbol.
- *   src   : sajat hivojel (pl. "HA7DCD"), max 6 kar + ssid
+/* Build an AX.25 UI frame from an APRS position/status.
+ *   src   : own callsign (e.g. "HA7DCD"), max 6 chars + ssid
  *   ssid  : 0..15
- *   via   : digipeater path hivojel (pl. "WIDE1") vagy NULL, ha nincs
- *   vssid : a via SSID-je (WIDE1-1 -> "WIDE1", 1)
- *   info  : APRS info-mezo
- * A path NELKUL a digipeaterek dekodoljak ugyan a keretet, de NEM
- * ismetlik es nem gate-elik az APRS-IS fele — a WIDE1-1 kell ahhoz,
- * hogy a csomag tovabbmenjen (mint az APRSdroid sajat baconjeiben).
- * Visszaad: true, ha elfert. */
+ *   via   : digipeater path callsign (e.g. "WIDE1") or NULL if none
+ *   vssid : SSID of the via (WIDE1-1 -> "WIDE1", 1)
+ *   info  : APRS info field
+ * WITHOUT a path the digipeaters decode the frame but do NOT repeat it
+ * and do not gate it to APRS-IS — WIDE1-1 is required for the packet
+ * to propagate (as in APRSdroid's own beacons).
+ * Returns true if the frame fit. */
 bool aprs_build_ui(aprs_frame_t *out,
                    const char *src, uint8_t ssid,
                    const char *dst, uint8_t dssid,

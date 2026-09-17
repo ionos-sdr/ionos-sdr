@@ -1,30 +1,30 @@
 /* SPDX-License-Identifier: MIT
  *
- * cs_probe.ino — ESP32-S3: eljut-e a CS a GPIO4-ig?
+ * cs_probe.ino — ESP32-S3: does CS reach GPIO4?
  *   Copyright (c) 2026 Zoltan Doczi HA7DCD
  *
- * MIERT: 2026-08-01 hajnal. A FG23 oldal minden szempontbol bizonyitott —
- * 48.8 blokk/s, CS lent 2147 us (elmeleti 2080), a CS pad 89.5%-ban magas
- * es 3.1 millio mintabol NULLA eltéres a kiirt szinttol. Az ESP SPI slave
- * megis nem vesz semmit.
+ * WHY: 2026-08-01, early morning. The FG23 side is proven in every respect —
+ * 48.8 blocks/s, CS low for 2147 us (theoretical 2080), the CS pad high
+ * 89.5% of the time and ZERO deviation from the driven level over 3.1
+ * million samples. Yet the ESP SPI slave receives nothing.
  *
- * Ez a vazlat KIHAGYJA az egesz SPI perifériat: csak megszamolja a CS
- * lefuto eleit egy sima GPIO-megszakitassal, es mellette mintavetelezi a
- * masik ket vonalat.
+ * This sketch BYPASSES the whole SPI peripheral: it only counts the CS
+ * falling edges with a plain GPIO interrupt, and samples the other two
+ * lines alongside.
  *
- * VART EREDMENY futo 'i32' mellett:
- *     CS lefuto el: ~49 / s        (12500 sps / 256 minta = 48.8)
- *     CS magas:     ~89 %
+ * EXPECTED RESULT with 'i32' running:
+ *     CS falling edges: ~49 / s        (12500 sps / 256 samples = 48.8)
+ *     CS high:          ~89 %
  *
- * ERTELMEZES:
- *   - ~49 el/s        -> a jel EPEN megerkezik, a hiba az SPI slave
- *                        konfiguraciojaban van (mod, meret, sorbaallitas)
- *   - 0 el/s          -> a CS nem er el a labig: drot vagy lab
- *   - nagyon sok el   -> zaj / lebego bemenet
+ * INTERPRETATION:
+ *   - ~49 edges/s     -> the signal DOES arrive, the fault is in the SPI
+ *                        slave configuration (mode, size, queueing)
+ *   - 0 edges/s       -> CS does not reach the pin: wire or pin
+ *   - very many edges -> noise / floating input
  *
- * ELOZMENY: a CS eredetileg a GPIO4-en volt, es ott LEBEGETT — 21000 el/s
- * es 60% kitoltes, mikozben a SCLK (GPIO5) es a MOSI (GPIO6) ugyanabban a
- * mereseben hibatlan 51%-ot adott. Ezert kerult at a GPIO7-re.
+ * HISTORY: CS was originally on GPIO4, and there it FLOATED — 21000 edges/s
+ * and 60% duty, while SCLK (GPIO5) and MOSI (GPIO6) gave a clean 51% in the
+ * same measurement. That is why it was moved to GPIO7.
  */
 
 #include <Arduino.h>
@@ -43,20 +43,20 @@ void setup()
 {
   Serial.begin(115200);
   delay(500);
-  Serial.println("\n=== CS-proba: eljut-e a keretjel a GPIO4-ig? ===");
+  Serial.println("\n=== CS probe: does the frame signal reach GPIO4? ===");
   Serial.printf("CS=GPIO%d  SCLK=GPIO%d  MOSI=GPIO%d\n",
                 PIN_CS, PIN_SCLK, PIN_MOSI);
-  Serial.println("varhato futo 'i32' mellett: ~49 lefuto el/s, CS ~89% magas");
+  Serial.println("expected with 'i32' running: ~49 falling edges/s, CS ~89% high");
 
-  /* Felhuzas NELKUL: a FG23 push-pull hajtja. Ha lebegne, azt latni
-   * akarjuk (nagyon sok, szabalytalan el). */
+  /* NO pull-up: the FG23 drives push-pull. If it floats, that must be
+   * visible (very many irregular edges). */
   pinMode(PIN_CS,   INPUT);
   pinMode(PIN_SCLK, INPUT);
   pinMode(PIN_MOSI, INPUT);
 
   attachInterrupt(digitalPinToInterrupt(PIN_CS), on_cs_fall, FALLING);
-  /* Egy labra egy handler jut, ezert a felfuto elt nem kotjuk kulon —
-   * a kitoltest mintavetelezessel merjuk. */
+  /* One handler per pin, so the rising edge is not attached separately —
+   * the duty cycle is measured by sampling. */
   (void)on_cs_rise;
 }
 
@@ -65,7 +65,7 @@ void loop()
   static uint32_t t0 = 0;
   static uint32_t n_samp = 0, n_cs_hi = 0, n_clk_hi = 0, n_mosi_hi = 0;
 
-  /* Szoros mintavetelezes: a kitoltest ebbol kapjuk. */
+  /* Tight sampling: the duty cycle comes from this. */
   n_samp++;
   if (digitalRead(PIN_CS))   n_cs_hi++;
   if (digitalRead(PIN_SCLK)) n_clk_hi++;
@@ -79,18 +79,18 @@ void loop()
     interrupts();
 
     float dt = (now - t0) / 1000.0f;
-    Serial.printf("CS lefuto el: %5.1f /s   |   CS magas %4.1f%%   "
-                  "SCLK magas %4.1f%%   MOSI magas %4.1f%%   (%lu minta)",
+    Serial.printf("CS falling edges: %5.1f /s   |   CS high %4.1f%%   "
+                  "SCLK high %4.1f%%   MOSI high %4.1f%%   (%lu samples)",
                   f / dt,
                   100.0f * n_cs_hi   / n_samp,
                   100.0f * n_clk_hi  / n_samp,
                   100.0f * n_mosi_hi / n_samp,
                   (unsigned long)n_samp);
 
-    if (f == 0)                 Serial.print("   <-- NINCS CS: drot vagy lab");
-    else if (f / dt > 500.0f)   Serial.print("   <-- tul sok el: zaj / lebeg");
+    if (f == 0)                 Serial.print("   <-- NO CS: wire or pin");
+    else if (f / dt > 500.0f)   Serial.print("   <-- too many edges: noise / floating");
     else if (f / dt > 40.0f && f / dt < 60.0f)
-                                Serial.print("   <-- STIMMEL, a jel megerkezik");
+                                Serial.print("   <-- OK, the signal arrives");
     Serial.println();
 
     n_samp = n_cs_hi = n_clk_hi = n_mosi_hi = 0;

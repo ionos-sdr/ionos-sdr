@@ -1,78 +1,78 @@
 /* SPDX-License-Identifier: MIT
  *
- * iq_stream.c — folyamatos, decimalt I/Q stream SPI-n az ESP32-S3-nak
- *   Copyright (c) 2026 Zoltan Doczi HA7DCD — MIT licenc
+ * iq_stream.c — continuous, decimated I/Q stream over SPI to the ESP32-S3
+ *   Copyright (c) 2026 Zoltan Doczi HA7DCD — MIT license
  *
- * ================= MIERT SPI ES NEM I2S =================
+ * ================= WHY SPI AND NOT I2S =================
  *
- * 2026-07-31, multimeteres meres: a FG23 USART-janak CS-e NEM tud valodi
- * I2S word selectet adni. A kitoltese 33.6% (1.11 V), miközben 50% kell.
- * Kontroll: a 'g' lab-teszt, ami mind a harom labat PONTOSAN 50%-on
- * billegteti GPIO-kent, mind a harmon 1.65 V-ot adott — tehat az
- * amplitudo teljes es a meres jo. A nyolc keretezesi kombinacio
- * (W16D16/W32D16 x Left/Right x delay true/false) MIND 1.05-1.11 V.
+ * 2026-07-31, multimeter measurement: the CS of the FG23 USART can NOT
+ * produce a true I2S word select. Its duty cycle is 33.6% (1.11 V), where
+ * 50% is required. Control: the 'g' pin test, which toggles all three pins
+ * as GPIO at EXACTLY 50%, gave 1.65 V on all three — so the amplitude is
+ * full and the measurement is valid. All eight framing combinations
+ * (W16D16/W32D16 x Left/Right x delay true/false) gave 1.05-1.11 V.
  *
- * Ok: a FG23-on nincs onallo I2S periferia. Egy altalanos szinkron USART
- * van, amiben a chip select van word selectte atertelmezve. Ez arra
- * keszult, hogy a chip egy audio DAC-ot etessen — ott a vevo buta
- * shiftregiszter. Egy ESP32 I2S slave viszont allapotgep, aminek
- * tankonyvi 50%-os WS kell, kulonben ujra es ujra keresi a keretet.
+ * Reason: the FG23 has no dedicated I2S peripheral. It has a generic
+ * synchronous USART in which the chip select is reinterpreted as word
+ * select. This was designed to feed an audio DAC — where the receiver is
+ * a dumb shift register. An ESP32 I2S slave, however, is a state machine
+ * that needs a textbook 50% WS, otherwise it keeps hunting for the frame.
  *
- * ================= AMIT AZ SPI MEGOLD =================
+ * ================= WHAT SPI SOLVES =================
  *
- * Az I2S rakenyszeritett egy megkotest: a bitora kotelezoen fs*32,
- * FOLYAMATOSAN. Ezert volt halalos minden apro hezag, es ezert kellett a
- * USART-nak sosem kiurulnie.
+ * I2S imposed a constraint: the bit clock had to be fs*32, CONTINUOUSLY.
+ * That is why every tiny gap was fatal, and why the USART could never be
+ * allowed to run empty.
  *
- * SPI-nal BURST-ben kuldunk: a CS-t levisszuk, kitolunk egy egesz
- * blokkot magas orajellel, felvisszuk, es a vonal pihen a kovetkezoig.
- * A link sebessege LEVALIK a mintaveteli frekvenciarol, es a hezag nem
- * hiba lesz, hanem a normal mukodes resze.
+ * With SPI we send in BURSTS: pull CS low, shift out a whole block at a
+ * high clock, release it, and the line rests until the next one. The link
+ * speed is DECOUPLED from the sample rate, and a gap is no longer an
+ * error but part of normal operation.
  *
- * Racadasul a blokk-fejlecben van SORSZAM, tehat a csomagvesztes egy
- * kiirhato szam lesz, nem sejtes. Ez minosegileg jobb hiba, mint a
- * csendben, folyamatosan rongalo bitcsuszas.
+ * In addition the block header carries a SEQUENCE NUMBER, so packet loss
+ * becomes a printable number, not a guess. That is a qualitatively better
+ * failure than a silent, continuously corrupting bit slip.
  *
- * ===================== BEKOTES (valtozatlan drotok!) =====================
- *   WSTK EXP   FG23 lab   SPI jel                sebesseg    ESP32-S3
+ * ===================== WIRING (wires unchanged!) =====================
+ *   WSTK EXP   FG23 pin   SPI signal             speed       ESP32-S3
  *   ---------------------------------------------------------------------
- *   EXP 15     PC05       SCLK                   tobb MHz -> GPIO5
- *   EXP 10     PC00       MOSI (FG23 -> ESP)     tobb MHz -> GPIO6
- *   EXP 13     PA07       CS   (blokk-keret)     ~25 Hz   -> GPIO7
- *   EXP  1     GND                                        -> GND
+ *   EXP 15     PC05       SCLK                   several MHz -> GPIO5
+ *   EXP 10     PC00       MOSI (FG23 -> ESP)     several MHz -> GPIO6
+ *   EXP 13     PA07       CS   (block frame)     ~25 Hz      -> GPIO7
+ *   EXP  1     GND                                           -> GND
  *
- * A HARMAS KIVALASZTASA a radiopanel EXP-tablazatabol (UG506, xG23):
- *   EXP 10 = PC0  — SPI_CS pozicio, SEMMIVEL nincs megosztva. Tiszta.
- *   EXP 15 = PC5  — I2C_SCL pozicio (sensor), gyakorlatban tiszta volt.
- *   EXP 13 = PA7  — sima GPIO, semmivel nincs megosztva. Tiszta.
+ * CHOICE OF THE THREE from the radio board EXP table (UG506, xG23):
+ *   EXP 10 = PC0  — SPI_CS position, shared with NOTHING. Clean.
+ *   EXP 15 = PC5  — I2C_SCL position (sensor), clean in practice.
+ *   EXP 13 = PA7  — plain GPIO, shared with nothing. Clean.
  *
- * FIGYELEM: a CS mostantol a PORT A-n van, nem a C-n! A drive/slew
- * beallitas portonkent hat, ezert az A portot is allitjuk (lasd lejjebb).
- * A CS blokkonkent egyszer vált (~25 Hz), tehat ez nala nem kritikus.
+ * NOTE: CS is now on PORT A, not on C! The drive/slew setting applies per
+ * port, so port A is configured as well (see below). CS toggles once per
+ * block (~25 Hz), so it is not critical there.
  *
- * ===================== TILTOLISTA =====================
- * 2026-08-01: a radiopanel EXP-tablazata (UG506, xG23 radio board)
- * megmutatta, hogy a 4/6/8-as fejlecpontokra tett feltetelezesunk EGY
- * POZICIOVAL EL VOLT CSUSZVA. A valos kiosztas:
+ * ===================== BLACKLIST =====================
+ * 2026-08-01: the radio board EXP table (UG506, xG23 radio board) showed
+ * that our assumption about header pins 4/6/8 was OFF BY ONE POSITION.
+ * The real assignment:
  *
- *   EXP  4 = PC1  — FLASH_MOSI + DISP_SI. A panel hajtja. NE.
- *   EXP  6 = PC2  — FLASH_MISO. Terhelt net. NE.
- *   EXP  8 = PC3  — FLASH_SCLK + DISP_SCLK. NE.
- *   EXP 12 = PA8  — VCOM_TX. Ez a konzol! NE.
- *   EXP 14 = PA9  — VCOM_RX. Ez a konzol! NE.
- *   EXP 17 = BOARD_ID_SCL, EXP 19 = BOARD_ID_SDA — board controller. NE.
- *   EXP  2 = VMCU, EXP 18 = 5V, EXP 20 = 3V3, EXP 1 = GND — tap.
+ *   EXP  4 = PC1  — FLASH_MOSI + DISP_SI. Driven by the board. NO.
+ *   EXP  6 = PC2  — FLASH_MISO. Loaded net. NO.
+ *   EXP  8 = PC3  — FLASH_SCLK + DISP_SCLK. NO.
+ *   EXP 12 = PA8  — VCOM_TX. This is the console! NO.
+ *   EXP 14 = PA9  — VCOM_RX. This is the console! NO.
+ *   EXP 17 = BOARD_ID_SCL, EXP 19 = BOARD_ID_SDA — board controller. NO.
+ *   EXP  2 = VMCU, EXP 18 = 5V, EXP 20 = 3V3, EXP 1 = GND — power.
  *
- * EBBOL KOVETKEZETT AZ EGESZ EJSZAKAI HAJSZA: amikor a firmware a PC03-at
- * hajtotta, az az EXP 8-on jott ki (kijelzo-orajel), mikozben a drot az
- * EXP 6-ban ult, amit PC2-kent senki nem hajtott — ezert volt teljesen
- * mindegy, hogy rá van-e dugva. A "PC02 nem viszi a gyors jelet"
- * megfigyeles is innen ered: az valojaban a flash MISO netje volt.
+ * THIS CAUSED THE WHOLE OVERNIGHT CHASE: when the firmware drove PC03, it
+ * came out on EXP 8 (display clock), while the wire sat in EXP 6, which
+ * nobody drove as PC2 — so it made no difference whether it was plugged
+ * in. The "PC02 does not carry the fast signal" observation comes from
+ * the same source: it was actually the flash MISO net.
  *
- * Szabad es tiszta tartalek, ha meg kell egy vonal (pl. RDY):
- *   EXP 11 = PA6, EXP 9 = PD2, EXP 7 = PA5 — mind sima GPIO.
+ * Free and clean spares if another line is needed (e.g. RDY):
+ *   EXP 11 = PA6, EXP 9 = PD2, EXP 7 = PA5 — all plain GPIO.
  *
- * ESP oldal: GPIO3 strapping lab + valoszinu VBAT-oszto a Heltecen — NE.
+ * ESP side: GPIO3 strapping pin + probable VBAT divider on the Heltec — NO.
  */
 
 #include "iq_stream.h"
@@ -87,154 +87,160 @@
 #include <stdio.h>
 #include <string.h>
 
-/* ================= KONFIGURACIO ================= */
+/* ================= CONFIGURATION ================= */
 
-/* SPI bitrata. A 12.5 ksps-hez 4 MHz tizszeres tartalek:
- * egy 1040 bajtos blokk 2.1 ms alatt megy ki, miközben 20.5 ms-onkent
- * keletkezik. Dupont drotokon ez meg kenyelmes.
+/* SPI bit rate. For 12.5 ksps, 4 MHz is a tenfold margin: a 1040-byte
+ * block goes out in 2.1 ms while one is produced every 20.5 ms. On Dupont
+ * wires this is still comfortable.
  *
- * A 700 ksps-es PCB-celhoz ~30 MHz kell majd — de ott mar nem Heltec
- * dev board lesz, es IO_MUX-labakra lehet tervezni. */
+ * The 700 ksps PCB target will need ~30 MHz — but that will no longer be
+ * a Heltec dev board, and IO_MUX pins can be designed in. */
 #define SPI_HZ            4000000u
 
-/* Egy blokk komplex mintaszama. 256 minta = 20.5 ms @ 12.5 ksps.
- * Blokkmeret = 16 bajt fejlec + 256*4 = 1040 bajt. */
+/* Complex samples per block. 256 samples = 20.5 ms @ 12.5 ksps.
+ * Block size = 16-byte header + 256*4 = 1040 bytes. */
 #define BLK_SAMPLES       256u
 
-/* Hany blokkot tartunk. A CIC az egyiket tolti, a DMA a masikat kuldi,
- * a tobbi a tartalek. 6 * 1040 = 6240 bajt a 64 kB-bol — olcso biztositas.
+/* Number of blocks held. The CIC fills one, the DMA sends another, the
+ * rest is reserve. 6 * 1040 = 6240 bytes of the 64 kB — cheap insurance.
  *
- * MIT VED ES MIT NEM: ez a FG23 sajat torlodasa ellen jo. Ha ez telik be,
- * a s_blk_drops no, es a masik oldalon a blokk/s esik — DE SORSZAMLYUK
- * NEM KELETKEZIK, mert a s_seq-et a KIKULDESKOR irjuk a fejlecbe. Tehat:
- *   blokk/s esik, VESZT nulla   -> ITT a baj (nezd a 'blokk-eldobas'-t)
- *   VESZT no                    -> az ESP32 nem vette at, ott keresd */
+ * WHAT IT PROTECTS AGAINST AND WHAT NOT: this covers the FG23's own
+ * congestion. If it fills up, s_blk_drops grows and blocks/s drops on the
+ * other side — BUT NO SEQUENCE GAP appears, because s_seq is written into
+ * the header AT SEND TIME. Thus:
+ *   blocks/s drops, LOST is zero -> the problem is HERE (see 'dropped blocks')
+ *   LOST grows                   -> the ESP32 did not take it, look there */
 #define NBLK              6u
 
-/* A CHIP I/Q MINTAVETELE — a 'k' benchmark meresebol!
+/* THE CHIP'S I/Q SAMPLE RATE — from the 'k' benchmark measurement!
  *
- * EZ A LEGGYAKRABBAN ELFELEJTETT SOR. Ha PHY-t valtasz, EZT IS ALLITSD AT.
- * Az inditaskor kiirt sorbol azonnal latszik.
+ * THIS IS THE MOST OFTEN FORGOTTEN LINE. If you change the PHY, CHANGE
+ * THIS TOO. It is immediately visible in the line printed at start-up.
  *
- * Mert ertekek: 434M gyari profil -> 400 ksps
- *               100 kHz akv. sav  -> 400 ksps
- *                50 kHz akv. sav  ->  70 ksps
- *               270 kHz akv. sav  ->   1 Msps                      */
+ * Measured values: 434M factory profile -> 400 ksps
+ *                  100 kHz acq. BW      -> 400 ksps
+ *                   50 kHz acq. BW      ->  70 ksps
+ *                  270 kHz acq. BW      ->   1 Msps                 */
 #define IQ_STREAM_FS_IN_HZ 400000u
 
-/* ---------------- DC-BLOKK ----------------
- * A vevo DC-offszetje a decimalt sav KOZEPEN van, es a CIC unity gainnel
- * engedi at — enelkul a lanc a racsra tapad. Egypolusu szivo a kimeneti
- * ratan, idoallando ~2^DC_SHIFT minta.
+/* ---------------- DC BLOCK ----------------
+ * The receiver's DC offset sits in the MIDDLE of the decimated band, and
+ * the CIC passes it at unity gain — without this the chain sticks to the
+ * rail. Single-pole leaky integrator at the output rate, time constant
+ * ~2^DC_SHIFT samples.
  *
- * MIERT 14 ES NEM 10 (2026-08-03):
- * A 10-es ertek 12.5 ksps-re volt meretezve (~82 ms). i8-on a kimenet
- * 50 ksps, ott ugyanaz a 10 mar csak 20 ms — 7.8 Hz-es sarok.
+ * WHY 14 AND NOT 10 (2026-08-03):
+ * The value 10 was sized for 12.5 ksps (~82 ms). At i8 the output is
+ * 50 ksps, where the same 10 is only 20 ms — a 7.8 Hz corner.
  *
- * DE FIGYELEM, EZ CSAK ENYHITES, NEM GYOGYITAS. Az igazi baj az, hogy egy
- * FM-jel vivoje VONAL: nulla savszelessegu. Egy DC-szivo barmilyen lassu
- * is, 0 Hz-en VEGTELEN csillapitasa van — ha a vivo epp oda esik, teljesen
- * kiszedi alola. A lassitas csak annyit er, hogy tovabb tart, amig
- * megteszi.
+ * BUT NOTE: THIS IS ONLY MITIGATION, NOT A CURE. The real problem is that
+ * the carrier of an FM signal is a LINE: zero bandwidth. A DC leak, however
+ * slow, has INFINITE attenuation at 0 Hz — if the carrier lands exactly
+ * there, it is removed entirely. Slowing it down only means it takes
+ * longer to do so.
  *
- * Meres (sim_fg23.py, 1 kHz audio, 3 kHz loket, i8, 2.5 s):
+ * Measurement (sim_fg23.py, 1 kHz audio, 3 kHz deviation, i8, 2.5 s):
  *
- *   DC_SHIFT   hangolasi hiba 0 Hz-nel:   THD
+ *   DC_SHIFT   tuning error at 0 Hz:      THD
  *      10                                16.2 %
  *      14                                 8.3 %
- *       0 (nincs DC-blokk)                0.04 %
+ *       0 (no DC block)                   0.04 %
  *
- *   DC_SHIFT 14, kulonbozo hangolasi hibaval:
+ *   DC_SHIFT 14, with various tuning errors:
  *        0 Hz   8.3 %      2000 Hz  24.8 %
  *      500 Hz   0.08 %     2500 Hz   0.09 %
  *     1000 Hz  13.2 %      5500 Hz   0.32 %
  *
- * A minta egyertelmu: ahanyszor egy FM-oldalsav PONT 0 Hz-re esik (a tiszta
- * 1 kHz-es hangnal minden egesz kHz-es eltolas ilyen), a szivo kilyukasztja
- * a spektrumot, es a demodulalt hang szetesik. Valos beszednel/AFSK-nal az
- * energia szet van kenve, tehat enyhebb — de a VIVO vonala mindig ott van.
+ * The pattern is clear: whenever an FM sideband lands EXACTLY on 0 Hz
+ * (with a pure 1 kHz tone, every whole-kHz offset does this), the leak
+ * punches a hole in the spectrum and the demodulated audio falls apart.
+ * With real speech/AFSK the energy is spread out, so it is milder — but
+ * the CARRIER line is always there.
  *
- * KOVETKEZMENY, AMI ELSORE FURCSA: minel pontosabban kalibralod a
- * kristalyt, annal inkabb 0 Hz-re kerul a vivo, es ANNAL rosszabb lesz az
- * NFM-hang. Ez az a fajta hiba, amit tapogatozva sosem talalnal meg.
+ * A CONSEQUENCE THAT SEEMS ODD AT FIRST: the more precisely the crystal is
+ * calibrated, the closer the carrier sits to 0 Hz, and the WORSE the NFM
+ * audio gets. This is the kind of fault you would never find by trial and
+ * error.
  *
- * A VALODI MEGOLDAS kesobbre: szandekos ALACSONY IF. Hangold a FG23-at par
- * kHz-cel melle, es a jel a kimeneti sav szelen ul, nem a kozepen — igy sem
- * a DC-szivo, sem a DC-tuske, sem az 1/f zaj nem er hozza. Cserebe az
- * aprs_rx-nek es a SpyServer kozepfrekvenciajanak is tudnia kell rola,
- * ezert ez nem egy soros valtoztatas. Addig a 14 a jobb alku: felezi a
- * kart, es semmibe nem kerul.
+ * THE REAL SOLUTION, for later: a deliberate LOW IF. Tune the FG23 a few
+ * kHz off, so the signal sits at the edge of the output band, not the
+ * center — then neither the DC leak, nor the DC spike, nor the 1/f noise
+ * touches it. In exchange aprs_rx and the SpyServer center frequency must
+ * know about it, so this is not a one-line change. Until then 14 is the
+ * better deal: it halves the damage and costs nothing.
  *
- * Az akkumulator ezert int64: az atlagot 2^DC_SHIFT-szeresen tarolja,
- * es 2^20 * 2^14 = 2^34 mar nem fer el 32 biten. */
+ * The accumulator is therefore int64: it stores the average scaled by
+ * 2^DC_SHIFT, and 2^20 * 2^14 = 2^34 no longer fits in 32 bits. */
 #define IQ_STREAM_DC_BLOCK 1
 #define DC_SHIFT           14
 #define DC_PRECLAMP        (1 << 20)
 
-/* ---------------- RDY-VONAL (a vesztes megszuntetese by design) ------
+/* ---------------- RDY LINE (eliminating loss by design) ------
  *
- * Az ESP32 a GPIO2-n jelzi, hogy TENYLEG van-e felfuzott SPI-tranzakcioja
- * (a driver post_setup/post_trans callbackjeibol, tehat hardveri teny).
- * Mi a CS lehuzasa ELOTT megnezzuk, es ha nincs, varunk. Igy blokk nem
- * veszhet el es nem is csuszhat pufferkornyit — legfeljebb kesik, amit a
- * sajat NBLK=6 pufferunk elnyel.
+ * The ESP32 signals on GPIO2 whether it REALLY has a queued SPI
+ * transaction (from the driver's post_setup/post_trans callbacks, i.e. a
+ * hardware fact). We check it BEFORE pulling CS low, and wait if not
+ * ready. Thus a block can neither be lost nor slip a buffer boundary — at
+ * most it is delayed, which our own NBLK=6 buffer absorbs.
  *
- * MIERT VOLT EZ SZUKSEGES: 2026-08-03-ig vakon kuldtunk, es a meresek
- * szerint halozati terheles alatt ~7 blokk/s a rossz leiroba erkezett a
- * tuloldalon. Minden korabbi tunet (VESZT, HATRA, szetkent vivo, nema
- * APRS) errol az egy gyokerrol fakadt.
+ * WHY THIS WAS NECESSARY: until 2026-08-03 we sent blindly, and
+ * measurements showed that under network load ~7 blocks/s arrived in the
+ * wrong descriptor on the far side. Every earlier symptom (LOST, BACKWARDS,
+ * smeared carrier, silent APRS) stemmed from this single root cause.
  *
- * BEKOTES:  FG23 PD2 / EXP 9  <-  ESP32 GPIO2   (GND mar kozos)
+ * WIRING:  FG23 PD2 / EXP 9  <-  ESP32 GPIO2   (GND already common)
  *
- * Amig a drot nincs bekotve, hagyd 0-n: bekotetlen labbal a varakozas
- * minden blokknal timeoutolna, es a stream folyamatosan kesne. */
-#define IQ_RDY_ENABLE     1      /* 2026-08-03: a drot bekotve es mukodik */
+ * While the wire is not connected, leave it at 0: with an unconnected pin
+ * the wait would time out on every block, and the stream would be
+ * continuously delayed. */
+#define IQ_RDY_ENABLE     1      /* 2026-08-03: wire connected and working */
 
-/* SZIGORU MOD. A 2026-08-03-i eles futas 8007 timeoutot mutatott, es a
- * megmaradt ritka kirandulasok (d=25) pontosan ezekhez kotodnek: timeout
- * utan MEGIS kuldtunk — a regi vak viselkedes —, es a blokk a tuloldalon
- * epp betoltetlen leiroba erkezett. Szigoru modban timeout utan NEM
- * kuldunk: a blokk marad, a kovetkezo pump ujraprobalja. A sajat NBLK=6
- * puffer ezt boven elnyeli; ha a tuloldal tartosan halott (pl. ujraindul),
- * a sajat blokk-eldobas szamlalo no — EGESZ blokkok vesznek el nalunk,
- * lathatoan, nem fel-blokkok csendben a tuloldalon. */
+/* STRICT MODE. The 2026-08-03 live run showed 8007 timeouts, and the
+ * remaining rare excursions (d=25) are tied exactly to these: after a
+ * timeout we sent ANYWAY — the old blind behaviour — and the block landed
+ * in an unloaded descriptor on the far side. In strict mode we do NOT send
+ * after a timeout: the block stays, the next pump retries. Our own NBLK=6
+ * buffer absorbs this easily; if the far side is dead for long (e.g.
+ * rebooting), our own dropped-block counter grows — WHOLE blocks are lost
+ * on our side, visibly, not half-blocks silently on the far side. */
 #define RDY_STRICT        1
 #define RDY_PORT          gpioPortD
 #define RDY_PIN           2
-/* Ennyit varunk legfeljebb a RDY-ra. Egy blokk-periodus 5.1 ms, a sajat
- * pufferunk 6 melyseg — 3 ms varakozas boven elnyelodik. Ha lejar,
- * MEGIS elkuldjuk (a regi viselkedes), es szamoljuk: a szamlalobol
- * latszik, ha a tuloldal tartosan nem gyozi. */
+/* Maximum wait for RDY. One block period is 5.1 ms, our own buffer is
+ * 6 deep — a 3 ms wait is absorbed easily. If it expires, the block is
+ * sent ANYWAY (the old behaviour) and counted: the counter shows if the
+ * far side cannot keep up over time. */
 #define RDY_TIMEOUT_US    3000u
 
-/* ---------------- LABAK ---------------- */
+/* ---------------- PINS ---------------- */
 #define SPI_MOSI_PORT  gpioPortC
-#define SPI_MOSI_PIN   0      /* PC00 = EXP 10 -> GPIO6 : adat  */
+#define SPI_MOSI_PIN   0      /* PC00 = EXP 10 -> GPIO6 : data  */
 #define SPI_CLK_PORT   gpioPortC
-#define SPI_CLK_PIN    5      /* PC05 = EXP 15 -> GPIO5 : orajel */
+#define SPI_CLK_PIN    5      /* PC05 = EXP 15 -> GPIO5 : clock */
 #define SPI_CS_PORT    gpioPortA
 #define SPI_CS_PIN     7      /* PA07 = EXP 13 -> GPIO7 : CS    */
 
-/* Maximalis meghajtas + elmeredekseg a C porton. Tobb MHz-es orajelnel
- * ez mar szamit; portonkent hat, es mind a harom jel a C porton van. */
+/* Maximum drive strength + slew rate on port C. At a multi-MHz clock this
+ * matters; it applies per port, and all three signals are on port C. */
 #define SPI_FAST_SLEW  1
 
-/* CS setup / hold ido mikroszekundumban.
+/* CS setup / hold time in microseconds.
  *
- * Az ESP32 SPI slave-je nem tud azonnal reagalni a CS lehuzasara: a
- * hardvernek be kell toltenie a DMA-leirot, mielott az elso orajel-el
- * megerkezik. Espressif ezt kifejezetten emliti a slave dokumentaciojaban.
- * 10 us a 2080 us-os blokkido mellett 0.5% overhead — eszre sem vesszuk,
- * cserebe nem vesznek el tranzakciok. Ha minden stabil, le lehet vinni. */
+ * The ESP32 SPI slave cannot react instantly to CS going low: the hardware
+ * must load the DMA descriptor before the first clock edge arrives.
+ * Espressif explicitly mentions this in the slave documentation. 10 us
+ * against a 2080 us block time is 0.5% overhead — unnoticeable, and in
+ * exchange no transactions are lost. Can be reduced once everything is
+ * stable. */
 #define SPI_CS_SETUP_US  10u
 #define SPI_CS_HOLD_US    5u
 
-/* CS-POLARITAS.
- * 0 = aktiv ALACSONY — ez az SPI szabvany, es az ESP32 slave ezt varja.
- * 1 = aktiv MAGAS — csak kiserlet, ha felmerul a polaritas-kevereses.
- *     (Ha az ESP aktiv-alacsonyt var es mi magasat adunk, akkor a CS
- *     gyakorlatilag vegig aktivnak latszik nala, es ontja a csonka
- *     tranzakciokat — pont ezt lattuk a lebego CS-nel.) */
+/* CS POLARITY.
+ * 0 = active LOW — the SPI standard, and what the ESP32 slave expects.
+ * 1 = active HIGH — experiment only, if a polarity mix-up is suspected.
+ *     (If the ESP expects active-low and we drive high, CS appears
+ *     active practically all the time on its side, and it floods
+ *     truncated transactions — exactly what we saw with a floating CS.) */
 #define SPI_CS_ACTIVE_HIGH  0
 
 #if SPI_CS_ACTIVE_HIGH
@@ -247,20 +253,20 @@
 #define CS_IDLE_LEVEL  1u
 #endif
 
-/* ================= BLOKK-FORMATUM ================= */
+/* ================= BLOCK FORMAT ================= */
 
-/* A fejlec 16 bajt, a payload 256 komplex minta (I elol, Q utana),
- * mindketto little-endian. Az LDMA byteSwap-pel tolja ki, igy a masik
- * oldal bajtpuffere BIT SZERINT azonos ezzel a memoriakeppel — nem kell
- * cserelgetni semmit. */
+/* The header is 16 bytes, the payload 256 complex samples (I first, then
+ * Q), both little-endian. The LDMA shifts it out with byteSwap, so the
+ * byte buffer on the other side is BIT-IDENTICAL to this memory image —
+ * nothing needs swapping. */
 #define IQ_BLK_MAGIC   0x32425149u      /* 'I','Q','B','2' */
 
 typedef struct {
   uint32_t magic;      /* IQ_BLK_MAGIC */
-  uint32_t seq;        /* blokkonkent no — EBBOL SZAMOLHATO A VESZTES */
-  uint16_t nsamp;      /* komplex mintak szama (BLK_SAMPLES) */
-  uint16_t decim;      /* a teljes decimacio, hogy a vevo tudja a ratat */
-  uint32_t fs_in_hz;   /* a chip bemeneti mintavetele */
+  uint32_t seq;        /* increments per block — LOSS IS COMPUTED FROM THIS */
+  uint16_t nsamp;      /* number of complex samples (BLK_SAMPLES) */
+  uint16_t decim;      /* the total decimation, so the receiver knows the rate */
+  uint32_t fs_in_hz;   /* the chip's input sample rate */
 } iq_blk_hdr_t;
 
 typedef struct {
@@ -268,24 +274,24 @@ typedef struct {
   int16_t      iq[BLK_SAMPLES * 2];    /* I,Q,I,Q ... */
 } iq_blk_t;
 
-/* 4 bajtra igazitva: az LDMA felszavas atvitelt csinal. */
+/* 4-byte aligned: the LDMA performs half-word transfers. */
 static iq_blk_t s_blk[NBLK] __attribute__((aligned(4)));
 
 #define BLK_BYTES   (sizeof(iq_blk_t))          /* 1040 */
 #define BLK_WORDS   (BLK_BYTES / 2u)            /*  520 halfword */
 
-/* ================= ALLAPOT ================= */
+/* ================= STATE ================= */
 
 static const uint8_t *s_fifo      = NULL;
 static uint16_t       s_fifo_size = 0;
-static volatile uint16_t s_rd     = 0;      /* sajat olvasoindex, bajt */
+static volatile uint16_t s_rd     = 0;      /* own read index, bytes */
 
 static volatile bool s_active = false;
 static RAIL_Handle_t s_rail_for_restart = NULL;
 
-/* A synth finom-offszete. A RAIL_StartRx NEM orzi meg, ezert MINDEN
- * ujrainditas utan vissza kell irni — kulonben a stream inditasa eldobja
- * a kristalykalibraciot es a hangolast. Az app.c allitja. */
+/* Fine offset of the synth. RAIL_StartRx does NOT preserve it, so it must
+ * be rewritten after EVERY restart — otherwise starting the stream discards
+ * the crystal calibration and the tuning. Set by app.c. */
 static volatile int32_t s_offset_tick = 0;
 
 void iq_stream_set_freq_tick(int32_t tick)
@@ -297,7 +303,7 @@ void iq_stream_set_freq_tick(int32_t tick)
   }
 }
 
-/* Minden RAIL_StartRx utan EZT kell hivni, sose a csupasz StartRx-et. */
+/* THIS must be called for every RAIL_StartRx, never the bare StartRx. */
 static void stream_start_rx(RAIL_Handle_t rail, uint16_t channel)
 {
   RAIL_StartRx(rail, channel, NULL);
@@ -305,49 +311,49 @@ static void stream_start_rx(RAIL_Handle_t rail, uint16_t channel)
 }
 static uint16_t      s_channel_for_restart = 0;
 
-/* --- KETFOKOZATU CIC, VEGIG int32 ---
- * Az elso valtozat int64-et hasznalt, ami -Og-vel olyan lassu, hogy
- * 1 Msps-en kiehezteti a fo ciklust. Ket kaszkadolt CIC int32-vel: az
- * ELSO fut a teljes ratan (R1=8, olcso), a masodik nyolcadratan.
+/* --- TWO-STAGE CIC, int32 THROUGHOUT ---
+ * The first version used int64, which with -Og is so slow that it starves
+ * the main loop at 1 Msps. Two cascaded CICs in int32: the FIRST runs at
+ * the full rate (R1=8, cheap), the second at one eighth of the rate.
  *
- * Az 1. fokozat MASODRENDU: a bemeneti ratan futo szakasz a szuk
- * keresztmetszet (a harmadrendu valtozat 1000 helyett csak 522 ksps-t
- * birt). Megengedheto, mert a vegso savunk nagyon keskeny a kozbenso
- * ratahoz kepest, igy az 1. fokozat alias-savjai a CIC nullaira esnek. */
+ * Stage 1 is SECOND-ORDER: the section running at the input rate is the
+ * bottleneck (the third-order version managed only 522 ksps instead of
+ * 1000). Acceptable because our final band is very narrow compared to the
+ * intermediate rate, so the alias bands of stage 1 fall on the CIC nulls. */
 #define CIC_R1        8u
 #define CIC_SH1       6u                    /* 2*log2(8) */
 
-static int32_t a1_i, a2_i, a1_q, a2_q;                  /* 1. integrator */
-static int32_t b1_i, b2_i, b1_q, b2_q;                  /* 1. comb */
-static int32_t c1_i, c2_i, c3_i, c1_q, c2_q, c3_q;      /* 2. integrator */
-static int32_t d1_i, d2_i, d3_i, d1_q, d2_q, d3_q;      /* 2. comb */
+static int32_t a1_i, a2_i, a1_q, a2_q;                  /* stage 1 integrator */
+static int32_t b1_i, b2_i, b1_q, b2_q;                  /* stage 1 comb */
+static int32_t c1_i, c2_i, c3_i, c1_q, c2_q, c3_q;      /* stage 2 integrator */
+static int32_t d1_i, d2_i, d3_i, d1_q, d2_q, d3_q;      /* stage 2 comb */
 #if IQ_STREAM_DC_BLOCK
-static int64_t dc_i, dc_q;      /* 64 bit: 2^20 * 2^14 nem fer 32-re */
+static int64_t dc_i, dc_q;      /* 64 bit: 2^20 * 2^14 does not fit in 32 */
 #endif
 
 static uint32_t s_cnt1 = 0, s_cnt2 = 0;
 static uint32_t s_decim_R  = 256;
 static uint32_t s_R2       = 32;
 
-/* 2^24-es fixpontos normalizalo: s_norm = 2^24 / R2^3. */
+/* 2^24 fixed-point normaliser: s_norm = 2^24 / R2^3. */
 #define NORM_SHIFT  24
 static int32_t  s_norm     = (1 << NORM_SHIFT) / 32768;
 
-/* --- blokk-kezeles: EGY termelo (ISR) es EGY fogyaszto (fo ciklus),
- * ezert eleg ket monoton szamlalo. varakozo = s_prod - s_cons. --- */
-static volatile uint32_t s_prod = 0;     /* hany blokk lett kesz */
-static volatile uint32_t s_cons = 0;     /* hany blokk ment ki */
-static volatile uint16_t s_fill_n = 0;   /* mintak az eppen toltott blokkban */
-static uint32_t s_seq = 0;               /* kimeno sorszam */
-static int16_t  s_rssi_dbm = -128;       /* legutobbi RAIL-RSSI (dBm), a fejlecbe */
+/* --- block handling: ONE producer (ISR) and ONE consumer (main loop),
+ * so two monotonic counters suffice. pending = s_prod - s_cons. --- */
+static volatile uint32_t s_prod = 0;     /* blocks completed */
+static volatile uint32_t s_cons = 0;     /* blocks sent out */
+static volatile uint16_t s_fill_n = 0;   /* samples in the block being filled */
+static uint32_t s_seq = 0;               /* outgoing sequence number */
+static int16_t  s_rssi_dbm = -128;       /* latest RAIL RSSI (dBm), for the header */
 
-/* Statisztika */
+/* Statistics */
 static volatile uint32_t s_out_samples = 0;
-static volatile uint32_t s_blk_drops   = 0;   /* nem volt szabad blokk */
-static uint32_t s_rdy_waits    = 0;   /* hanyszor kellett varni a RDY-ra */
-static uint32_t s_rdy_timeouts = 0;   /* hanyszor jart le a turelem */
-static uint32_t s_rdy_skips    = 0;   /* szigoru mod: elhalasztott kuldes */
-static uint64_t s_rdy_wait_us  = 0;   /* osszes varakozas */
+static volatile uint32_t s_blk_drops   = 0;   /* no free block available */
+static uint32_t s_rdy_waits    = 0;   /* times we had to wait for RDY */
+static uint32_t s_rdy_timeouts = 0;   /* times the wait expired */
+static uint32_t s_rdy_skips    = 0;   /* strict mode: deferred sends */
+static uint64_t s_rdy_wait_us  = 0;   /* total wait time */
 static volatile uint32_t s_fifo_ovf    = 0;
 static volatile uint32_t s_clip        = 0;
 static volatile uint32_t s_pump_calls  = 0;
@@ -355,43 +361,45 @@ static volatile uint32_t s_isr_events  = 0;
 static volatile bool     s_need_restart = false;
 static RAIL_Time_t s_t_start = 0;
 
-/* ============ A BEMENETI RATA MERESE, NEM FELTETELEZESE ============
+/* ============ MEASURING THE INPUT RATE, NOT ASSUMING IT ============
  *
- * Az IQ_STREAM_FS_IN_HZ egy DEFINE volt, ami a Radio Configuratorban
- * beallitott akvizicios savszelessegbol kovetkezo mintavetelt tukrozte.
- * Ez csendes hiba forrasa: ha a PHY-t atallitod (pl. az akvizicios sav
- * 100 kHz-re csuszik), a define ottmarad, es onnantol MINDEN szam hazudik
- * — az SDR++ rossz ratat kap, a hang rossz magassagon szol, a demodulator
- * rossz szuroket szamol. Semmi nem hibazik lathatoan, csak minden melle megy.
+ * IQ_STREAM_FS_IN_HZ used to be a DEFINE reflecting the sample rate that
+ * followed from the acquisition bandwidth set in the Radio Configurator.
+ * That is a source of silent error: if the PHY is changed (e.g. the
+ * acquisition bandwidth moves to 100 kHz), the define stays, and from then
+ * on EVERY number lies — SDR++ gets the wrong rate, audio plays at the
+ * wrong pitch, the demodulator computes the wrong filters. Nothing fails
+ * visibly; everything is just off.
  *
- * Ezert MERJUK: szamoljuk a FIFO-bol beolvasott mintakat es az idot. */
-/* MERESI ABLAK. 2 masodperc: eleg hosszu ahhoz, hogy a meres zaja
- * elhanyagolhato legyen. */
+ * Hence we MEASURE: count the samples read from the FIFO and the time. */
+/* MEASUREMENT WINDOW. 2 seconds: long enough for the measurement noise
+ * to be negligible. */
 #define FS_MEAS_MIN_US     2000000u
 
-/* HOLTSAV ezrelekben. Csak ennel nagyobb elteresre valtunk erteket.
+/* DEADBAND in per mille. The value is only changed for a larger deviation.
  *
- * MIERT KELL: az elso valtozat a mert erteket a 39 MHz / N racsra
- * igazitotta, mert "a rata kvantalt". A valosag: 39e6 / 400000 = 97.5 —
- * a tenyleges rata PONT ket racspont kozott van, es a kerekites 97 es 98
- * kozott ugralt (397959 <-> 402061). Minden ugras egy teljes
- * ujrakonfiguralast valtott ki a lanc mindket vegen, plusz ket naplosort
- * — masodpercenkent tizszer. Ebbol lett a blokkvesztes.
+ * WHY IT IS NEEDED: the first version snapped the measured value to the
+ * 39 MHz / N grid, because "the rate is quantised". Reality: 39e6 / 400000
+ * = 97.5 — the actual rate sits EXACTLY between two grid points, and the
+ * rounding flipped between 97 and 98 (397959 <-> 402061). Every flip
+ * triggered a full reconfiguration at both ends of the chain, plus two
+ * log lines — ten times per second. That is where the block loss came
+ * from.
  *
- * Tanulsag: ne igazits racsra, amirol nem tudod BIZTOSAN, hogy a jel rajta
- * van. Egy holtsav ugyanazt a stabilitast adja feltevesek nelkul. */
+ * Lesson: do not snap to a grid unless you know FOR CERTAIN the signal is
+ * on it. A deadband gives the same stability without assumptions. */
 #define FS_DEADBAND_PPT    10u        /* 1% */
 
 static volatile uint32_t s_fs_in_hz  = IQ_STREAM_FS_IN_HZ;
-static uint32_t          s_fs_cnt    = 0;      /* komplex mintak az ablakban */
+static uint32_t          s_fs_cnt    = 0;      /* complex samples in the window */
 static RAIL_Time_t       s_fs_t0     = 0;
-static volatile uint32_t s_fs_report = 0;      /* !=0 -> a fo ciklus kiirja */
+static volatile uint32_t s_fs_report = 0;      /* !=0 -> the main loop prints it */
 
-/* FIGYELEM: EZ ISR-BOL FUT (iq_stream_on_event).
- * SEMMILYEN printf, semmilyen blokkolo muvelet nem lehet benne. Az elso
- * valtozatban itt volt egy printf a VCOM-ra — 115200-on ~6 ms blokkolas a
- * radio megszakitasaban, masodpercenkent tobbszor. A kiiras ezert csak
- * jelzest hagy, es a fo ciklus vegzi el. */
+/* NOTE: THIS RUNS FROM AN ISR (iq_stream_on_event).
+ * NO printf, no blocking operation of any kind may be in here. The first
+ * version had a printf to VCOM here — at 115200 that is ~6 ms of blocking
+ * inside the radio interrupt, several times per second. Therefore it only
+ * leaves a flag, and the main loop does the printing. */
 static void fs_account(uint32_t nsamples)
 {
   RAIL_Time_t now = RAIL_GetTime();
@@ -410,30 +418,30 @@ static void fs_account(uint32_t nsamples)
   uint32_t diff = (meas > cur) ? (meas - cur) : (cur - meas);
   if (diff * 1000u > cur * FS_DEADBAND_PPT) {
     s_fs_in_hz  = meas;
-    s_fs_report = meas;            /* a fo ciklus kiirja */
+    s_fs_report = meas;            /* the main loop prints it */
   }
 }
 
 
-/* --- CS-idozites merese ---
- * A CS-nek a blokk kuldesi idejeig (2.08 ms @ 4 MHz) kellene lent lennie.
- * Ha tovabb marad, a masik oldal a kovetkezo tranzakciot mar aktiv CS-sel
- * kapja, es az azonnal, uresen lezarul. Ezert megmerjuk, MELYIK feltetel
- * kesik: az LDMA-kesz, vagy a TXC. */
-static volatile uint32_t s_cs_t0      = 0;   /* CS lehuzas idopontja */
-static volatile uint32_t s_cs_t_ldma  = 0;   /* amikor az LDMA kesz lett */
+/* --- CS timing measurement ---
+ * CS should be low for the block transmit time (2.08 ms @ 4 MHz). If it
+ * stays longer, the other side receives the next transaction with CS
+ * already active, and it closes immediately, empty. So we measure WHICH
+ * condition is late: LDMA done, or TXC. */
+static volatile uint32_t s_cs_t0      = 0;   /* time of CS going low */
+static volatile uint32_t s_cs_t_ldma  = 0;   /* when the LDMA finished */
 static volatile bool     s_ldma_seen  = false;
-static volatile uint64_t s_sum_ldma_us = 0;  /* CS-le -> LDMA kesz */
-static volatile uint64_t s_sum_txc_us  = 0;  /* LDMA kesz -> TXC */
+static volatile uint64_t s_sum_ldma_us = 0;  /* CS low -> LDMA done */
+static volatile uint64_t s_sum_txc_us  = 0;  /* LDMA done -> TXC */
 static volatile uint32_t s_max_cs_us   = 0;
 static volatile uint32_t s_cs_meas     = 0;
 
-/* --- A CS LAB TENYLEGES SZINTJE ---
- * A GPIO_PinInGet a PADOT olvassa, nem a kimeneti regisztert. Ha valami
- * kulso elhuzza a vonalat, a beolvasott szint eltér attol, amit kiirtunk.
- * A pumpabol mintavetelezunk (~48 kHz, azaz blokként ~1000 minta), igy a
- * TENYLEGES kitoltes es az esetleges utkozes is merheto — fuggetlenul
- * attol, mit mutat a multimeter. */
+/* --- THE ACTUAL LEVEL OF THE CS PIN ---
+ * GPIO_PinInGet reads the PAD, not the output register. If something
+ * external pulls the line, the level read differs from what we wrote. We
+ * sample from the pump (~48 kHz, i.e. ~1000 samples per block), so the
+ * ACTUAL duty cycle and any contention can be measured — regardless of
+ * what the multimeter shows. */
 static volatile uint32_t s_pad_samples  = 0;
 static volatile uint32_t s_pad_high     = 0;
 static volatile uint32_t s_pad_mismatch = 0;
@@ -452,10 +460,10 @@ static void spi_setup(void)
   CMU_ClockEnable(cmuClock_USART0, true);
 
 #if SPI_FAST_SLEW
-  /* A SiSDK 2025.6 emlibje mar nem adja a GPIO_DriveStrengthSet()-et,
-   * ezert kozvetlen regiszterires. SLEWRATE 0..7 (alap 4), a 7 a
-   * legmeredekebb; DRIVESTRENGTH 0 = STRONG. */
-  /* A SCLK es a MOSI a C porton van, a CS az A-n — mindkettot allitjuk. */
+  /* The SiSDK 2025.6 emlib no longer provides GPIO_DriveStrengthSet(),
+   * hence a direct register write. SLEWRATE 0..7 (default 4), 7 is the
+   * steepest; DRIVESTRENGTH 0 = STRONG. */
+  /* SCLK and MOSI are on port C, CS on A — both are configured. */
   {
     static const GPIO_Port_TypeDef ports[2] = { gpioPortC, gpioPortA };
     for (int pi = 0; pi < 2; pi++) {
@@ -476,24 +484,24 @@ static void spi_setup(void)
 
   GPIO_PinModeSet(SPI_MOSI_PORT, SPI_MOSI_PIN, gpioModePushPull, 0);
   GPIO_PinModeSet(SPI_CLK_PORT,  SPI_CLK_PIN,  gpioModePushPull, 0);
-  /* A CS-t MI hajtjuk, sima GPIO-kent. */
+  /* CS is driven by US, as plain GPIO. */
   GPIO_PinModeSet(SPI_CS_PORT,   SPI_CS_PIN,   gpioModePushPull, CS_IDLE_LEVEL);
 
   USART_InitSync_TypeDef init = USART_INITSYNC_DEFAULT;
-  init.enable       = usartEnableTx;      /* csak adunk */
+  init.enable       = usartEnableTx;      /* transmit only */
   init.baudrate     = SPI_HZ;
-  init.databits     = usartDatabits16;    /* 16 bites keret, mint eddig */
+  init.databits     = usartDatabits16;    /* 16-bit frame, as before */
   init.master       = true;
-  init.msbf         = true;               /* MSB elol — SPI szokas */
+  init.msbf         = true;               /* MSB first — SPI convention */
   init.clockMode    = usartClockMode0;    /* CPOL=0, CPHA=0 = SPI mode 0 */
-  init.autoCsEnable = false;              /* !!! a CS a mienk, GPIO */
+  init.autoCsEnable = false;              /* !!! CS is ours, GPIO */
   init.autoTx       = false;
 
   USART_InitSync(USART0, &init);
 
-  /* Labkiosztas: CSAK TX es CLK. A CSROUTE/CSPEN SZANDEKOSAN kimarad —
-   * kulonben a periferia is billegtetne a CS-t, es elutne a kezi
-   * blokk-keretezessel. */
+  /* Pin routing: ONLY TX and CLK. CSROUTE/CSPEN is DELIBERATELY omitted —
+   * otherwise the peripheral would also toggle CS and collide with the
+   * manual block framing. */
   GPIO->USARTROUTE[0].TXROUTE =
       ((uint32_t)SPI_MOSI_PORT << _GPIO_USART_TXROUTE_PORT_SHIFT)
     | ((uint32_t)SPI_MOSI_PIN  << _GPIO_USART_TXROUTE_PIN_SHIFT);
@@ -503,12 +511,12 @@ static void spi_setup(void)
   GPIO->USARTROUTE[0].ROUTEEN =
       GPIO_USART_ROUTEEN_TXPEN | GPIO_USART_ROUTEEN_CLKPEN;
 
-  printf("# SPI: %lu Hz, mode 0, 16 bit, MSB elol\r\n",
+  printf("# SPI: %lu Hz, mode 0, 16 bit, MSB first\r\n",
          (unsigned long)SPI_HZ);
-  printf("# SPI labak: MOSI=PC%02u/EXP10  SCLK=PC%02u/EXP15  "
-         "CS=PA%02u/EXP13 (kezi)\r\n",
+  printf("# SPI pins: MOSI=PC%02u/EXP10  SCLK=PC%02u/EXP15  "
+         "CS=PA%02u/EXP13 (manual)\r\n",
          (unsigned)SPI_MOSI_PIN, (unsigned)SPI_CLK_PIN, (unsigned)SPI_CS_PIN);
-  printf("# blokk: %lu bajt (%lu minta), ~%lu us kuldesi ido\r\n",
+  printf("# block: %lu bytes (%lu samples), ~%lu us transmit time\r\n",
          (unsigned long)BLK_BYTES, (unsigned long)BLK_SAMPLES,
          (unsigned long)((uint64_t)BLK_BYTES * 8ull * 1000000ull / SPI_HZ));
 }
@@ -519,19 +527,19 @@ static void spi_teardown(void)
   s_tx_busy = false;
   GPIO->USARTROUTE[0].ROUTEEN = 0;
   USART_Reset(USART0);
-  /* A CS a route lekapcsolasa UTAN is maradjon hajtott magas — kulonben
-   * a masik oldal megint lebego bemenetet lat. */
+  /* CS must stay driven high even AFTER the route is disabled — otherwise
+   * the other side sees a floating input again. */
   GPIO_PinModeSet(SPI_CS_PORT, SPI_CS_PIN, gpioModePushPull, CS_IDLE_LEVEL);
 }
 
-/* Egy blokk kitolasa: CS le, LDMA inditas. A CS felvitele a pump-ban
- * tortenik, amikor az LDMA vegzett ES a shiftregiszter is kiurult. */
+/* Shift out one block: CS low, start LDMA. CS is raised in the pump, once
+ * the LDMA has finished AND the shift register has emptied as well. */
 static void spi_send_block(iq_blk_t *b)
 {
   if (!s_dma_alloc) {
     DMADRV_Init();
     if (DMADRV_AllocateChannel(&s_dma_ch, NULL) != ECODE_EMDRV_DMADRV_OK) {
-      printf("# LDMA csatorna nem kaphato!\r\n");
+      printf("# LDMA channel not available!\r\n");
       return;
     }
     s_dma_alloc = true;
@@ -540,9 +548,9 @@ static void spi_send_block(iq_blk_t *b)
   s_desc.xfer.structType  = ldmaCtrlStructTypeXfer;
   s_desc.xfer.structReq   = 0;
   s_desc.xfer.xferCnt     = BLK_WORDS - 1u;
-  /* byteSwap: a felszo ket bajtjat megcsereli kikuldes elott. Igy a masik
-   * oldal bajtpuffere BIT SZERINT azonos lesz ezzel a memoriakeppel, es
-   * ott nem kell semmit forgatni. (A USART MSB-first tol ki.) */
+  /* byteSwap: swaps the two bytes of the half-word before sending. This
+   * makes the byte buffer on the other side BIT-IDENTICAL to this memory
+   * image, with nothing to rotate there. (The USART shifts out MSB-first.) */
   s_desc.xfer.byteSwap    = 1;
   s_desc.xfer.blockSize   = ldmaCtrlBlockSizeUnit1;
   s_desc.xfer.doneIfs     = 0;
@@ -564,8 +572,8 @@ static void spi_send_block(iq_blk_t *b)
       LDMA_TRANSFER_CFG_PERIPHERAL(ldmaPeripheralSignal_USART0_TXBL);
 
 #if IQ_RDY_ENABLE
-  /* A tuloldal keszen all? A varakozas itt, a CS lehuzasa ELOTT tortenik
-   * — a blokk addig a mienk, semmi nem veszhet el. */
+  /* Is the far side ready? The wait happens here, BEFORE CS goes low —
+   * until then the block is ours, nothing can be lost. */
   if (!GPIO_PinInGet(RDY_PORT, RDY_PIN)) {
     RAIL_Time_t t0 = RAIL_GetTime();
     RAIL_Time_t tl = t0 + RDY_TIMEOUT_US;
@@ -581,8 +589,8 @@ static void spi_send_block(iq_blk_t *b)
     s_rdy_wait_us += (uint64_t)(RAIL_GetTime() - t0);
 #if RDY_STRICT
     if (timed_out) {
-      /* NEM kuldunk vakon. A blokk a mienk marad (s_cons nem lepett,
-       * s_tx_busy hamis), a kovetkezo pump ujraprobalja. */
+      /* Do NOT send blindly. The block stays ours (s_cons not advanced,
+       * s_tx_busy false), the next pump retries. */
       s_rdy_skips++;
       return;
     }
@@ -592,19 +600,20 @@ static void spi_send_block(iq_blk_t *b)
   }
 #endif
 
-  /* Most mar biztosan kuldunk (a strict-timeout ag fentebb return-olt). A
-   * sorszamot CSAK ITT irjuk — igy egy RDY-timeout nem eget el sorszamot,
-   * es nem keletkezik fantomlyuk az ESP oldalon. A DMA a CS_ASSERT utan
-   * indul, tehat a most beirt seq-et viszi ki. */
+  /* Now we are definitely sending (the strict-timeout branch returned
+   * above). The sequence number is written ONLY HERE — so an RDY timeout
+   * does not burn a sequence number and no phantom gap appears on the ESP
+   * side. The DMA starts after CS_ASSERT, so it carries the seq written
+   * now. */
   b->hdr.seq = s_seq++;
 
-  CS_ASSERT();                                  /* CS aktiv */
+  CS_ASSERT();                                  /* CS active */
 
-  /* CS SETUP IDO. Az ESP32 SPI slave-jenek kell nehany mikroszekundum a
-   * CS lehuzasa utan, mielott megindul az orajel — a hardver ekkor tolti
-   * be a DMA-leirot. Ha az elso ora tul hamar jon, a tranzakcio elveszik
-   * vagy csonka lesz. Nalunk a CS lehuzasa es az LDMA inditasa kozott
-   * kulonben csak 1-2 us lenne. */
+  /* CS SETUP TIME. The ESP32 SPI slave needs a few microseconds after CS
+   * goes low before the clock starts — this is when the hardware loads the
+   * DMA descriptor. If the first clock comes too early, the transaction is
+   * lost or truncated. Otherwise there would be only 1-2 us between CS
+   * going low and the LDMA start. */
   {
     RAIL_Time_t t = RAIL_GetTime() + SPI_CS_SETUP_US;
     while ((int32_t)(RAIL_GetTime() - t) < 0) { }
@@ -623,18 +632,17 @@ void iq_stream_init(const uint8_t *fifo_base, uint16_t fifo_bytes)
   s_fifo = fifo_base;
   s_fifo_size = fifo_bytes;
 
-  /* A CS-t AZONNAL inaktivba (magas) hajtjuk, mar bekapcsolaskor.
+  /* Drive CS inactive (high) IMMEDIATELY, already at power-up.
    *
-   * MIERT: reset utan a PC03 letiltott bemenet, tehat a masik oldal
-   * CS-bemenete LEBEG. Egy SPI slave minden zajelre lezar egy
-   * tranzakciot — meresve ~4200 csonka tranzakcio masodpercenkent,
-   * mielott barmit is inditottunk volna. Egy push-pull magas szint
-   * ezt teljesen megszunteti. */
+   * WHY: after reset PC03 is a disabled input, so the CS input on the
+   * other side FLOATS. An SPI slave closes a transaction on every noise
+   * edge — measured ~4200 truncated transactions per second before we had
+   * started anything. A push-pull high level eliminates this entirely. */
   CMU_ClockEnable(cmuClock_GPIO, true);
   GPIO_PinModeSet(SPI_CS_PORT, SPI_CS_PIN, gpioModePushPull, CS_IDLE_LEVEL);
 #if IQ_RDY_ENABLE
-  /* Bemenet LEHUZASSAL: ha a drot leesik, a RDY tartosan 0-nak latszik,
-   * a timeout-szamlalo azonnal elarulja — nem nema hiba. */
+  /* Input with PULL-DOWN: if the wire falls off, RDY reads as a constant
+   * 0 and the timeout counter reveals it immediately — not a silent fault. */
   GPIO_PinModeSet(RDY_PORT, RDY_PIN, gpioModeInputPull, 0);
 #endif
 }
@@ -646,29 +654,29 @@ uint32_t iq_stream_out_sps(uint16_t decim)
   uint32_t r = (decim < CIC_R1) ? CIC_R1 : (uint32_t)decim;
   r = (r / CIC_R1) * CIC_R1;
   if (r == 0u) r = CIC_R1;
-  /* A MERT ratabol, nem a define-bol. Amig nincs meres, a define az
-   * alapertelmezes. */
+  /* From the MEASURED rate, not the define. Until a measurement exists,
+   * the define is the default. */
   return s_fs_in_hz / r;
 }
 
-/* ================= MINTA -> BLOKK ================= */
+/* ================= SAMPLE -> BLOCK ================= */
 
 static inline void blk_put_sample(int16_t vi, int16_t vq)
 {
-  if ((s_prod - s_cons) >= NBLK) {   /* nincs szabad blokk */
+  if ((s_prod - s_cons) >= NBLK) {   /* no free block */
     s_blk_drops++;
     return;
   }
 
   iq_blk_t *b = &s_blk[s_prod % NBLK];
   uint16_t n = s_fill_n;
-  b->iq[n * 2u + 0u] = vi;           /* I elol */
+  b->iq[n * 2u + 0u] = vi;           /* I first */
   b->iq[n * 2u + 1u] = vq;
   n++;
 
   if (n >= BLK_SAMPLES) {
     s_fill_n = 0;
-    s_prod++;                        /* EZ teszi kuldhetove */
+    s_prod++;                        /* THIS makes it sendable */
   } else {
     s_fill_n = n;
   }
@@ -678,20 +686,20 @@ static inline void blk_put_sample(int16_t vi, int16_t vq)
 
 static void process_block(const uint8_t *p, uint16_t nbytes)
 {
-  typedef struct { int16_t q, i; } iq_in_t;   /* BUFC sorrend: Q ELOL */
+  typedef struct { int16_t q, i; } iq_in_t;   /* BUFC order: Q FIRST */
   uint16_t nsamp = (uint16_t)(nbytes / sizeof(iq_in_t));
 
   int32_t A1i = a1_i, A2i = a2_i;
   int32_t A1q = a1_q, A2q = a2_q;
   uint32_t cnt1 = s_cnt1;
 
-  /* EGY 32 BITES OLVASAS negy bajtolvasas helyett. A FIFO 4 bajtos
-   * igazitasban all es az indexek is 4-gyel oszthatok, ezert biztonsagos. */
+  /* ONE 32-BIT READ instead of four byte reads. The FIFO is 4-byte
+   * aligned and the indices are multiples of 4, so this is safe. */
   const uint32_t *w = (const uint32_t *)(const void *)p;
 
   for (uint16_t k = 0; k < nsamp; k++) {
     uint32_t v = *w++;
-    int16_t q = (int16_t)(uint16_t)(v & 0xFFFFu);        /* Q ELOL */
+    int16_t q = (int16_t)(uint16_t)(v & 0xFFFFu);        /* Q FIRST */
     int16_t i = (int16_t)(uint16_t)(v >> 16);
 
     A1i += i;  A2i += A1i;
@@ -738,9 +746,9 @@ static void process_block(const uint8_t *p, uint16_t nbytes)
     oq   -= (int32_t)(dc_q >> DC_SHIFT);
 #endif
 
-    /* Levagas +-32767-re, NEM -32768-ra: a 0x8000 az egyetlen 16 bites
-     * ertek, amibol egy egybites csuszas pontos nullat csinal. Egy LSB
-     * ara, cserebe az a csapda vegleg megszunik. */
+    /* Clip to +-32767, NOT -32768: 0x8000 is the only 16-bit value that a
+     * one-bit slip turns into an exact zero. Costs one LSB; in exchange
+     * that trap is gone for good. */
     if (oi >  32767) { oi =  32767; s_clip++; }
     else if (oi < -32767) { oi = -32767; s_clip++; }
     if (oq >  32767) { oq =  32767; s_clip++; }
@@ -755,7 +763,7 @@ static void process_block(const uint8_t *p, uint16_t nbytes)
   s_cnt1 = cnt1;
 }
 
-/* ================= RAIL ESEMENY ================= */
+/* ================= RAIL EVENT ================= */
 
 bool iq_stream_on_event(RAIL_Handle_t rail, RAIL_Events_t events)
 {
@@ -763,8 +771,8 @@ bool iq_stream_on_event(RAIL_Handle_t rail, RAIL_Events_t events)
 
   if (events & RAIL_EVENT_RX_FIFO_OVERFLOW) {
     s_fifo_ovf++;
-    /* CSAK jelzes. RAIL_ResetFifo-t futo RX mellett hivni megoli a
-     * vetelt — az ujrainditas a fo ciklusban tortenik. */
+    /* Flag ONLY. Calling RAIL_ResetFifo while RX is running kills
+     * reception — the restart happens in the main loop. */
     s_need_restart = true;
     return true;
   }
@@ -780,18 +788,18 @@ bool iq_stream_on_event(RAIL_Handle_t rail, RAIL_Events_t events)
       if (n > 4096u) n = 4096u;
       if (n == 0u) break;
 
-      /* HELYBEN olvasunk a FIFO-bol (zero-copy), korbefordulassal. */
+      /* Read IN PLACE from the FIFO (zero-copy), with wrap-around. */
       uint16_t first = (uint16_t)(s_fifo_size - s_rd);
       if (first > n) first = n;
       process_block(&s_fifo[s_rd], first);
       if (n > first) process_block(&s_fifo[0], (uint16_t)(n - first));
 
-      RAIL_ReadRxFifo(rail, NULL, n);      /* csak a mutato lep */
+      RAIL_ReadRxFifo(rail, NULL, n);      /* only the pointer advances */
       s_rd = (uint16_t)((s_rd + n) % s_fifo_size);
 
-      /* A TENYLEGES bemeneti rata merese. Innen tudja a lanc tobbi resze
-       * (SDR++, demodulator), hany mintat kap masodpercenkent — nem egy
-       * define-bol, ami elavulhat. 4 bajt = egy komplex minta. */
+      /* Measuring the ACTUAL input rate. This is how the rest of the chain
+       * (SDR++, demodulator) knows how many samples per second it gets —
+       * not from a define that can go stale. 4 bytes = one complex sample. */
       fs_account((uint32_t)(n >> 2));
 
       avail = RAIL_GetRxFifoBytesAvailable(rail);
@@ -801,7 +809,7 @@ bool iq_stream_on_event(RAIL_Handle_t rail, RAIL_Events_t events)
   return true;
 }
 
-/* ================= INDIT / LEALLIT ================= */
+/* ================= START / STOP ================= */
 
 void iq_stream_start(RAIL_Handle_t rail, uint16_t channel,
                      uint16_t decim, uint8_t out_shift)
@@ -849,20 +857,20 @@ void iq_stream_start(RAIL_Handle_t rail, uint16_t channel,
 
   {
     uint32_t sps = iq_stream_out_sps((uint16_t)s_decim_R);
-    printf("# kimenet: R=%lu -> %lu sps, %lu B/s, blokk %lu ms-onkent\r\n",
+    printf("# output: R=%lu -> %lu sps, %lu B/s, one block every %lu ms\r\n",
            (unsigned long)s_decim_R, (unsigned long)sps,
            (unsigned long)(sps * 4u),
            (unsigned long)(sps ? (BLK_SAMPLES * 1000u / sps) : 0u));
   }
 #if IQ_STREAM_DC_BLOCK
-  printf("# DC-blokk BE (shift=%u, idoallando ~%lu minta)\r\n",
+  printf("# DC block ON (shift=%u, time constant ~%lu samples)\r\n",
          (unsigned)DC_SHIFT, (unsigned long)(1ul << DC_SHIFT));
 #endif
 
   s_rail_for_restart = rail;
   s_channel_for_restart = channel;
   s_t_start = RAIL_GetTime();
-  s_fs_t0 = 0; s_fs_cnt = 0;      /* uj meresi ablak */
+  s_fs_t0 = 0; s_fs_cnt = 0;      /* new measurement window */
   s_active = true;
   stream_start_rx(rail, channel);
 }
@@ -879,21 +887,21 @@ void iq_stream_stop(RAIL_Handle_t rail, uint16_t channel)
     rate = (uint32_t)(((uint64_t)s_out_samples * 1000000ull) / dur_us);
   }
 
-  printf("\r\n# stream leallt: %lu kimeneti minta, %lu.%03lu ksps\r\n",
+  printf("\r\n# stream stopped: %lu output samples, %lu.%03lu ksps\r\n",
          (unsigned long)s_out_samples,
          (unsigned long)(rate / 1000u), (unsigned long)(rate % 1000u));
-  printf("# kikuldott blokk: %lu   blokk-eldobas: %lu   "
-         "FIFO-overflow: %lu\r\n",
+  printf("# blocks sent: %lu   dropped blocks: %lu   "
+         "FIFO overflow: %lu\r\n",
          (unsigned long)s_cons, (unsigned long)s_blk_drops,
          (unsigned long)s_fifo_ovf);
 #if IQ_RDY_ENABLE
-  printf("# RDY: %lu varakozas (atlag %lu us), %lu timeout, "
-         "%lu halasztott kuldes\r\n",
+  printf("# RDY: %lu waits (avg %lu us), %lu timeouts, "
+         "%lu deferred sends\r\n",
          (unsigned long)s_rdy_waits,
          (unsigned long)(s_rdy_waits ? s_rdy_wait_us / s_rdy_waits : 0),
          (unsigned long)s_rdy_timeouts, (unsigned long)s_rdy_skips);
 #endif
-  printf("# fo ciklus: %lu pump/s   ISR-esemeny: %lu\r\n",
+  printf("# main loop: %lu pump/s   ISR events: %lu\r\n",
          (unsigned long)(dur_us ? (uint32_t)(((uint64_t)s_pump_calls
                           * 1000000ull) / dur_us) : 0u),
          (unsigned long)s_isr_events);
@@ -902,14 +910,15 @@ void iq_stream_stop(RAIL_Handle_t rail, uint16_t channel)
     uint32_t promille = (s_out_samples > 0u)
         ? (uint32_t)(((uint64_t)s_clip * 1000ull) / (s_out_samples * 2ull))
         : 0u;
-    printf("# levagas: %lu ertek (%lu.%01lu%%)%s\r\n",
+    printf("# clipping: %lu values (%lu.%01lu%%)%s\r\n",
            (unsigned long)s_clip,
            (unsigned long)(promille / 10u), (unsigned long)(promille % 10u),
-           (s_clip > 0u) ? "  <-- TELITES" : "");
+           (s_clip > 0u) ? "  <-- SATURATION" : "");
   }
 
-  /* Mi van az utoljara kitoltott blokkban? Ez valasztja szet a DSP-t es
-   * a linket: ha itt van adat de a masik oldalon nincs, a link a hibas. */
+  /* What is in the last filled block? This separates the DSP from the
+   * link: if there is data here but none on the other side, the link is
+   * at fault. */
   {
     const iq_blk_t *b = &s_blk[(s_prod ? (s_prod - 1u) : 0u) % NBLK];
     int32_t peak = 0;
@@ -920,34 +929,34 @@ void iq_stream_stop(RAIL_Handle_t rail, uint16_t channel)
       int32_t a = (v < 0) ? -(int32_t)v : (int32_t)v;
       if (a > peak) peak = a;
     }
-    printf("# utolso blokk: csucs=%ld  nem-nulla=%lu / %lu\r\n",
+    printf("# last block: peak=%ld  non-zero=%lu / %lu\r\n",
            (long)peak, (unsigned long)nonzero,
            (unsigned long)(BLK_SAMPLES * 2u));
-    printf("# elso 8 szo (I Q I Q ...):");
+    printf("# first 8 words (I Q I Q ...):");
     for (int k = 0; k < 8; k++) printf(" %04X", (unsigned)(uint16_t)b->iq[k]);
     printf("\r\n");
   }
 
-  /* --- CS-idozites: EZ mondja meg, hol vesz el az ido --- */
+  /* --- CS timing: THIS tells where the time is lost --- */
   if (s_cs_meas > 0u) {
     uint32_t a_ldma = (uint32_t)(s_sum_ldma_us / s_cs_meas);
     uint32_t a_txc  = (uint32_t)(s_sum_txc_us  / s_cs_meas);
     uint32_t elm    = (uint32_t)((uint64_t)BLK_BYTES * 8ull
                                  * 1000000ull / SPI_HZ);
-    printf("# CS lent: atlag %lu us (elmeleti %lu us), max %lu us\r\n",
+    printf("# CS low: avg %lu us (theoretical %lu us), max %lu us\r\n",
            (unsigned long)(a_ldma + a_txc), (unsigned long)elm,
            (unsigned long)s_max_cs_us);
-    printf("#   ebbol CS-le -> LDMA kesz : %lu us\r\n",
+    printf("#   of which CS low -> LDMA done : %lu us\r\n",
            (unsigned long)a_ldma);
-    printf("#   ebbol LDMA kesz -> TXC   : %lu us %s\r\n",
+    printf("#   of which LDMA done -> TXC   : %lu us %s\r\n",
            (unsigned long)a_txc,
-           (a_txc > 200u) ? "  <-- ITT VESZ EL AZ IDO" : "");
+           (a_txc > 200u) ? "  <-- TIME IS LOST HERE" : "");
   }
 
-  /* --- A CS LAB TENYLEGES KITOLTESE ---
-   * Ezt a lab olvasasabol kapjuk, tehat fuggetlen a multimetertol ES a
-   * kimeneti regisztertol. Ha az "eltérés" nem nulla, valami kulso
-   * huzza a vonalat. */
+  /* --- THE ACTUAL DUTY CYCLE OF THE CS PIN ---
+   * Obtained by reading the pin, so it is independent of the multimeter
+   * AND of the output register. If the "mismatch" is non-zero, something
+   * external is pulling the line. */
   if (s_pad_samples > 0u) {
     uint32_t hi_pm  = (uint32_t)(((uint64_t)s_pad_high * 1000ull)
                                  / s_pad_samples);
@@ -965,52 +974,52 @@ void iq_stream_stop(RAIL_Handle_t rail, uint16_t channel)
 #if SPI_CS_ACTIVE_HIGH
     exp_pm = 1000u - exp_pm;
 #endif
-    printf("# CS pad: magas %lu.%01lu%%  (a kiirt szintbol varhato "
+    printf("# CS pad: high %lu.%01lu%%  (expected from the written level "
            "%lu.%01lu%%)\r\n",
            (unsigned long)(hi_pm / 10u), (unsigned long)(hi_pm % 10u),
            (unsigned long)(exp_pm / 10u), (unsigned long)(exp_pm % 10u));
-    printf("# CS pad eltéres a kiirt szinttol: %lu / %lu minta%s\r\n",
+    printf("# CS pad mismatch vs. written level: %lu / %lu samples%s\r\n",
            (unsigned long)s_pad_mismatch, (unsigned long)s_pad_samples,
            (s_pad_mismatch > (s_pad_samples / 100u))
-             ? "   <-- VALAMI KULSO HUZZA A VONALAT!" : "   (tiszta)");
+             ? "   <-- SOMETHING EXTERNAL IS PULLING THE LINE!" : "   (clean)");
   }
 
   if (s_blk_drops > 0u) {
-    printf("# -> a link nem viszi el: emeld az SPI_HZ-t vagy a decimaciot\r\n");
+    printf("# -> the link cannot carry it: raise SPI_HZ or the decimation\r\n");
   }
 
   RAIL_ResetFifo(rail, false, true);
   stream_start_rx(rail, channel);
 }
 
-/* ================= FO CIKLUS: BLOKK -> SPI ================= */
+/* ================= MAIN LOOP: BLOCK -> SPI ================= */
 
-/* A folyamatban levo SPI-kuldes lezarasa: LDMA kesz ES TXC, majd CS fel.
-   Visszaad: true, amig a kuldes meg tart (a hivo ne inditson ujat).
-   Kozos a normal pumpnak es az ext-modnak (scan.c). */
+/* Complete the SPI send in progress: LDMA done AND TXC, then CS up.
+   Returns true while the send is still ongoing (the caller must not start
+   a new one). Shared by the normal pump and the ext mode (scan.c). */
 static bool spi_tx_poll(void)
 {
   if (!s_tx_busy) return false;
 
-  /* KETTOS FELTETEL. Az LDMA "kesz" azt jelenti, hogy az utolso szo
-   * BEKERULT a TX FIFO-ba — nem azt, hogy ki is ment a vonalon. Ha itt
-   * vinnenk fel a CS-t, az utolso par bajt a levegoben maradna. Ezert
-   * kell melle a TXC (transmit complete) is. */
-  /* Elso feltetel: az LDMA vegzett (az utolso szo bekerult a FIFO-ba). */
+  /* DOUBLE CONDITION. LDMA "done" means the last word has been PLACED in
+   * the TX FIFO — not that it has gone out on the line. If CS were raised
+   * here, the last few bytes would be left hanging. Hence TXC (transmit
+   * complete) is required as well. */
+  /* First condition: the LDMA has finished (last word placed in the FIFO). */
   if (!s_ldma_seen && LDMA_TransferDone((int)s_dma_ch)) {
     s_ldma_seen  = true;
     s_cs_t_ldma  = (uint32_t)RAIL_GetTime();
   }
 
-  /* Masodik feltetel: a shiftregiszter is kiurult. */
+  /* Second condition: the shift register has emptied as well. */
   if (s_ldma_seen && (USART0->STATUS & USART_STATUS_TXC)) {
-    /* CS HOLD IDO: az utolso orajel-el utan is hagyunk egy kis idot,
-     * mielott felvinnenk a CS-t. Igy a masik oldalnak biztosan van
-     * ideje az utolso bitet beorazni. */
+    /* CS HOLD TIME: leave a little time after the last clock edge before
+     * raising CS. This guarantees the other side has time to clock in
+     * the last bit. */
     RAIL_Time_t t = RAIL_GetTime() + SPI_CS_HOLD_US;
     while ((int32_t)(RAIL_GetTime() - t) < 0) { }
 
-    CS_RELEASE();                              /* CS inaktiv */
+    CS_RELEASE();                              /* CS inactive */
 
     uint32_t t_end = (uint32_t)RAIL_GetTime();
     uint32_t d_all  = t_end - s_cs_t0;
@@ -1027,19 +1036,19 @@ static bool spi_tx_poll(void)
 
 bool iq_stream_pump(void)
 {
-  /* A merestol jott uj rata kiirasa — ITT, a fo ciklusban, nem az ISR-ben. */
+  /* Print the new rate from the measurement — HERE, in the main loop, not in the ISR. */
   if (s_fs_report) {
     uint32_t v = s_fs_report;
     s_fs_report = 0;
-    printf("# mert bemeneti rata: %lu sps (kimenet %lu sps)\r\n",
+    printf("# measured input rate: %lu sps (output %lu sps)\r\n",
            (unsigned long)v, (unsigned long)(v / (s_decim_R ? s_decim_R : 1u)));
   }
 
   if (!s_active) return false;
   s_pump_calls++;
 
-  /* A CS PAD tenyleges szintje — nem a kimeneti regiszter! Ha valami
-   * kulso elhuzza a vonalat, az itt jon ki. */
+  /* The actual level of the CS PAD — not the output register! If
+   * something external pulls the line, it shows up here. */
   {
     unsigned pad  = GPIO_PinInGet(SPI_CS_PORT, SPI_CS_PIN) ? 1u : 0u;
     unsigned want = s_tx_busy ? (CS_IDLE_LEVEL ^ 1u) : CS_IDLE_LEVEL;
@@ -1059,29 +1068,30 @@ bool iq_stream_pump(void)
     }
   }
 
-  /* --- fut egy kuldes? nezzuk meg, vege van-e --- */
+  /* --- is a send in progress? check whether it has finished --- */
   if (spi_tx_poll()) return true;
 
-  /* --- van kuldheto blokk? --- */
+  /* --- is there a block to send? --- */
   if ((s_prod - s_cons) > 0u) {
     iq_blk_t *b = &s_blk[s_cons % NBLK];
     b->hdr.magic    = IQ_BLK_MAGIC;
-    /* A seq-et NEM itt irjuk! RDY-strict timeoutnal a spi_send_block a
-     * CS_ASSERT elott return-ol, a blokk marad — ha itt novelnenk a seq-et,
-     * a retry eggyel nagyobb sorszammal menne ki, es az ESP FANTOMLYUKAT
-     * latna (st_lost++ + 5 ms csend). A seq-et ezert a tenyleges kikuldeskor
-     * irjuk, kozvetlenul a CS_ASSERT elott (lasd spi_send_block). */
+    /* seq is NOT written here! On an RDY-strict timeout spi_send_block
+     * returns before CS_ASSERT and the block stays — if seq were
+     * incremented here, the retry would go out with a number one higher
+     * and the ESP would see a PHANTOM GAP (st_lost++ + 5 ms silence). So
+     * seq is written at the actual send, right before CS_ASSERT (see
+     * spi_send_block). */
     b->hdr.nsamp    = (uint16_t)BLK_SAMPLES;
     b->hdr.decim    = (uint16_t)s_decim_R;
-    /* A RAIL-RSSI-t (dBm) a fs_in_hz FELSO 12 bitjebe csomagoljuk: a
-     * fejlecben nincs kulon mezo, es a 1040 bajtos blokkmeretet (DMA,
-     * reorder, SpyServer) NEM bantjuk. Also 20 bit = valodi rata
-     * (<=1 048 575, a 400000 bar elfer), felso 12 bit = elojeles dBm.
-     * A RSSI-t ~100 ms-onkent frissitjuk (a pump ~200 blokk/s). */
+    /* The RAIL RSSI (dBm) is packed into the UPPER 12 bits of fs_in_hz:
+     * the header has no separate field, and the 1040-byte block size (DMA,
+     * reorder, SpyServer) is NOT touched. Lower 20 bits = actual rate
+     * (<=1 048 575, 400000 fits easily), upper 12 bits = signed dBm.
+     * The RSSI is refreshed every ~100 ms (the pump runs ~200 blocks/s). */
     static uint16_t rssi_div = 0;
     if (++rssi_div >= 20u) {
       rssi_div = 0;
-      int16_t rq = RAIL_GetRssi(s_rail_for_restart, false);   /* 0.25 dBm egyseg */
+      int16_t rq = RAIL_GetRssi(s_rail_for_restart, false);   /* 0.25 dBm units */
       if (rq != RAIL_RSSI_INVALID) s_rssi_dbm = (int16_t)(rq / 4);
     }
     b->hdr.fs_in_hz = (s_fs_in_hz & 0x000FFFFFu)
@@ -1092,15 +1102,15 @@ bool iq_stream_pump(void)
   return true;
 }
 
-/* ================= LAB-TESZT ('g') =================
+/* ================= PIN TEST ('g') =================
  *
- * A harom vonalat sima GPIO-kent billegteti, KULON frekvencian. A masik
- * oldalon az el-szamlalo igy egyertelmuen megmondja, melyik jel er celba.
+ * Toggles the three lines as plain GPIO, at SEPARATE frequencies. The edge
+ * counter on the other side then tells unambiguously which signal arrives.
  *
- * FONTOS MELLEKHASZNALAT: mindharom lab PONTOSAN 50%-on billeg, tehat ez
- * egyben KITOLTES-REFERENCIA is. 3.3 V-os logikanal a multimeter DC
- * atlaga 1.65 V kell legyen mindharmon. Ez a meres fogta meg 2026-07-31-en
- * az I2S word select hibajat, miutan minden szoftveres nyom elfogyott.
+ * IMPORTANT SIDE USE: all three pins toggle at EXACTLY 50%, so this is also
+ * a DUTY-CYCLE REFERENCE. With 3.3 V logic the multimeter DC average must
+ * be 1.65 V on all three. This measurement caught the I2S word select
+ * fault on 2026-07-31, after every software lead had run out.
  */
 void iq_stream_pin_test(uint32_t seconds)
 {
@@ -1111,17 +1121,17 @@ void iq_stream_pin_test(uint32_t seconds)
   GPIO_PinModeSet(SPI_CLK_PORT,  SPI_CLK_PIN,  gpioModePushPull, 0);
   GPIO_PinModeSet(SPI_MOSI_PORT, SPI_MOSI_PIN, gpioModePushPull, 0);
 
-  printf("# lab-teszt %lu mp (mindharom PONTOSAN 50%% -> DC atlag 1.65 V):\r\n",
+  printf("# pin test %lu s (all three EXACTLY 50%% -> DC average 1.65 V):\r\n",
          (unsigned long)seconds);
-  printf("#   PA07 / EXP 13 / CS   = 1 kHz  (~2000 el/s)\r\n");
-  printf("#   PC05 / EXP 15 / SCLK = 2 kHz  (~4000 el/s)\r\n");
-  printf("#   PC00 / EXP 10 / MOSI = 4 kHz  (~8000 el/s)\r\n");
+  printf("#   PA07 / EXP 13 / CS   = 1 kHz  (~2000 edges/s)\r\n");
+  printf("#   PC05 / EXP 15 / SCLK = 2 kHz  (~4000 edges/s)\r\n");
+  printf("#   PC00 / EXP 10 / MOSI = 4 kHz  (~8000 edges/s)\r\n");
 
   RAIL_Time_t t_end = RAIL_GetTime() + seconds * 1000000u;
   uint32_t n = 0;
 
   while ((int32_t)(RAIL_GetTime() - t_end) < 0) {
-    RAIL_Time_t next = RAIL_GetTime() + 125u;      /* 8 kHz alapütem */
+    RAIL_Time_t next = RAIL_GetTime() + 125u;      /* 8 kHz base tick */
     while ((int32_t)(RAIL_GetTime() - next) < 0) { }
 
     ++n;
@@ -1130,16 +1140,16 @@ void iq_stream_pin_test(uint32_t seconds)
     GPIO_PinOutToggle(SPI_MOSI_PORT, SPI_MOSI_PIN);
   }
 
-  /* A CS INAKTIVBA (magas), nem nullaba! Ha alacsonyan hagynank, a masik
-   * oldal folyamatosan kivalasztottnak latna magat, es ontene a csonka
-   * tranzakciokat. A masik ketto mehet nullara. */
+  /* CS to INACTIVE (high), not to zero! If left low, the other side would
+   * see itself continuously selected and flood truncated transactions.
+   * The other two can go to zero. */
   GPIO_PinOutSet(SPI_CS_PORT,     SPI_CS_PIN);
   GPIO_PinOutClear(SPI_CLK_PORT,  SPI_CLK_PIN);
   GPIO_PinOutClear(SPI_MOSI_PORT, SPI_MOSI_PIN);
-  printf("# lab-teszt vege (CS inaktivba allitva)\r\n");
+  printf("# pin test finished (CS set inactive)\r\n");
 }
 
-/* ================= EUSART ORAJEL-DIAGNOSZTIKA ('v') ================= */
+/* ================= EUSART CLOCK DIAGNOSTICS ('v') ================= */
 
 void iq_stream_dump_uart_cfg(void)
 {
@@ -1147,7 +1157,7 @@ void iq_stream_dump_uart_cfg(void)
   uint32_t cfg0   = EUSART0->CFG0;
   uint32_t clkdiv = EUSART0->CLKDIV;
 
-  printf("\r\n# ---- EUSART0 (VCOM) orajel-diagnosztika ----\r\n");
+  printf("\r\n# ---- EUSART0 (VCOM) clock diagnostics ----\r\n");
   printf("# CLKCTRL=0x%08lX  CFG0=0x%08lX  CLKDIV=0x%08lX\r\n",
          (unsigned long)clksel, (unsigned long)cfg0, (unsigned long)clkdiv);
 
@@ -1160,27 +1170,27 @@ void iq_stream_dump_uart_cfg(void)
          (unsigned long)f, (unsigned long)ovs, (unsigned long)div);
   if (ovs && f) {
     uint64_t den = (uint64_t)ovs * (256ull + div);
-    printf("# -> szamitott baud=%lu, elerheto max=%lu\r\n",
+    printf("# -> computed baud=%lu, achievable max=%lu\r\n",
            (unsigned long)(uint32_t)(((uint64_t)f * 256ull) / den),
            (unsigned long)(f / ovs));
   }
 
   printf("# ---- SPI (USART0) ----\r\n");
-  printf("# USART0 ora=%lu Hz, kert SPI=%lu Hz\r\n",
+  printf("# USART0 clock=%lu Hz, requested SPI=%lu Hz\r\n",
          (unsigned long)CMU_ClockFreqGet(cmuClock_USART0),
          (unsigned long)SPI_HZ);
   printf("# USARTROUTE: TX=0x%08lX CLK=0x%08lX ROUTEEN=0x%08lX "
-         "(CSPEN SZANDEKOSAN nincs)\r\n",
+         "(CSPEN DELIBERATELY absent)\r\n",
          (unsigned long)GPIO->USARTROUTE[0].TXROUTE,
          (unsigned long)GPIO->USARTROUTE[0].CLKROUTE,
          (unsigned long)GPIO->USARTROUTE[0].ROUTEEN);
 }
 
-/* ================= EXT-MOD: idegen 1040 bajtos blokk kuldese =================
- * A scan.c hasznalja: RAIL RX-stream NELKUL, ugyanazon az SPI/LDMA/RDY uton
- * kuld egy blokkot (SPECLINE, specline.h). A blokknak PONTOSAN BLK_BYTES
- * meretunek kell lennie, es a fejlec 4. bajtjatol a seq-mezot a
- * spi_send_block irja (mint az IQ-nal). Kizarja a normal streamet. */
+/* ================= EXT MODE: sending a foreign 1040-byte block =================
+ * Used by scan.c: sends a block (SPECLINE, specline.h) WITHOUT a RAIL RX
+ * stream, over the same SPI/LDMA/RDY path. The block must be EXACTLY
+ * BLK_BYTES in size, and the seq field at header byte 4 is written by
+ * spi_send_block (as for IQ). Mutually exclusive with the normal stream. */
 static bool s_ext_active = false;
 
 void iq_stream_ext_begin(void)
@@ -1213,8 +1223,8 @@ void iq_stream_ext_pump(void)
 bool iq_stream_ext_send(const void *blk)
 {
   if (!s_ext_active || s_tx_busy || blk == NULL) return false;
-  /* A 0. blokkpuffert hasznaljuk; a spi_send_block a seq-et beleirja. */
+  /* Block buffer 0 is used; spi_send_block writes the seq into it. */
   memcpy(&s_blk[0], blk, BLK_BYTES);
   spi_send_block(&s_blk[0]);
-  return s_tx_busy;     /* false = RDY-strict timeout, ujra kell probalni */
+  return s_tx_busy;     /* false = RDY-strict timeout, must be retried */
 }
