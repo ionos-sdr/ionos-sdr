@@ -2,7 +2,12 @@
 
 Open, calibrated, remotely usable SDR transceiver on a commodity ISM radio SoC (Silicon Labs EFR32FG23) with an ESP32‑S3 companion. 16‑bit I/Q over WiFi/USB, open protocols, on‑device DSP. RX+TX, 110–223 MHz (902 MHz planned).
 
-<img src="docs/img/tft_waterfall_144800.jpg" width="420" alt="Ionos SDR prototype: 2.8&quot; TFT waterfall at 144.800 MHz (APRS), 195 blk/s, -94 dBm, 49 % load">
+<p>
+<img src="docs/img/prototype_bench.jpg" height="420" alt="Prototype: Silicon Labs WSTK + EFR32FG23 radio board (BRD4265B), ESP32-S3 N16R8 module, 2.8&quot; ILI9341 TFT">
+<img src="docs/img/tft_waterfall_144800.jpg" height="420" alt="TFT waterfall at 144.800 MHz (APRS): 195 blk/s, -94 dBm, 49 % load">
+</p>
+
+*Prototype (left): Silicon Labs WSTK + EFR32FG23 radio board, ESP32‑S3 module, 2.8" TFT. Right: waterfall at 144.800 MHz with an APRS burst.*
 
 **Status: working prototype.** Everything marked *validated* has a measurement in [`measurements/`](measurements/).
 
