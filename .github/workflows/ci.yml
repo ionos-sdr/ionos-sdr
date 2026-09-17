@@ -1,0 +1,26 @@
+# Minimal CI: builds the ESP32-S3 firmware with PlatformIO and runs KiCad ERC/DRC
+# on every hardware change. The FG23 firmware needs the Simplicity SDK and is
+# built locally for now (see firmware-fg23/README.md).
+name: CI
+on: [push, pull_request]
+jobs:
+  esp32:
+    runs-on: ubuntu-latest
+    if: ${{ hashFiles('firmware-esp32/platformio.ini') != '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install platformio
+      - run: pio run -d firmware-esp32
+  kicad:
+    runs-on: ubuntu-latest
+    container: kicad/kicad:9.0
+    if: ${{ hashFiles('hardware/**/*.kicad_pcb') != '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: ERC + DRC
+        run: |
+          set -e
+          for sch in hardware/*/*.kicad_sch; do kicad-cli sch erc --exit-code-violations "$sch"; done
+          for pcb in hardware/*/*.kicad_pcb; do kicad-cli pcb drc --exit-code-violations "$pcb"; done

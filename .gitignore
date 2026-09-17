@@ -1,0 +1,62 @@
+# --- KiCad ---
+*.kicad_prl
+*-backups/
+*.bak
+*.bck
+*.kicad_pcb-bak
+*.kicad_sch-bak
+_autosave-*
+fp-info-cache
+*.lck
+# keep fabrication outputs that are committed on purpose under hardware/fab/
+
+# --- PlatformIO / ESP-IDF ---
+.pio/
+.pioenvs/
+.piolibdeps/
+build/
+sdkconfig.old
+managed_components/
+dependencies.lock
+
+# --- Simplicity Studio / GNU ARM ---
+firmware-fg23/**/GNU ARM*/
+firmware-fg23/**/autogen/
+firmware-fg23/**/.projectlinkstore
+firmware-fg23/**/.pdm
+firmware-fg23/**/.uceditor
+*.axf
+*.hex
+*.s37
+*.bin
+*.map
+*.elf
+*.o
+*.d
+
+# --- Host builds ---
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+*.so
+*.dylib
+*.dll
+
+# --- Python ---
+__pycache__/
+*.pyc
+.venv/
+.ipynb_checkpoints/
+
+# --- IDE / OS ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+
+# --- Secrets: never commit WiFi credentials or API keys ---
+**/wifi_credentials.h
+**/secrets.h
+**/*.secret
+.env

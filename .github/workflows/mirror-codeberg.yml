@@ -1,0 +1,21 @@
+# Mirrors this repository to Codeberg on every push.
+# Setup: create an empty repo on Codeberg, generate an access token there
+# (scope: repository write), and add it here as the secret CODEBERG_TOKEN.
+name: Mirror to Codeberg
+on:
+  push:
+    branches: ["**"]
+    tags: ["**"]
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Push to Codeberg
+        env:
+          TOKEN: ${{ secrets.CODEBERG_TOKEN }}
+        run: |
+          git remote add codeberg "https://oauth2:${TOKEN}@codeberg.org/ionos-sdr/ionos-sdr.git"
+          git push --mirror codeberg
