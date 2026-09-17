@@ -1,0 +1,187 @@
+# Silicon Labs Project Configuration Tools: slcp, v0, Component selection file.
+project_name: rail_soc_railtest_WSPR
+label: rail_soc_railtest_WSPR
+description: |
+  The RAILtest application provides a simple tool for testing the radio and the functionality of the RAIL library via CLI. For more advanced usage, developers must write software against the RAIL library and create a custom radio configuration.
+category: RAIL Examples
+filter:
+- name: Device Type
+  value: [SoC]
+- name: Project Difficulty
+  value: [Advanced]
+- name: Wireless Technology
+  value: [RAIL]
+package: rail_sdk_sample_applications
+quality: production
+readme:
+- {path: readme.md}
+- {path: readme.md}
+source:
+- {path: main.c}
+- {path: app.c}
+include:
+- path: .
+  file_list:
+  - {path: app.h}
+sdk: {id: simplicity_sdk, version: 2025.6.3}
+toolchain_settings:
+- {value: debug, option: optimize}
+component:
+- {id: EFR32FG23B010F512IM48}
+- {id: brd4001a}
+- {id: brd4265b}
+- instance: [inst0]
+  id: cli
+- {id: cli_delay}
+- instance: [inst0]
+  id: cli_storage_ram
+- {id: device_init}
+- {id: iostream_recommended_stream}
+- {id: iostream_retarget_stdio}
+- {id: mpu}
+- {id: printf}
+- {id: radio_config_simple_rail_singlephy}
+- {id: rail_test_core}
+- {id: rail_util_ant_div}
+- {id: rail_util_built_in_phys}
+- {id: rail_util_dma}
+- instance: [inst0]
+  id: rail_util_init
+- {id: rail_util_pa}
+- {id: rail_util_pti}
+- {id: rail_util_rf_path}
+- {id: rail_util_rssi}
+- {id: sl_system}
+configuration:
+- {name: SL_STACK_SIZE, value: '2048'}
+- {name: SL_HEAP_SIZE, value: '0'}
+- {name: BUFFER_POOL_ALLOCATOR_POOL_SIZE, value: '5'}
+- condition: [device_generic_family_efr32xg25]
+  name: BUFFER_POOL_ALLOCATOR_BUFFER_SIZE_MAX
+  value: '2102'
+- condition: [device_generic_family_efr32xg28]
+  name: BUFFER_POOL_ALLOCATOR_BUFFER_SIZE_MAX
+  value: '2102'
+- condition: [device_generic_family_sixx301]
+  name: BUFFER_POOL_ALLOCATOR_BUFFER_SIZE_MAX
+  value: '2102'
+- unless: [device_generic_family_efr32xg25, device_generic_family_efr32xg28, device_generic_family_sixx301]
+  name: BUFFER_POOL_ALLOCATOR_BUFFER_SIZE_MAX
+  value: '1068'
+- {name: SL_BOARD_ENABLE_VCOM, value: '1'}
+- condition: [iostream_usart]
+  name: SL_IOSTREAM_USART_VCOM_CONVERT_BY_DEFAULT_LF_TO_CRLF
+  value: (1)
+- condition: [iostream_usart]
+  name: SL_IOSTREAM_USART_VCOM_RESTRICT_ENERGY_MODE_TO_ALLOW_RECEPTION
+  value: 'false'
+- condition: [iostream_usart]
+  name: SL_IOSTREAM_USART_VCOM_FLOW_CONTROL_TYPE
+  value: usartHwFlowControlNone
+- condition: [iostream_eusart]
+  name: SL_IOSTREAM_EUSART_VCOM_CONVERT_BY_DEFAULT_LF_TO_CRLF
+  value: (1)
+- condition: [iostream_eusart]
+  name: SL_IOSTREAM_EUSART_VCOM_RESTRICT_ENERGY_MODE_TO_ALLOW_RECEPTION
+  value: 'false'
+- condition: [iostream_eusart]
+  name: SL_IOSTREAM_EUSART_VCOM_FLOW_CONTROL_TYPE
+  value: SL_IOSTREAM_EUSART_UART_FLOW_CTRL_NONE
+- {name: SL_RAIL_UTIL_RAIL_POWER_MANAGER_INIT, value: '0'}
+- {name: SL_CLI_LOCAL_ECHO, value: (1)}
+- {name: SL_CLI_MAX_INPUT_ARGUMENTS, value: '20'}
+- {name: SL_CLI_HELP_CMD_PRE, value: '0'}
+- {name: SL_CLI_HELP_CMD_SIZE, value: '20'}
+- {name: SL_CLI_INST0_IOSTREAM_HANDLE, value: sl_iostream_vcom_handle}
+- {name: SL_CLI_STORAGE_RAM_INST0_END_STRING, value: '"endScript"'}
+- {name: SL_CLI_STORAGE_RAM_INST0_CLI_HANDLE, value: sl_cli_inst0_handle}
+- {name: SL_CLI_STORAGE_NVM3_INST0_END_STRING, value: '"endScript"'}
+- {name: SL_CLI_STORAGE_NVM3_INST0_CLI_HANDLE, value: sl_cli_inst0_handle}
+- {name: SL_RAIL_UTIL_INIT_INIT_COMPLETE_CALLBACK_INST0_ENABLE, value: '1'}
+- condition: [a_radio_config]
+  unless: [device_generic_family_efr32xg21, device_is_module]
+  name: SL_RAIL_UTIL_INIT_RADIO_CONFIG_SUPPORT_INST0_ENABLE
+  value: '1'
+- condition: [a_radio_config, device_is_module, device_family_fgm23]
+  name: SL_RAIL_UTIL_INIT_RADIO_CONFIG_SUPPORT_INST0_ENABLE
+  value: '1'
+- condition: [a_radio_config, device_is_module, device_family_mgm24]
+  name: SL_RAIL_UTIL_INIT_RADIO_CONFIG_SUPPORT_INST0_ENABLE
+  value: '0'
+- {name: SL_RAIL_UTIL_INIT_PROTOCOLS_INST0_ENABLE, value: '1'}
+- condition: [a_radio_config]
+  unless: [device_is_module, device_generic_family_efr32xg21]
+  name: SL_RAIL_UTIL_INIT_PROTOCOL_INST0_DEFAULT
+  value: SL_RAIL_UTIL_PROTOCOL_PROPRIETARY
+- condition: [a_radio_config, device_is_module, device_family_fgm23]
+  name: SL_RAIL_UTIL_INIT_PROTOCOL_INST0_DEFAULT
+  value: SL_RAIL_UTIL_PROTOCOL_PROPRIETARY
+- condition: [device_supports_zwave]
+  unless: [a_radio_config, device_is_module, device_has_radio_2g4hz]
+  name: SL_RAIL_UTIL_INIT_PROTOCOL_INST0_DEFAULT
+  value: SL_RAIL_UTIL_PROTOCOL_ZWAVE_EU
+- condition: [device_is_module, device_supports_zwave]
+  unless: [device_has_radio_2g4hz]
+  name: SL_RAIL_UTIL_INIT_PROTOCOL_INST0_DEFAULT
+  value: SL_RAIL_UTIL_PROTOCOL_ZWAVE_EU
+- condition: [a_radio_config, device_is_module, device_family_mgm24]
+  name: SL_RAIL_UTIL_INIT_PROTOCOL_INST0_DEFAULT
+  value: SL_RAIL_UTIL_PROTOCOL_IEEE802154_2P4GHZ
+- condition: [a_radio_config, device_is_module, device_family_mgm26]
+  name: SL_RAIL_UTIL_INIT_PROTOCOL_INST0_DEFAULT
+  value: SL_RAIL_UTIL_PROTOCOL_IEEE802154_2P4GHZ
+- condition: [a_radio_config, device_is_module, device_family_mgm27]
+  name: SL_RAIL_UTIL_INIT_PROTOCOL_INST0_DEFAULT
+  value: SL_RAIL_UTIL_PROTOCOL_IEEE802154_2P4GHZ
+- {name: SL_RAIL_UTIL_INIT_CALIBRATIONS_INST0_ENABLE, value: '1'}
+- {name: SL_RAIL_UTIL_INIT_CALIBRATION_TEMPERATURE_NOTIFY_INST0_ENABLE, value: '1'}
+- {name: SL_RAIL_UTIL_INIT_CALIBRATION_ONETIME_NOTIFY_INST0_ENABLE, value: '1'}
+- {name: SL_RAIL_UTIL_INIT_TRANSITIONS_INST0_ENABLE, value: '1'}
+- {name: SL_RAIL_UTIL_INIT_TRANSITION_INST0_TX_SUCCESS, value: RAIL_RF_STATE_RX}
+- {name: SL_RAIL_UTIL_INIT_TRANSITION_INST0_TX_ERROR, value: RAIL_RF_STATE_RX}
+- {name: SL_RAIL_UTIL_INIT_TRANSITION_INST0_RX_SUCCESS, value: RAIL_RF_STATE_RX}
+- {name: SL_RAIL_UTIL_INIT_TRANSITION_INST0_RX_ERROR, value: RAIL_RF_STATE_RX}
+- {name: SL_RAIL_UTIL_INIT_DATA_FORMATS_INST0_ENABLE, value: '1'}
+- {name: SL_RAIL_UTIL_INIT_EVENTS_INST0_ENABLE, value: '1'}
+- {name: SL_RAIL_UTIL_INIT_EVENT_RX_PREAMBLE_DETECT_INST0_ENABLE, value: '1'}
+- {name: SL_RAIL_UTIL_INIT_EVENT_RX_SYNC1_DETECT_INST0_ENABLE, value: '1'}
+- {name: SL_RAIL_UTIL_INIT_EVENT_RX_SYNC2_DETECT_INST0_ENABLE, value: '1'}
+- {name: SL_RAIL_UTIL_INIT_EVENT_RX_FILTER_PASSED_INST0_ENABLE, value: '1'}
+- {name: SL_RAIL_UTIL_INIT_EVENT_RX_PACKET_RECEIVED_INST0_ENABLE, value: '1'}
+- {name: SL_RAIL_UTIL_INIT_EVENT_RX_ADDRESS_FILTERED_INST0_ENABLE, value: '1'}
+- {name: SL_RAIL_UTIL_INIT_EVENT_RX_FRAME_ERROR_INST0_ENABLE, value: '1'}
+- {name: SL_RAIL_UTIL_INIT_EVENT_RX_PACKET_ABORTED_INST0_ENABLE, value: '1'}
+- {name: SL_RAIL_UTIL_INIT_EVENT_RX_TIMEOUT_INST0_ENABLE, value: '1'}
+- {name: SL_RAIL_UTIL_INIT_EVENT_RX_CHANNEL_HOPPING_COMPLETE_INST0_ENABLE, value: '1'}
+- {name: SL_RAIL_UTIL_INIT_EVENT_TX_PACKET_SENT_INST0_ENABLE, value: '1'}
+- {name: SL_RAIL_UTIL_INIT_EVENT_TX_ABORTED_INST0_ENABLE, value: '1'}
+- {name: SL_RAIL_UTIL_INIT_EVENT_TX_BLOCKED_INST0_ENABLE, value: '1'}
+- {name: SL_RAIL_UTIL_INIT_EVENT_TX_STARTED_INST0_ENABLE, value: '1'}
+- {name: SL_RAIL_UTIL_INIT_EVENT_RSSI_AVERAGE_DONE_INST0_ENABLE, value: '1'}
+- {name: SL_RAIL_UTIL_INIT_EVENT_RX_FIFO_ALMOST_FULL_INST0_ENABLE, value: '1'}
+- {name: SL_RAIL_UTIL_INIT_EVENT_RX_FIFO_FULL_INST0_ENABLE, value: '1'}
+- {name: SL_RAIL_UTIL_INIT_EVENT_RX_FIFO_OVERFLOW_INST0_ENABLE, value: '1'}
+- {name: SL_RAIL_UTIL_INIT_EVENT_TX_FIFO_ALMOST_EMPTY_INST0_ENABLE, value: '1'}
+- {name: SL_RAIL_UTIL_INIT_EVENT_TX_UNDERFLOW_INST0_ENABLE, value: '1'}
+- {name: SL_RAIL_UTIL_INIT_EVENT_TX_CHANNEL_CLEAR_INST0_ENABLE, value: '1'}
+- {name: SL_RAIL_UTIL_INIT_EVENT_TX_CHANNEL_BUSY_INST0_ENABLE, value: '1'}
+- {name: SL_RAIL_UTIL_INIT_EVENT_TX_CCA_RETRY_INST0_ENABLE, value: '1'}
+- {name: SL_RAIL_UTIL_INIT_EVENT_TX_START_CCA_INST0_ENABLE, value: '1'}
+- {name: SL_RAIL_UTIL_INIT_EVENT_RX_TX_SCHEDULED_RX_TX_STARTED_INST0_ENABLE, value: '1'}
+- {name: SL_RAIL_UTIL_INIT_EVENT_RX_SCHEDULED_RX_END_INST0_ENABLE, value: '1'}
+- {name: SL_RAIL_UTIL_INIT_EVENT_RX_SCHEDULED_RX_MISSED_INST0_ENABLE, value: '1'}
+- {name: SL_RAIL_UTIL_INIT_EVENT_TX_SCHEDULED_TX_MISSED_INST0_ENABLE, value: '1'}
+- {name: SL_RAIL_UTIL_INIT_EVENT_RX_ACK_TIMEOUT_INST0_ENABLE, value: '1'}
+- {name: SL_RAIL_UTIL_INIT_EVENT_TXACK_PACKET_SENT_INST0_ENABLE, value: '1'}
+- {name: SL_RAIL_UTIL_INIT_EVENT_TXACK_ABORTED_INST0_ENABLE, value: '1'}
+- {name: SL_RAIL_UTIL_INIT_EVENT_TXACK_BLOCKED_INST0_ENABLE, value: '1'}
+- {name: SL_RAIL_UTIL_INIT_EVENT_TXACK_UNDERFLOW_INST0_ENABLE, value: '1'}
+- {name: SL_RAIL_UTIL_INIT_EVENT_IEEE802154_DATA_REQUEST_COMMAND_INST0_ENABLE, value: '1'}
+- {name: SL_RAIL_UTIL_INIT_EVENT_ZWAVE_BEAM_INST0_ENABLE, value: '1'}
+- {name: SL_RAIL_UTIL_INIT_EVENT_CAL_NEEDED_INST0_ENABLE, value: '1'}
+- {name: SL_RAIL_UTIL_INIT_EVENT_DETECT_RSSI_THRESHOLD_DONE_INST0_ENABLE, value: '1'}
+ui_hints:
+  highlight:
+  - {path: readme.md}
+  - {path: config/rail/radio_settings.radioconf, focus: true}
+

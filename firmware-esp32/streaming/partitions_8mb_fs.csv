@@ -1,0 +1,8 @@
+# FG23-SDR — ESP32-S3 8 MB, egy app (4 MB) + LittleFS (3.9 MB), nincs OTA.
+# Csak akkor kell, ha az alap sema nem jo (LittleFS mount HIBA / app tul nagy).
+# Bekapcsolas: platformio.ini [env:esp32s3] -> board_build.partitions = partitions_8mb_fs.csv
+# Name,     Type, SubType,  Offset,    Size
+nvs,        data, nvs,      0x9000,    0x5000
+factory,    app,  factory,  0x10000,   0x400000
+spiffs,     data, spiffs,   0x410000,  0x3E0000
+coredump,   data, coredump, 0x7F0000,  0x10000

@@ -60,3 +60,7 @@ Thumbs.db
 **/secrets.h
 **/*.secret
 .env
+
+# --- Station-specific config (callsign, passcode, position, WiFi) ---
+**/station_config.h
+**/secrets.h

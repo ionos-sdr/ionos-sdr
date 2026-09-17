@@ -1,0 +1,5 @@
+step,offered_kBps,ach_kBps,sps16,sps8,sec,frames,bad,seq_gaps,gap_med_ms,gap_p99_ms,gap_max_ms,dropouts,esp_lost,esp_dup,esp_ovf,esp_spydrop,esp_eagain,esp_tmax,esp_dtmax,esp_ring
+0,100,99.9,24982,49964,15.0,1440,0,0,10.35,16.2,22.11,0,,,,,,,,
+1,200,161.2,40300,80600,15.0,2324,0,0,5.14,12.17,1171.75,7,,,,,,,,
+2,300,279.6,69902,139803,15.0,4031,0,0,3.44,9.38,731.54,2,,,,,,,,
+3,400,26.0,6493,12987,2.9,73,0,0,2.86,960.47,960.47,7,,,,,,,,
