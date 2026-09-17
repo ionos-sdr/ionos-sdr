@@ -9,6 +9,8 @@ Open, calibrated, remotely usable SDR transceiver on a commodity ISM radio SoC (
 
 *Prototype (left): Silicon Labs WSTK + EFR32FG23 radio board, ESP32‑S3 module, 2.8" TFT. Right: waterfall at 144.800 MHz with an APRS burst.*
 
+**Demo video:** [youtu.be/TvFiH6MmJB0](https://youtu.be/TvFiH6MmJB0) — [![Ionos SDR test video](https://img.youtube.com/vi/TvFiH6MmJB0/mqdefault.jpg)](https://youtu.be/TvFiH6MmJB0)
+
 **Status: working prototype.** Everything marked *validated* has a measurement in [`measurements/`](measurements/).
 
 ## Architecture
