@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/img/banner.png" width="100%" alt="IonosSDR"></p>
+
 # Ionos SDR
 
 Open, calibrated, remotely usable SDR transceiver on a commodity ISM radio SoC (Silicon Labs EFR32FG23) with an ESP32‑S3 companion. 16‑bit I/Q over WiFi/USB, open protocols, on‑device DSP. RX tunes across the SoC's range (optimum inside the matched band); TX is matching‑network dependent — the 2 m band first, further bands as plug‑in matching on the final hardware.
