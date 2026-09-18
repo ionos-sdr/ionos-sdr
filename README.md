@@ -89,6 +89,6 @@ docs/              protocol, calibration, CLI, guides         CC-BY-4.0
 
 ## Credits, licensing, trademarks
 
-Builds on [geckokapula](https://github.com/tejeez/geckokapula) by OH2EAT (MIT). Silicon Labs RAIL is used through its public API only; PHY findings are clean‑room. Licences per directory (see above). Not affiliated with IONOS SE or Silicon Laboratories; EFR32 and Simplicity Studio are Silicon Labs trademarks.
+Builds on [geckokapula](https://github.com/tejeez/geckokapula) by OH2EAT (MIT) for the capture core; the SDR++ module is based on Ryzerth's SpyServer source (GPL‑3.0); the AFSK/HDLC design follows LibAPRS/BertOS; WSPR is K1JT's protocol; the CW trainer concept is N7HPR's. Full list with licences in [ACKNOWLEDGEMENTS.md](ACKNOWLEDGEMENTS.md). Silicon Labs RAIL is used through its public API only; PHY findings are clean‑room. Licences per directory (see above). Not affiliated with IONOS SE or Silicon Laboratories; EFR32 and Simplicity Studio are Silicon Labs trademarks.
 
-Zoltan Doczi, HA7DCD — Budapest. RTL‑SDR Blog V3 co‑designer, KrakenSDR co‑creator, TAPR QRPi designer.
+Zoltan Doczi, HA7DCD — Budapest. RTL‑SDR Blog V3 co‑designer, KrakenSDR co‑creator, TAPR QRPi designer. Special thanks to [Z2Labs](https://www.z2labs.io) for their help, ideas and shared thinking throughout the project.

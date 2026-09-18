@@ -5,6 +5,12 @@
  *
  * (LibAPRS delay-mult path + DC-block + mild IF AA — 2026-08-09)
  *
+ * Design credit: the delay-multiply AFSK detector, bit PLL and HDLC window
+ * logic follow the LibAPRS (Mark Qvist, GPL-3.0) / BertOS afsk.c (Develer,
+ * GPL-2.0+exception) design, used as the reference during debugging. This
+ * file is an independent fixed-point implementation for the FG23 I/Q path;
+ * no code was copied. See ACKNOWLEDGEMENTS.md.
+ *
  * DEBUG / CHANGELOG
  *   v2.3: s_audio_dc floor-shift -> rounded (+128). The ">>8" rounded the
  *         negative error downwards, so the "DC block" ADDED a constant +128
