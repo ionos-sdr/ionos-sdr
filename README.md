@@ -23,19 +23,32 @@ Open, calibrated, remotely usable SDR transceiver on a commodity ISM radio SoC (
 
 <img src="docs/img/architecture.svg" width="100%" alt="System architecture: RF front-end (LNA, LDMOS PA, T/R switch, 39 MHz VCTCXO) – EFR32FG23 radio SoC (I/Q capture, NCO transmitter, calibration and scan) – I²S/SPI – ESP32-S3 companion (streaming server, on-device DSP, TFT/GPS/SD) – WiFi/USB – hosts (SDR++, GNU Radio, SoapySDR) and services (APRS-IS, SatNOGS)">
 
-- **RX**: FG23 I/Q capture → zero‑copy FIFO → ESP32‑S3 → host (SDR++, GNU Radio via SoapySDR, GQRX…).
+- **RX**: two modes on the same hardware, switchable from the host (see below).
 - **TX**: no I/Q DAC on the FG23; modulation is synthesised by stepping the PLL frequency offset (NCO). Constant‑envelope modes only on‑chip.
 - **Reference**: 39 MHz TCXO; VCTCXO with VDAC pulling for WSPR is in progress. Roadmap: TCXO + open‑loop ΣΔ for 2 m, thermal LUT + GPS trim for higher bands.
+
+## Two receive modes
+
+| | Narrowband I/Q stream | Wideband RSSI fast scan |
+|---|---|---|
+| What | Classic SDR: 16‑bit I/Q samples from the FG23 capture path, streamed to the host | Panadapter: the FG23 hops across a channel grid, measures RSSI per bin (`RAIL_GetRssiAlt`), and sends one spectrum line per sweep |
+| Bandwidth | ≤ 270 kHz I/Q window (≤ 1 Msps on‑chip); ~175 ksps sustained over WiFi, ~250 ksps over USB CDC | Up to 10 MHz span in one sweep (e.g. 144.8–154.8 MHz on the 25 kHz / 401‑channel grid; 320–2048 bins, 31.25 kHz step at 320) |
+| Rate | continuous | ~5–7 lines/s (settle 200 µs + RSSI wait 400 µs per bin, tunable) |
+| Host | any SpyServer client (SDR++, SDR#…), later SoapySDR/GNU Radio | SDR++ via the `fg23` source module in SCAN mode (spectrum/waterfall only, no audio), TFT/OLED on the device |
+| Use | demodulation, recording, DSP work, weak‑signal modes | finding activity across a band, then zoom in with the I/Q mode |
+
+The I/Q stream is the mode that has had the most measurement time: block‑boundary sample loss, the periodic WiFi stall and the SPI/WiFi glitch correlation were each traced and fixed, and the stream now runs glitch‑free over WiFi at the quoted rates (see `measurements/`). The scan mode reuses the same SPI/LDMA transport in an "ext" mode (1040‑byte `SPECLINE` blocks, `specline.h` shared by both firmwares) and stops/restarts the I/Q stream around a sweep.
 
 ## Status
 
 | Feature | State |
 |---|---|
-| I/Q streaming to SDR++ over WiFi (SpyServer protocol) | validated, ~712 kB/s sustained |
+| Narrowband 16‑bit I/Q streaming over WiFi (SpyServer protocol) | validated, ~712 kB/s sustained, glitch‑free |
 | I/Q over USB CDC | ~250 ksps int16 |
 | APRS AX.25/AFSK‑1200 TX (NCO) | validated on‑air, decoded on APRS‑IS |
 | NBFM voice TX, CW TX (ramped envelope) | validated |
 | WSPR encoder | bit‑exact vs. independent reference; on‑air WSPR TX (VCTCXO pulling) in progress |
+| Wideband RSSI fast scan → SDR++ (fg23 source module) | working, ~5–7 lines/s at 10 MHz span |
 | On‑device FFT waterfall, 2.8" TFT | working |
 | Multi‑point frequency calibration | validated |
 | GPS time + locator | working |
