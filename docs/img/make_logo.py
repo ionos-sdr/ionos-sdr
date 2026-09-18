@@ -1,135 +1,143 @@
 #!/usr/bin/env python3
-"""Render the Ionos SDR wordmark: retro halftone band with pixel (C64-style)
-knock-out lettering. Outputs banner (README header), avatar and a social card.
-Pure Pillow, no fonts required.  Usage: python3 make_logo.py [outdir]
+"""Render the Ionos SDR wordmark: a rising red sun over a warm halftone band,
+smooth rounded lettering knocked out of the band, with glints and glow.
+Outputs banner.png (README header), avatar.png, social_card.png.
+Pillow only. Usage: python3 make_logo.py [outdir]
 """
 import sys, math, random
-from PIL import Image, ImageDraw, ImageFilter
+from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageChops
 
-# --- 8-row pixel font (rows 0..7; lowercase sits on rows 2..7) ------------
-GLYPHS = {
- 'I': ["##","##","##","##","##","##","##","##"],
- 'i': [".#.","...",".#.",".#.",".#.",".#.",".#.",".#."],
- 'o': [".....",".....",".###.","#...#","#...#","#...#","#...#",".###."],
- 'n': [".....",".....","####.","#...#","#...#","#...#","#...#","#...#"],
- 's': [".....",".....",".####","#....",".###.","....#","....#","####."],
- 'S': [".####.","#....#","#.....",".####.",".....#",".....#","#....#",".####."],
- 'D': ["####.","#...#","#...#","#...#","#...#","#...#","#...#","####."],
- 'R': ["####.","#...#","#...#","####.","#.#..","#..#.","#...#","#...#"],
- ' ': ["..","..","..","..","..","..","..",".."],
-}
-def norm(g):
-    w = max(len(r) for r in g)
-    return [r.ljust(w, '.') for r in g]
+FONT = "/usr/share/fonts/opentype/noto/NotoSansCJK-Black.ttc"
+DARK = (20, 18, 18)
 
-def text_mask(text, px, gap=1):
-    """Return an 'L' image with the pixel text at px pixels per cell."""
-    glyphs = [norm(GLYPHS[c]) for c in text]
-    cols = sum(len(g[0]) for g in glyphs) + gap * (len(glyphs) - 1)
-    img = Image.new("L", (cols * px, 8 * px), 0)
+def font(size):
+    return ImageFont.truetype(FONT, size, index=0)
+
+def text_mask(text, size, rounding=0.10):
+    f = font(size)
+    x0, y0, x1, y1 = f.getbbox(text)
+    pad = size // 4
+    img = Image.new("L", (x1 - x0 + 2 * pad, y1 - y0 + 2 * pad), 0)
+    ImageDraw.Draw(img).text((pad - x0, pad - y0), text, font=f, fill=255)
+    r = max(1, int(size * rounding))
+    img = img.filter(ImageFilter.GaussianBlur(r * 0.5)).point(lambda v: 255 if v > 128 else 0)
+    return img.crop(img.getbbox())
+
+def radial(w, h, cx, cy, r_in, r_out, col_in, col_out, power=1.0):
+    """Radial gradient (RGB) + alpha mask (L), 1 = inside."""
+    img = Image.new("RGB", (w, h), col_out)
+    mask = Image.new("L", (w, h), 0)
+    px = img.load(); pm = mask.load()
+    for j in range(h):
+        for i in range(w):
+            d = math.hypot(i - cx, j - cy)
+            t = (d - r_in) / max(1.0, (r_out - r_in))
+            t = min(1.0, max(0.0, t)) ** power
+            px[i, j] = tuple(int(a + (b - a) * t) for a, b in zip(col_in, col_out))
+            pm[i, j] = int(255 * (1 - t))
+    return img, mask
+
+def sky(w, h):
+    img = Image.new("RGB", (w, h), DARK)
     d = ImageDraw.Draw(img)
-    x = 0
-    for g in glyphs:
-        for r, row in enumerate(g):
-            for c, ch in enumerate(row):
-                if ch == '#':
-                    x0, y0 = (x + c) * px, r * px
-                    d.rectangle([x0, y0, x0 + px - 1, y0 + px - 1], fill=255)
-        x += len(g[0]) + gap
-    # round the corners a little (C64 chunky but soft)
-    img = img.filter(ImageFilter.MaxFilter(int(px * 0.45) | 1))
-    img = img.filter(ImageFilter.GaussianBlur(px * 0.30)).point(lambda v: 255 if v > 128 else 0)
+    for y in range(h):
+        t = y / h
+        d.line([(0, y), (w, y)], fill=(int(20 + 40 * t ** 2), int(18 + 14 * t ** 2), int(18 + 8 * t ** 2)))
     return img
 
-def halftone_band(w, h, band_y0, band_y1, seed=3):
-    """Orange band with a white-hot core, screened by dark halftone dots that
-    grow towards the band edges; dark dotted background outside."""
+def sun(img, cx, cy, r):
+    w, h = img.size
+    glow, gm = radial(w, h, cx, cy, r * 0.6, r * 3.2, (255, 90, 40), (0, 0, 0), power=0.9)
+    img = Image.composite(ImageChops.screen(img, glow), img, gm.point(lambda v: int(v * 0.55)))
+    disc, _ = radial(w, h, cx, cy - r * 0.15, 0, r, (255, 120, 60), (220, 30, 20), power=1.4)
+    edge = Image.new("L", (w, h), 0)
+    ImageDraw.Draw(edge).ellipse([cx - r, cy - r, cx + r, cy + r], fill=255)
+    edge = edge.filter(ImageFilter.GaussianBlur(r * 0.03))
+    return Image.composite(disc, img, edge)
+
+def band(img, y0, y1, seed=3):
+    w, h = img.size
     rnd = random.Random(seed)
-    bg = Image.new("RGB", (w, h), (22, 22, 22))
-    d = ImageDraw.Draw(bg)
-    step = 7
-    for y in range(0, h, step):
-        for x in range(0, w, step):
-            d.point((x, y), fill=(38, 38, 38))
-    core = (band_y0 + band_y1) / 2
-    half = (band_y1 - band_y0) / 2
-    # base gradient: white-hot core -> orange -> dark red at the edges
-    for y in range(band_y0, band_y1):
+    layer = Image.new("RGB", (w, h), (0, 0, 0))
+    d = ImageDraw.Draw(layer)
+    core = (y0 + y1) / 2; half = (y1 - y0) / 2
+    for y in range(y0, y1):
         t = max(0.0, 1 - abs((y - core) / half))
-        if t > 0.80:
-            k = (t - 0.80) / 0.20
-            col = (int(255), int(150 + 100 * k), int(40 + 190 * k))
+        if t > 0.78:
+            k = (t - 0.78) / 0.22
+            col = (255, int(160 + 90 * k), int(70 + 170 * k))
         else:
-            k = t / 0.80
-            col = (int(120 + 135 * k), int(30 + 120 * k), int(8 + 32 * k))
+            k = t / 0.78
+            col = (int(130 + 125 * k), int(35 + 125 * k), int(10 + 60 * k))
         d.line([(0, y), (w, y)], fill=col)
-    # horizontal light streaks in the core
-    for i in range(6):
-        y = core + rnd.uniform(-half * 0.18, half * 0.18)
-        x0 = rnd.uniform(0, w * 0.6); ln = rnd.uniform(w * 0.15, w * 0.5)
-        d.line([(x0, y), (x0 + ln, y)], fill=(255, 250, 240), width=int(half * 0.06) + 1)
-    # dark halftone screen: dot radius grows with distance from the core
-    cell = 10
-    row = 0
-    for y in range(band_y0 - cell, band_y1 + cell, cell):
+    cell = 7; row = 0
+    for y in range(y0 - cell, y1 + cell, cell):
         row += 1
         for x in range(-cell, w + cell, cell):
             t = max(0.0, min(1.0, 1 - abs((y + cell / 2 - core) / half)))
-            r = cell * (0.62 - 0.55 * t ** 0.8)
-            if r < 0.6:
+            r = cell * (0.55 - 0.52 * t ** 0.7)
+            if r < 0.5:
                 continue
             cx = x + cell / 2 + (cell / 2 if row % 2 else 0)
-            cy = y + cell / 2
-            d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=(22, 22, 22))
-    return bg
+            d.ellipse([cx - r, y + cell / 2 - r, cx + r, y + cell / 2 + r], fill=(60, 18, 10))
+    m = Image.new("L", (w, h), 0)
+    ImageDraw.Draw(m).rectangle([0, y0, w, y1], fill=255)
+    m = m.filter(ImageFilter.GaussianBlur(half * 0.06))
+    img = Image.composite(layer, img, m)
+    g = Image.new("RGB", (w, h), (0, 0, 0)); gd = ImageDraw.Draw(g)
+    for i in range(7):
+        y = core + rnd.uniform(-half * 0.35, half * 0.35)
+        x0 = rnd.uniform(-w * 0.1, w * 0.8); ln = rnd.uniform(w * 0.12, w * 0.45)
+        wd = max(2, int(half * rnd.uniform(0.03, 0.09)))
+        gd.line([(x0, y), (x0 + ln, y)], fill=(255, 235, 200), width=wd)
+    g = g.filter(ImageFilter.GaussianBlur(3))
+    return ImageChops.screen(img, g.point(lambda v: int(v * 0.85)))
 
-def stacked_mask(lines, px, vgap=1):
-    masks = [text_mask(t, p) for t, p in lines]
-    w = max(m.size[0] for m in masks)
-    h = sum(m.size[1] for m in masks) + vgap * px * (len(masks) - 1)
-    out = Image.new("L", (w, h), 0)
-    y = 0
+def lettering(img, tm, tx, ty):
+    w, h = img.size
+    full = Image.new("L", (w, h), 0); full.paste(tm, (tx, ty))
+    glow = full.filter(ImageFilter.GaussianBlur(tm.size[1] * 0.12))
+    img = ImageChops.screen(img, Image.composite(Image.new("RGB", (w, h), (255, 150, 60)),
+                                                 Image.new("RGB", (w, h), (0, 0, 0)), glow.point(lambda v: int(v * 0.5))))
+    rim = full.filter(ImageFilter.MaxFilter(5))
+    img = Image.composite(Image.new("RGB", (w, h), (255, 244, 225)), img, rim)
+    body = Image.new("RGB", (w, h), DARK); bd = ImageDraw.Draw(body)
+    for y in range(ty, ty + tm.size[1]):
+        t = (y - ty) / tm.size[1]
+        v = int(34 - 16 * t)
+        bd.line([(0, y), (w, y)], fill=(v, v - 2, v - 2))
+    img = Image.composite(body, img, full)
+    gloss = Image.new("L", (w, h), 0); gd = ImageDraw.Draw(gloss)
+    gy0 = ty + tm.size[1] * 0.12; gy1 = ty + tm.size[1] * 0.42
+    gd.polygon([(0, gy0 + 18), (w, gy0 - 18), (w, gy1 - 18), (0, gy1 + 18)], fill=255)
+    gloss = gloss.filter(ImageFilter.GaussianBlur(6))
+    gloss = ImageChops.multiply(gloss, full).point(lambda v: int(v * 0.32))
+    img = Image.composite(Image.new("RGB", (w, h), (255, 230, 200)), img, gloss)
+    top = ImageChops.subtract(full, ImageChops.offset(full, 0, 3)).filter(ImageFilter.GaussianBlur(1))
+    return Image.composite(Image.new("RGB", (w, h), (255, 250, 240)), img, top.point(lambda v: int(v * 0.9)))
+
+def compose(w, h, size, lines, sun_pos=(0.11, 0.18), sun_r=0.16, band_pad=0.28):
+    masks = [text_mask(t, s) for t, s in lines]
+    tw = max(m.size[0] for m in masks)
+    gap = int(size * 0.12)
+    th = sum(m.size[1] for m in masks) + gap * (len(masks) - 1)
+    tm = Image.new("L", (tw, th), 0); y = 0
     for m in masks:
-        out.paste(m, ((w - m.size[0]) // 2, y)); y += m.size[1] + vgap * px
-    return out
-
-def compose(w, h, text, px, band_pad=0.22, glow=True, lines=None):
-    tm = stacked_mask(lines, px) if lines else text_mask(text, px)
-    tw, th = tm.size
-    band_y0 = int(h / 2 - th / 2 - band_pad * th)
-    band_y1 = int(h / 2 + th / 2 + band_pad * th)
-    img = halftone_band(w, h, band_y0, band_y1)
-    # knock-out text: dark fill with a light rim (pixel outline)
+        tm.paste(m, ((tw - m.size[0]) // 2, y)); y += m.size[1] + gap
     tx, ty = (w - tw) // 2, (h - th) // 2
-    rim = tm.filter(ImageFilter.MaxFilter(int(px * 0.22) | 1))
-    dark = Image.new("RGB", (w, h), (18, 18, 18))
-    light = Image.new("RGB", (w, h), (255, 246, 232))
-    layer = Image.new("L", (w, h), 0); layer.paste(rim, (tx, ty))
-    img = Image.composite(light, img, layer)
-    layer = Image.new("L", (w, h), 0); layer.paste(tm, (tx, ty))
-    img = Image.composite(dark, img, layer)
-    # inner halftone texture inside the letters (subtle)
-    d = ImageDraw.Draw(img)
-    for y in range(ty, ty + th, 6):
-        for x in range(tx, tx + tw, 6):
-            if tm.getpixel((x - tx, y - ty)) > 128:
-                d.point((x, y), fill=(42, 42, 42))
-    if glow:
-        g = Image.new("RGB", (w, h), (0, 0, 0))
-        gd = ImageDraw.Draw(g)
-        gd.rectangle([0, band_y0, w, band_y1], fill=(255, 120, 30))
-        g = g.filter(ImageFilter.GaussianBlur(px * 1.2))
-        img = Image.blend(img, Image.composite(g, img, Image.new("L", (w, h), 60)), 0.35)
-    return img
+    y0 = int(ty - band_pad * th); y1 = int(ty + th + band_pad * th)
+    img = sky(w, h)
+    img = sun(img, int(w * sun_pos[0]), int(h * sun_pos[1]), int(h * sun_r))
+    img = band(img, y0, y1)
+    img = lettering(img, tm, tx, ty)
+    _, vm = radial(w, h, w / 2, h / 2, min(w, h) * 0.55, max(w, h) * 0.85, (0, 0, 0), (0, 0, 0))
+    return Image.composite(img, Image.new("RGB", (w, h), (0, 0, 0)), vm.point(lambda x: 255 - int((255 - x) * 0.45)))
 
 def main():
     out = sys.argv[1] if len(sys.argv) > 1 else "."
-    banner = compose(1600, 420, "IonosSDR", px=21, band_pad=0.18)
-    banner.save(f"{out}/banner.png", optimize=True)
-    avatar = compose(512, 512, "", px=14, band_pad=0.35, lines=[("Ionos", 14), ("SDR", 11)])
-    avatar.save(f"{out}/avatar.png", optimize=True)
-    card = compose(1280, 640, "IonosSDR", px=17, band_pad=0.3)
-    card.save(f"{out}/social_card.png", optimize=True)
+    compose(1600, 420, 190, [("IonosSDR", 190)], sun_pos=(0.10, 0.20), sun_r=0.17, band_pad=0.28).save(f"{out}/banner.png", optimize=True)
+    compose(512, 512, 120, [("Ionos", 120), ("SDR", 84)], sun_pos=(0.20, 0.17), sun_r=0.13, band_pad=0.22).save(f"{out}/avatar.png", optimize=True)
+    compose(1280, 640, 170, [("IonosSDR", 170)], sun_pos=(0.12, 0.20), sun_r=0.15, band_pad=0.32).save(f"{out}/social_card.png", optimize=True)
     print("wrote banner.png avatar.png social_card.png")
 
 if __name__ == "__main__":
