@@ -4,24 +4,26 @@
 
 Open, calibrated, remotely usable SDR transceiver on a commodity ISM radio SoC (Silicon Labs EFR32FG23) with an ESP32‑S3 companion. 16‑bit I/Q over WiFi/USB, open protocols, on‑device DSP. RX tunes across the SoC's range (optimum inside the matched band); TX is matching‑network dependent — the 2 m band first, further bands as plug‑in matching on the final hardware.
 
-<p>
+<p align="center">
 <img src="docs/img/prototype_bench.jpg" height="420" alt="Prototype: Silicon Labs WSTK + EFR32FG23 radio board (BRD4265B), ESP32-S3 N16R8 module, 2.8&quot; ILI9341 TFT">
 <img src="docs/img/tft_waterfall_144800.jpg" height="420" alt="TFT waterfall at 144.800 MHz (APRS): 195 blk/s, -94 dBm, 49 % load">
 </p>
 
-*Prototype (left): Silicon Labs WSTK + EFR32FG23 radio board, ESP32‑S3 module, 2.8" TFT. Right: waterfall at 144.800 MHz with an APRS burst.*
+<p align="center"><i>Prototype (left): Silicon Labs WSTK + EFR32FG23 radio board, ESP32‑S3 module, 2.8" TFT. Right: waterfall at 144.800 MHz with an APRS burst.</i></p>
 
-**Demo videos**
-
-| [![Ionos SDR test video](https://img.youtube.com/vi/TvFiH6MmJB0/mqdefault.jpg)](https://youtu.be/TvFiH6MmJB0) | [![Spectrum painting received on Ionos SDR](https://img.youtube.com/vi/0PxuDpmvdRM/mqdefault.jpg)](https://youtu.be/0PxuDpmvdRM) |
-|---|---|
-| [Bench test](https://youtu.be/TvFiH6MmJB0) — streaming, waterfall, APRS (Hungarian narration) | [Spectrum painting](https://youtu.be/0PxuDpmvdRM) — HackRF as the painting signal generator, Ionos SDR as the receiver (Hungarian narration) |
+<p align="center"><b>Demo videos</b></p>
+<p align="center">
+<a href="https://youtu.be/TvFiH6MmJB0"><img src="https://img.youtube.com/vi/TvFiH6MmJB0/mqdefault.jpg" alt="Ionos SDR test video"></a>
+&nbsp;&nbsp;
+<a href="https://youtu.be/0PxuDpmvdRM"><img src="https://img.youtube.com/vi/0PxuDpmvdRM/mqdefault.jpg" alt="Spectrum painting received on Ionos SDR"></a>
+</p>
+<p align="center"><i>Left: <a href="https://youtu.be/TvFiH6MmJB0">bench test</a> — streaming, waterfall, APRS. Right: <a href="https://youtu.be/0PxuDpmvdRM">spectrum painting</a> — HackRF as the painting signal generator, Ionos SDR as the receiver. (Hungarian narration.)</i></p>
 
 **Status: working prototype.** Everything marked *validated* has a measurement in [`measurements/`](measurements/).
 
 ## Architecture
 
-<img src="docs/img/architecture.svg" width="100%" alt="System architecture: RF front-end (LNA, LDMOS PA, T/R switch, 39 MHz VCTCXO) – EFR32FG23 radio SoC (I/Q capture, NCO transmitter, calibration and scan) – I²S/SPI – ESP32-S3 companion (streaming server, on-device DSP, TFT/GPS/SD) – WiFi/USB – hosts (SDR++, GNU Radio, SoapySDR) and services (APRS-IS, SatNOGS)">
+<p align="center"><img src="docs/img/architecture.svg" width="100%" alt="System architecture: RF front-end (LNA, LDMOS PA, T/R switch, 39 MHz VCTCXO) – EFR32FG23 radio SoC (I/Q capture, NCO transmitter, calibration and scan) – I²S/SPI – ESP32-S3 companion (streaming server, on-device DSP, TFT/GPS/SD) – WiFi/USB – hosts (SDR++, GNU Radio, SoapySDR) and services (APRS-IS, SatNOGS)"></p>
 
 - **RX**: two modes on the same hardware, switchable from the host (see below).
 - **TX**: no I/Q DAC on the FG23; modulation is synthesised by stepping the PLL frequency offset (NCO). Constant‑envelope modes only on‑chip.
