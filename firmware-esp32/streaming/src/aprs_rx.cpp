@@ -5,11 +5,13 @@
  *
  * (LibAPRS delay-mult path + DC-block + mild IF AA — 2026-08-09)
  *
- * Design credit: the delay-multiply AFSK detector, bit PLL and HDLC window
- * logic follow the LibAPRS (Mark Qvist, GPL-3.0) / BertOS afsk.c (Develer,
- * GPL-2.0+exception) design, used as the reference during debugging. This
- * file is an independent fixed-point implementation for the FG23 I/Q path;
- * no code was copied. See ACKNOWLEDGEMENTS.md.
+ * Design credit: the delay-multiply AFSK detector, the 8-samples-per-bit
+ * timing recovery and the HDLC bit-window approach follow the well-known
+ * BertOS afsk.c (Develer) / LibAPRS (Mark Qvist) design, which was used as
+ * the reference during debugging. This file is an independent fixed-point
+ * implementation for the FG23 I/Q path (2026-09-18: the bit-timing block
+ * was rewritten from the algorithm description to remove the last
+ * LibAPRS-derived macros and identifiers). See ACKNOWLEDGEMENTS.md.
  *
  * DEBUG / CHANGELOG
  *   v2.3: s_audio_dc floor-shift -> rounded (+128). The ">>8" rounded the
@@ -230,23 +232,24 @@ static int32_t  s_pll = 0, s_pll_inc = 0, s_pll_adj = 0;
 /* NRZI + HDLC */
 static bool     s_nrzi_prev = false;
 
-/* LibAPRS delay-multiply state (audio @ ~9600 Hz) */
-#define PHASE_BITS       8
-#define PHASE_INC        1
-#define PHASE_MAX_A      64
-#define PHASE_THRESH_A   32
+/* Delay-and-multiply discriminator + bit-timing recovery (audio @ ~9600 Hz).
+ * 8 samples per bit. A phase accumulator advances by one sample-step per
+ * audio sample and wraps once per bit; on every zero crossing of the
+ * detector output it is nudged 1/8 sample towards the crossing, so the
+ * decision instant stays centred in the bit. The bit value is a majority
+ * vote over the last 5 sign samples; NRZI: "no change" = 1. */
+#define BIT_SAMPLES      8                    /* samples per bit */
+#define PHASE_STEP       8                    /* accumulator units per sample */
+#define PHASE_WRAP       (BIT_SAMPLES * PHASE_STEP)   /* one bit = 64 */
+#define PHASE_NUDGE      1                    /* 1/8 sample per zero crossing */
 #define DELAYED_N_MAX    8
 #define FIR_LPF_N        31   /* 8*4-1, same as PC twin — 1-pole killed Track2 609->5 */
-#define BITS_DIFFER(a, b)       (((a) ^ (b)) & 0x01)
-#define DUAL_XOR(a, b)          ((((a) ^ (b)) & 0x03) == 0x03)
-#define SIGNAL_TRANSITIONED(b)  DUAL_XOR((b), (b) >> 2)
-#define TRANSITION_FOUND(b)     BITS_DIFFER((b), (b) >> 1)
 static int     s_delayed[DELAYED_N_MAX];
 static int     s_delay_idx = 0;
 static int     s_delayed_n = 4;
-static uint8_t s_sampledBits = 0;
-static uint8_t s_actualBits = 0;
-static int     s_currentPhase = 0;
+static uint8_t s_sign_hist = 0;   /* sign of detector output, newest in bit 0 */
+static uint8_t s_bit_hist  = 0;   /* recovered (pre-NRZI) bits, newest in bit 0 */
+static int     s_phase     = 0;   /* bit-timing accumulator, 0..PHASE_WRAP-1 */
 static int32_t s_lpf_y = 0;
 
 /* ==== SWITCH: 1 = correlator + AGC,  0 = LibAPRS delay-multiply + FIR
@@ -394,17 +397,17 @@ static void aprs_rx_configure(uint32_t sps)
   s_iq_si = s_iq_sq = 0; s_iq_n = 0;
   s_audio_dc = 0; s_soft = 0; s_soft_dc = 0;
   s_pll = 0;
-  /* LibAPRS delay line: ~ half bit @ 9600 -> 4 samples */
+  /* delay line: ~ half bit @ 9600 -> 4 samples */
   s_delayed_n = 4; /* half-bit @ 9600, matches PC twin */
   memset(s_delayed, 0, sizeof s_delayed);
   s_delay_idx = 0;
-  s_sampledBits = s_actualBits = 0;
-  s_currentPhase = 0;
+  s_sign_hist = s_bit_hist = 0;
+  s_phase = 0;
   s_lpf_y = 0;
   fir_design((int)AUDIO_TARGET_HZ, 1200); /* twin FIR_LPF_N @ 9600 */
 
   Serial0.printf("APRS RX: %lu sps --/%lu--> %lu Hz IF (+-%lu.%lu kHz) "
-                 "--/%lu--> %lu Hz audio, LibAPRS delay-mult N=%d taps=%lu\n",
+                 "--/%lu--> %lu Hz audio, delay-mult N=%d taps=%lu\n",
                  (unsigned long)sps, (unsigned long)s_iq_dec,
                  (unsigned long)s_if_hz,
                  (unsigned long)(s_if_hz / 2000),
@@ -802,7 +805,7 @@ static void frame_complete(void)
 }
 
 /* One NRZI-decoded bit for the HDLC. */
-/* LibAPRS hdlcParse — LEFT-shift window (matches esp_demod_fw_v2 / 515 pkts) */
+/* HDLC bit window, newest bit in bit 0 (matches esp_demod_fw_v2 / 515 pkts) */
 static void hdlc_bit(bool bit)
 {
   s_hdlc_win = (uint8_t)((s_hdlc_win << 1) | (bit ? 1u : 0u));
@@ -985,20 +988,31 @@ static void audio_sample(int32_t a)
   s_lpf_y = s_fir_ready ? fir_run((int16_t)x) : x;
 #endif
 
-  s_sampledBits = (uint8_t)((s_sampledBits << 1) | ((s_lpf_y > 0) ? 1u : 0u));
+  /* sign history of the detector output */
+  s_sign_hist = (uint8_t)((s_sign_hist << 1) | ((s_lpf_y > 0) ? 1u : 0u));
 
-  if (SIGNAL_TRANSITIONED(s_sampledBits)) {
-    if (s_currentPhase < PHASE_THRESH_A) s_currentPhase += PHASE_INC;
-    else                                 s_currentPhase -= PHASE_INC;
+  /* Zero crossing = the sign two samples ago differs from the current one
+   * AND the sign three samples ago differs from the previous one (two
+   * consecutive disagreements: a real edge, not a single-sample glitch).
+   * Nudge the accumulator towards the edge. */
+  {
+    uint8_t now  = s_sign_hist & 0x03;         /* samples n, n-1 */
+    uint8_t past = (s_sign_hist >> 2) & 0x03;  /* samples n-2, n-3 */
+    if ((now ^ past) == 0x03) {
+      if (s_phase < PHASE_WRAP / 2) s_phase += PHASE_NUDGE;
+      else                          s_phase -= PHASE_NUDGE;
+    }
   }
-  s_currentPhase += PHASE_BITS;
-  if (s_currentPhase >= PHASE_MAX_A) {
-    s_currentPhase %= PHASE_MAX_A;
-    s_actualBits = (uint8_t)(s_actualBits << 1);
-    if (popcount5(s_sampledBits & 0x1f) >= 3) s_actualBits |= 1;
-    /* NRZI: no transition = 1 */
-    bool bit = !TRANSITION_FOUND(s_actualBits);
-    hdlc_bit(bit);
+
+  s_phase += PHASE_STEP;
+  if (s_phase >= PHASE_WRAP) {
+    s_phase -= PHASE_WRAP;
+    /* decision: majority of the last 5 sign samples */
+    int ones = popcount5(s_sign_hist & 0x1f);
+    s_bit_hist = (uint8_t)((s_bit_hist << 1) | (ones >= 3 ? 1u : 0u));
+    /* NRZI decode: bit = 1 when the level did not change */
+    bool changed = ((s_bit_hist ^ (s_bit_hist >> 1)) & 0x01) != 0;
+    hdlc_bit(!changed);
   }
 }
 
