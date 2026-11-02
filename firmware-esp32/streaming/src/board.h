@@ -46,6 +46,10 @@
 #define BRD_BTN_LADDER     1
 #define BRD_BTN_A_PIN      1             /* BACK, OK, (SPARE) */
 #define BRD_BTN_B_PIN      2             /* UP, DOWN, LEFT, RIGHT */
+/* ---- SWD to the radio board (fg23_prog: flash the FG23 from the ESP32) ---- */
+#define BRD_SWD_SWCLK      39
+#define BRD_SWD_SWDIO      38
+#define BRD_SWD_RESETN     40
 #else
 #define BRD_FG23_SCLK      GPIO_NUM_15   /* FG23 PC05 / EXP 15 */
 #define BRD_FG23_MOSI      GPIO_NUM_16   /* FG23 PC00 / EXP 10 */

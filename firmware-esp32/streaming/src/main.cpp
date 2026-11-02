@@ -77,6 +77,7 @@
 
 #include <Arduino.h>
 #include "board.h"
+#include "fg23_prog.h"
 #include <WiFi.h>
 #include <WiFiMulti.h>
 #include "driver/spi_slave.h"
@@ -2284,7 +2285,7 @@ static void bench_console_tick(void)
     if (c == '\n' || c == '\r') {
       if (n) {
         cmd[n] = '\0';
-        if (!wifi_bench_cmd(cmd) && !rgb_load_cmd(cmd)) iq_fft_cmd(cmd);
+        if (!fg23_prog_cmd(cmd, DIAG) && !wifi_bench_cmd(cmd) && !rgb_load_cmd(cmd)) iq_fft_cmd(cmd);
       }
       n = 0;
     } else if (n < sizeof cmd - 1) {
@@ -2307,6 +2308,7 @@ void setup()
    * transaction is queued, they are lost FOR GOOD. Buffer + faster baud, and
    * the output becomes "free". */
   DIAG.setTxBufferSize(2048);
+  DIAG.setRxBufferSize(4096);   /* fg23_prog: 2 kB image chunks */
   DIAG.begin(115200);
 
   /* The native USB CDC TX buffer is a few hundred bytes by default, which
