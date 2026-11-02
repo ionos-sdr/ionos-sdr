@@ -631,6 +631,10 @@ static volatile uint32_t rx_tail = 0;      /* counter, written only by the loop 
 static uint32_t          rx_head_idx = 0;  /* slot, used ONLY by the task */
 static uint32_t          rx_tail_idx = 0;  /* slot, used ONLY by the loop */
 static volatile uint32_t rx_ring_ovf = 0;  /* ring full -> dropped block (must be 0!) */
+/* Raw transaction length != 1040 bytes, BEFORE the clip below hides it (2026-11-02,
+ * ionos-sdr-mini signal-integrity hunt): extra SCLK edges show up as LONG, missing
+ * ones as SHORT transactions. Last odd length kept for the printout. */
+static volatile uint32_t rx_len_long = 0, rx_len_short = 0, rx_len_last = 0;
 static volatile uint32_t rx_ring_max = 0;  /* highest fill level (watermark) */
 static TaskHandle_t      rx_task_handle = NULL;
 
@@ -643,6 +647,11 @@ static void spi_rx_task(void *arg)
         || r == NULL)
       continue;
 
+    if (r->trans_len != BLK_BYTES * 8u) {
+      if (r->trans_len > BLK_BYTES * 8u) rx_len_long = rx_len_long + 1u;
+      else rx_len_short = rx_len_short + 1u;
+      rx_len_last = r->trans_len;
+    }
     size_t n = (size_t)(r->trans_len / 8);
     if (n > BLK_BYTES) n = BLK_BYTES;
 
@@ -2855,6 +2864,8 @@ void loop()
      * the CONSEQUENCE. qmax = how close the backlog came to NQUEUE (reaching
      * it means loss); dt_max = the longest blind period; then the list of
      * culprits in descending order. --- */
+    DIAG.printf("  SPI-LEN: long=%lu short=%lu last_odd=%lu bits\n",
+                (unsigned long)rx_len_long, (unsigned long)rx_len_short, (unsigned long)rx_len_last);
     DIAG.printf("  TIMING: qmax=%lu/%d  RXRING=%lu/%d ovf=%lu  dt_max=%lu us |",
                 (unsigned long)st_qmax, NQUEUE,
                 (unsigned long)rx_ring_max, RXRING_BLOCKS,

@@ -23,11 +23,15 @@
 #define BRD_FG23_SCLK      GPIO_NUM_12   /* FG23 PC05 */
 #define BRD_FG23_MOSI      GPIO_NUM_11   /* FG23 PC00 */
 #define BRD_FG23_CS        GPIO_NUM_10   /* FG23 PA07 */
+#ifndef BRD_FG23_SPI_HOST
 #define BRD_FG23_SPI_HOST  SPI2_HOST     /* IO_MUX pins of FSPI */
+#endif
 #define BRD_RDY_PIN        14            /* -> FG23 PD02 */
 #define BRD_CMDLINK_TX_PIN 13            /* -> FG23 PA06 (EUSART1 RX) */
 /* ---- TFT (ER-TFTM024-3, ILI9341, 4-wire SPI) + resistive touch ---- */
+#ifndef BRD_TFT_HOST
 #define BRD_TFT_HOST       SPI3_HOST
+#endif
 #define BRD_TFT_SCK        4
 #define BRD_TFT_MOSI       5
 #define BRD_TFT_MISO       6
@@ -36,7 +40,8 @@
 #define BRD_TFT_RST        16
 #define BRD_TFT_BL         17
 #define BRD_TFT_TE         18
-#define BRD_TFT_ROTATION   2             /* the panel sits upside-down on the cradle */
+#define BRD_TFT_ROTATION   0
+#define BRD_TFT_FLIP180    1             /* panel upside-down: scan reversed in the panel (B6h) */
 /* ---- buttons: two ADC1 ladders, 10 k pull-up, 0R / 2k2 / 6k8 / 22k ---- */
 #define BRD_BTN_LADDER     1
 #define BRD_BTN_A_PIN      1             /* BACK, OK, (SPARE) */
@@ -58,6 +63,7 @@
 #define BRD_TFT_BL         21
 #define BRD_TFT_TE         48
 #define BRD_TFT_ROTATION   0
+#define BRD_TFT_FLIP180    0
 #define BRD_BTN_LADDER     0
 #define BRD_BTN_PIN        0             /* Heltec V3 PRG button (GPIO0) */
 #endif
