@@ -211,6 +211,14 @@
  * sent ANYWAY (the old behaviour) and counted: the counter shows if the
  * far side cannot keep up over time. */
 #define RDY_TIMEOUT_US    3000u
+/* RDY SETTLE (2026-11-02, ionos-sdr-mini). After CS is released the ESP32
+ * needs its spi_slave ISR (post_trans -> load next descriptor -> post_setup)
+ * before the NEXT block may start. Read right after CS_RELEASE, RDY is still
+ * the STALE "high" of the previous transaction; with a backlog the next block
+ * then went out before the descriptor was loaded and landed in an old one:
+ * the SEQ-BACK -23 / SEQ-HOLE +25 (+-NQUEUE) excursion. So RDY is only
+ * trusted RDY_SETTLE_US after the previous CS release. 100 us << 5.1 ms. */
+#define RDY_SETTLE_US     100u
 
 /* ---------------- PINS ---------------- */
 #define SPI_MOSI_PORT  gpioPortC
@@ -451,6 +459,7 @@ static LDMA_Descriptor_t s_desc;
 static unsigned int      s_dma_ch = 0;
 static bool              s_dma_alloc = false;
 static volatile bool     s_tx_busy = false;
+static uint32_t          s_cs_release_t = 0;   /* RAIL time of the last CS_RELEASE */
 
 /* ================= SPI ================= */
 
@@ -574,6 +583,8 @@ static void spi_send_block(iq_blk_t *b)
 #if IQ_RDY_ENABLE
   /* Is the far side ready? The wait happens here, BEFORE CS goes low —
    * until then the block is ours, nothing can be lost. */
+  /* RDY settle: see RDY_SETTLE_US */
+  while ((uint32_t)RAIL_GetTime() - s_cs_release_t < RDY_SETTLE_US) { }
   if (!GPIO_PinInGet(RDY_PORT, RDY_PIN)) {
     RAIL_Time_t t0 = RAIL_GetTime();
     RAIL_Time_t tl = t0 + RDY_TIMEOUT_US;
@@ -1019,7 +1030,8 @@ static bool spi_tx_poll(void)
     RAIL_Time_t t = RAIL_GetTime() + SPI_CS_HOLD_US;
     while ((int32_t)(RAIL_GetTime() - t) < 0) { }
 
-    CS_RELEASE();                              /* CS inactive */
+    CS_RELEASE();
+    s_cs_release_t = (uint32_t)RAIL_GetTime();   /* CS inactive */
 
     uint32_t t_end = (uint32_t)RAIL_GetTime();
     uint32_t d_all  = t_end - s_cs_t0;
