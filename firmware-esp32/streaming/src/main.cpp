@@ -76,6 +76,7 @@
  */
 
 #include <Arduino.h>
+#include "board.h"
 #include <WiFi.h>
 #include <WiFiMulti.h>
 #include "driver/spi_slave.h"
@@ -315,11 +316,11 @@
  * Counterpart: iq_stream.c, IQ_RDY_ENABLE. While the wire is not connected,
  * leave it at 0 on the FG23 - the ESP32 side is harmless when driven. */
 #define RDY_ENABLE   1
-#define RDY_PIN      2
+#define RDY_PIN      BRD_RDY_PIN
 
 /* ---- Return path to the FG23 (tuning from the phone). 0 = disabled. */
 #define CMDLINK_ENABLE   1
-#define CMDLINK_TX_PIN   18         /* ESP GPIO18 -> FG23 PA06 / EXP 11
+#define CMDLINK_TX_PIN   BRD_CMDLINK_TX_PIN         /* ESP GPIO18 -> FG23 PA06 / EXP 11
                                      * (2026-08-19: moved from 4; pin 4 goes
                                      * to the display/touch on the devkit) */
 #define CMDLINK_BAUD     115200
@@ -331,10 +332,10 @@
  * more than sufficient for it. In the FINAL layout this is reversed: the
  * FG23 gets the IO_MUX (10/11/12 + RDY 14 + CMD 13), the display goes to
  * SPI3 - that is the precondition for the 700 ksps direction. */
-#define PIN_SCLK   GPIO_NUM_15    /* FG23 PC05 / EXP 15 */
-#define PIN_MOSI   GPIO_NUM_16    /* FG23 PC00 / EXP 10 */
-#define PIN_CS     GPIO_NUM_17    /* FG23 PA07 / EXP 13 */
-#define FG23_SPI_HOST SPI3_HOST
+#define PIN_SCLK   BRD_FG23_SCLK    /* FG23 PC05 / EXP 15 */
+#define PIN_MOSI   BRD_FG23_MOSI    /* FG23 PC00 / EXP 10 */
+#define PIN_CS     BRD_FG23_CS    /* FG23 PA07 / EXP 13 */
+#define FG23_SPI_HOST BRD_FG23_SPI_HOST
 
 /* ---------------- BLOCK (must match iq_stream.c!) ---------------- */
 #define BLK_SAMPLES   256

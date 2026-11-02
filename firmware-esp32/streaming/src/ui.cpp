@@ -9,10 +9,13 @@
 
 #include "ui.h"
 #include <Arduino.h>
+#include "board.h"
 
 /* ==================== CONFIG ==================== */
 
-#define UI_BTN_PIN        0           /* Heltec V3 PRG button (GPIO0) */
+#if !BRD_BTN_LADDER
+#define UI_BTN_PIN        BRD_BTN_PIN /* Heltec V3 PRG button (GPIO0) */
+#endif
 #define UI_DEBOUNCE_MS    30
 #define UI_LONG_MS        800
 #define UI_IDLE_BACK_MS   20000       /* back to STATUS after inactivity */
@@ -91,6 +94,43 @@ static void ui_next(uint32_t now)
   s_demod_pinned = (UI_TABLE[p].is_demod && UI_TABLE[p].ready);
 }
 
+/* Previous page (ionos-sdr-mini LEFT / UP). Same rules as ui_next. */
+static void ui_prev(uint32_t now)
+{
+  ui_page_t p = (ui_page_t)((s_page + UI_PAGE_COUNT - 1) % UI_PAGE_COUNT);
+  ui_set_page(p, now);
+  if (UI_TABLE[p].is_demod && UI_TABLE[p].ready && s_mode != p) {
+    s_mode = p;
+    Serial0.printf("\nUI: mode -> %s\n", UI_TABLE[p].name);
+  }
+  s_hold_until_ms = 0;
+  s_demod_pinned = (UI_TABLE[p].is_demod && UI_TABLE[p].ready);
+}
+
+#if BRD_BTN_LADDER
+/* ionos-sdr-mini: two ADC1 ladders, 10 k pull-up to 3V3, buttons to GND via
+ * 0R / 2k2 / 6k8 / 22k. Thresholds at the level midpoints (mV). */
+enum { BTN_NONE = 0, BTN_BACK, BTN_OK, BTN_SPARE, BTN_UP, BTN_DOWN, BTN_LEFT, BTN_RIGHT };
+static const char *BTN_NAME[] = {"-", "BACK", "OK", "SPARE", "UP", "DOWN", "LEFT", "RIGHT"};
+static int ladder_level(int mv)
+{
+  if (mv < 300)  return 0;
+  if (mv < 970)  return 1;
+  if (mv < 1800) return 2;
+  if (mv < 2790) return 3;
+  return -1;
+}
+static int read_buttons(void)
+{
+  int a = ladder_level(analogReadMilliVolts(BRD_BTN_A_PIN));
+  if (a >= 0 && a <= 2) return BTN_BACK + a;              /* BACK, OK, SPARE */
+  int b = ladder_level(analogReadMilliVolts(BRD_BTN_B_PIN));
+  if (b >= 0) return BTN_UP + b;                          /* UP, DOWN, LEFT, RIGHT */
+  return BTN_NONE;
+}
+static int s_btn_id = BTN_NONE;
+#endif
+
 static void ui_stop_demod(uint32_t now)
 {
   if (s_mode != UI_PAGE_STATUS) {
@@ -107,23 +147,45 @@ void ui_init(void)
 {
   /* With pull-up: the button pulls to GND. GPIO0 is a strapping pin, but a
    * plain input at run time. */
+#if BRD_BTN_LADDER
+  analogSetPinAttenuation(BRD_BTN_A_PIN, ADC_11db);
+  analogSetPinAttenuation(BRD_BTN_B_PIN, ADC_11db);
+#else
   pinMode(UI_BTN_PIN, INPUT_PULLUP);
+#endif
   s_btn_raw = s_btn_stable = false;
   s_page = UI_PAGE_STATUS;
   s_mode = UI_DEFAULT_MODE;
   s_dirty = true;
 
+#if BRD_BTN_LADDER
+  Serial0.printf("UI: ladder buttons GPIO%d/%d, start page %s, start mode %s\n",
+                 BRD_BTN_A_PIN, BRD_BTN_B_PIN, UI_TABLE[UI_PAGE_STATUS].name,
+                 UI_TABLE[s_mode].name);
+  Serial0.println("UI: OK/RIGHT/DOWN = next page, LEFT/UP = previous, "
+                  "BACK or any long press = demod off + back to status");
+#else
   Serial0.printf("UI: button GPIO%d, start page %s, start mode %s\n",
                  UI_BTN_PIN, UI_TABLE[UI_PAGE_STATUS].name,
                  UI_TABLE[s_mode].name);
   Serial0.println("UI: short press = next page, "
                   "long = demod off + back to status");
+#endif
 }
 
 void ui_tick(uint32_t now)
 {
   /* --- button: debounce --- */
+#if BRD_BTN_LADDER
+  static uint32_t s_adc_ms = 0;
+  static int s_raw_id = BTN_NONE;
+  if (now - s_adc_ms >= 10) { s_adc_ms = now; s_raw_id = read_buttons(); }
+  int id = s_raw_id;
+  bool raw = (id != BTN_NONE);
+  if (raw && !s_btn_stable && id != s_btn_id) { s_btn_id = id; s_btn_change_ms = now; s_btn_raw = !raw; }
+#else
   bool raw = (digitalRead(UI_BTN_PIN) == LOW);
+#endif
   if (raw != s_btn_raw) {
     s_btn_raw = raw;
     s_btn_change_ms = now;
@@ -134,7 +196,21 @@ void ui_tick(uint32_t now)
       s_long_fired = false;
     } else {
       /* release: if the long press did not fire, this was a short press */
+#if BRD_BTN_LADDER
+      if (!s_long_fired) {
+        Serial0.printf("UI: button %s\n", BTN_NAME[s_btn_id]);
+        switch (s_btn_id) {
+          case BTN_BACK:  ui_stop_demod(now); break;
+          case BTN_LEFT:
+          case BTN_UP:    ui_prev(now); break;
+          case BTN_SPARE: break;
+          default:        ui_next(now); break;           /* OK, RIGHT, DOWN */
+        }
+      }
+      s_btn_id = BTN_NONE;
+#else
       if (!s_long_fired) ui_next(now);
+#endif
     }
   }
 

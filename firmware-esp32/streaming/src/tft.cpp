@@ -8,6 +8,7 @@
  */
 
 #define LGFX_USE_V1
+#include "board.h"
 #include <LovyanGFX.hpp>
 #include "tft.h"
 #include <Arduino.h>
@@ -21,14 +22,14 @@
 #endif
 
 /* ---- pins: the same wiring as in the waterfall bench ---- */
-#define PIN_SCK    12
-#define PIN_MOSI   11
-#define PIN_MISO   13
-#define PIN_CS     10
-#define PIN_DC     14
-#define PIN_RST     9
-#define PIN_BL     21
-#define PIN_TE     48                 /* HARDWARE TE. Pin 47 carries the RGB LED;
+#define PIN_SCK    BRD_TFT_SCK
+#define PIN_MOSI   BRD_TFT_MOSI
+#define PIN_MISO   BRD_TFT_MISO
+#define PIN_CS     BRD_TFT_CS
+#define PIN_DC     BRD_TFT_DC
+#define PIN_RST    BRD_TFT_RST
+#define PIN_BL     BRD_TFT_BL
+#define PIN_TE     BRD_TFT_TE                 /* HARDWARE TE. Pin 47 carries the RGB LED;
                                        * two outputs cannot share one wire. */
 #define TFT_FREQ   40000000
 
@@ -47,7 +48,7 @@ public:
     LGFX(void) {
         {
             auto c = _bus.config();
-            c.spi_host    = SPI2_HOST;      /* the FG23 slave is on SPI3 */
+            c.spi_host    = BRD_TFT_HOST;      /* the FG23 slave is on SPI3 */
             c.spi_mode    = 0;
             c.freq_write  = TFT_FREQ;
             c.freq_read   = 16000000;
@@ -284,6 +285,22 @@ static void tft_task(void *arg)
         }
         s_row_full = false;                        /* the buffer may be written again */
 
+#if BRD_TFT_ROTATION == 2
+        /* Panel mounted upside-down (rotation 2): the user's top is the END of
+         * the frame memory. The fixed header is the memory's BOTTOM fixed area,
+         * the scroll area is memory rows 0..VSA-1. The newest row is written at
+         * the current start address and the start steps past it, so it is
+         * scanned LAST = shown at the user's top of the scroll area. */
+        uint16_t m = s_vsp;
+        uint16_t new_vsp = (uint16_t)((m + 1) % VSA);
+        wait_te();
+
+        lcd_lock();
+        lcd.startWrite();
+        lcd.pushImageDMA(0, (H - 1) - m, W, 1, s_line);
+        lcd.waitDMA();
+        vscrsadd_inTx(new_vsp);
+#else
         /* new row at the TOP of the scroll area, then step */
         uint16_t new_vsp = (s_vsp == TFA) ? (uint16_t)(TFA + VSA - 1)
                                           : (uint16_t)(s_vsp - 1);
@@ -294,6 +311,7 @@ static void tft_task(void *arg)
         lcd.pushImageDMA(0, new_vsp, W, 1, s_line);
         lcd.waitDMA();
         vscrsadd_inTx(new_vsp);
+#endif
         lcd.endWrite();
         lcd_unlock();
 
@@ -314,7 +332,7 @@ void tft_init(void)
         return;
     }
     s_ok = true;
-    lcd.setRotation(0);
+    lcd.setRotation(BRD_TFT_ROTATION);
     lcd.fillScreen(TFT_BLACK);
     build_palette();
 
@@ -326,8 +344,14 @@ void tft_init(void)
     lcd.drawFastHLine(0, HDR_H - 1, W, TFT_DARKGREY);
 
     /* scroll area: the header is fixed, everything below scrolls */
+#if BRD_TFT_ROTATION == 2
+    vscrdef(0, VSA, TFA);       /* memory: scroll 0..VSA-1, fixed header at the bottom */
+    s_vsp = 0;
+    lcd.startWrite(); vscrsadd_inTx(0); lcd.endWrite();
+#else
     vscrdef(TFA, VSA, BFA);
     s_vsp = TFA;
+#endif
 
     /* Enable TEARING EFFECT on the panel (0x35, mode 0 = V-blank only),
      * and the GPIO48 interrupt. Without it the bottom pixel row flickers. */
