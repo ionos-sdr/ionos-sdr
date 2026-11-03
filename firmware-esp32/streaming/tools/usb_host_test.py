@@ -30,8 +30,16 @@ ap.add_argument("--sec", type=float, default=10.0)
 ap.add_argument("--raw", action="store_true", help="send nothing")
 a = ap.parse_args()
 
-s = serial.Serial(a.port, 115200, timeout=0.05)
-s.dtr = True                      # HWCDC: the ESP sees 'connected' once we drain
+# ESP32-S3 native USB (USB-Serial/JTAG): the chip RESETS when the host asserts RTS
+# while DTR is low - pyserial's default open/close does exactly that (rst:0x15, the
+# port goes silent for the ~6 s boot). The S3 has no register to turn this off
+# (the P4 has USB_UART_CHIP_RST_DIS), so the host must never assert RTS: set the
+# lines BEFORE open, they then go into the same DCB.
+def open_port(port, baud, timeout):
+    s = serial.Serial(); s.port = port; s.baudrate = baud; s.timeout = timeout
+    s.rts = False; s.dtr = True
+    s.open(); return s
+s = open_port(a.port, 115200, 0.05)   # DTR on: the ESP sees 'connected' once we drain
 buf = b""
 t0 = time.time()
 stats = {"IQ": 0, "SPC": 0, "MSG": 0, "resync": 0, "gaps": 0}

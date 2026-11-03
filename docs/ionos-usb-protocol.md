@@ -182,10 +182,17 @@ on the ESP console reads FG23 RAM over SWD without halting it (addresses
 from `arm-none-eabi-nm` on the `.axf`) — the mini board has no FG23 serial
 output, this is how its counters are inspected.
 
-Known issue: after the host closes and reopens the USB port the ESP32-S3
-USB-serial/JTAG bridge sometimes delivers nothing until the ESP is reset
-(`esptool --chip esp32s3 --port COM4 chip-id` does it). A host should keep
-one open; the websdr hands the probed port over without a reopen.
+**Host rule — never assert RTS.** What looked like "the port goes silent after
+a close/reopen until the ESP is reset" was the ESP32-S3 USB-Serial/JTAG
+peripheral resetting the chip (`rst:0x15`): it emulates the esptool auto-reset
+and pulls EN whenever the host asserts RTS while DTR is low, which pyserial's
+default open/close does (reproduced 7/7, console showed the boot banner each
+time; with RTS held low 6/6 reopens streamed at once). The S3 has no register
+to disable this (the P4's `USB_UART_CHIP_RST_DIS` does not exist here), so
+every host sets DTR=1, RTS=0 *before* opening — `tools/usb_host_test.py`
+`open_port()`, `iq_bridge.py`, `usb_sink.py` do; the websdr sets
+`{dataTerminalReady: true, requestToSend: false}` right after `open()` and
+hands the probed port over without a reopen.
 
 ## 8. Open points
 
