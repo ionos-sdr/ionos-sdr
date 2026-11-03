@@ -9,6 +9,8 @@
 
 #include "ui.h"
 #include <Arduino.h>
+#include "driver/gpio.h"
+#include "esp_adc/adc_oneshot.h"
 #include "board.h"
 
 /* ==================== CONFIG ==================== */
@@ -120,15 +122,53 @@ static int ladder_level(int mv)
   if (mv < 2790) return 3;
   return -1;
 }
+static int s_mv_a = 0, s_mv_b = 0;                        /* last raw readings (diag) */
 static int read_buttons(void)
 {
-  int a = ladder_level(analogReadMilliVolts(BRD_BTN_A_PIN));
+  s_mv_a = analogReadMilliVolts(BRD_BTN_A_PIN);
+  s_mv_b = analogReadMilliVolts(BRD_BTN_B_PIN);
+  int a = ladder_level(s_mv_a);
   if (a >= 0 && a <= 2) return BTN_BACK + a;              /* BACK, OK, SPARE */
-  int b = ladder_level(analogReadMilliVolts(BRD_BTN_B_PIN));
+  int b = ladder_level(s_mv_b);
   if (b >= 0) return BTN_UP + b;                          /* UP, DOWN, LEFT, RIGHT */
   return BTN_NONE;
 }
 static int s_btn_id = BTN_NONE;
+
+/* Console 'U': print both ladders in mV and the decoded button (bring-up aid). */
+void ui_ladder_diag(void)
+{
+  int a = analogReadMilliVolts(BRD_BTN_A_PIN), b = analogReadMilliVolts(BRD_BTN_B_PIN);
+  int ra = analogRead(BRD_BTN_A_PIN), rb = analogRead(BRD_BTN_B_PIN);
+  Serial0.printf("UI: ladder A GPIO%d %d mV (raw %d) -> %s | B GPIO%d %d mV (raw %d) -> %s\n",
+                 BRD_BTN_A_PIN, a, ra, BTN_NAME[(ladder_level(a) >= 0 && ladder_level(a) <= 2) ? BTN_BACK + ladder_level(a) : BTN_NONE],
+                 BRD_BTN_B_PIN, b, rb, BTN_NAME[(ladder_level(b) >= 0) ? BTN_UP + ladder_level(b) : BTN_NONE]);
+  gpio_dump_io_configuration(stdout, BIT64(BRD_BTN_A_PIN) | BIT64(BRD_BTN_B_PIN));
+  fflush(stdout);
+  /* ADC self-test: the internal ~45 k pull-down against the external 10 k
+   * pull-up must drag the pin to ~0.6 V. If the reading stays at full scale
+   * the ADC is not sampling this pin at all. */
+  gpio_pulldown_en((gpio_num_t)BRD_BTN_A_PIN); delay(5);
+  int a_pd = analogReadMilliVolts(BRD_BTN_A_PIN), ra_pd = analogRead(BRD_BTN_A_PIN);
+  gpio_pulldown_dis((gpio_num_t)BRD_BTN_A_PIN); delay(5);
+  int a_back = analogReadMilliVolts(BRD_BTN_A_PIN);
+  /* second opinion: raw oneshot driver, own handle, ADC1 ch0/ch1 (GPIO1/2) */
+  adc_oneshot_unit_handle_t h = NULL;
+  adc_oneshot_unit_init_cfg_t uc = { .unit_id = ADC_UNIT_1, .clk_src = (adc_oneshot_clk_src_t)0, .ulp_mode = ADC_ULP_MODE_DISABLE };
+  int r0 = -1, r1 = -1; esp_err_t e = adc_oneshot_new_unit(&uc, &h);
+  if (e == ESP_OK) {
+    adc_oneshot_chan_cfg_t cc = { .atten = ADC_ATTEN_DB_12, .bitwidth = ADC_BITWIDTH_DEFAULT };
+    adc_oneshot_config_channel(h, ADC_CHANNEL_0, &cc);
+    adc_oneshot_config_channel(h, ADC_CHANNEL_1, &cc);
+    adc_oneshot_read(h, ADC_CHANNEL_0, &r0);
+    adc_oneshot_read(h, ADC_CHANNEL_1, &r1);
+    adc_oneshot_del_unit(h);
+  }
+  Serial0.printf("UI: selftest A with int. pull-down: %d mV (raw %d), after: %d mV | raw oneshot unit: %s ch0=%d ch1=%d\n",
+                 a_pd, ra_pd, a_back, esp_err_to_name(e), r0, r1);
+}
+#else
+void ui_ladder_diag(void) { Serial0.println("UI: no ladder on this board"); }
 #endif
 
 static void ui_stop_demod(uint32_t now)
@@ -179,7 +219,17 @@ void ui_tick(uint32_t now)
 #if BRD_BTN_LADDER
   static uint32_t s_adc_ms = 0;
   static int s_raw_id = BTN_NONE;
-  if (now - s_adc_ms >= 10) { s_adc_ms = now; s_raw_id = read_buttons(); }
+  if (now - s_adc_ms >= 10) {
+    s_adc_ms = now; s_raw_id = read_buttons();
+    /* bring-up diag: every raw change, with the ladder voltages. Also a
+     * 2 s heartbeat whenever a ladder is off its idle level (>2790 mV). */
+    static int s_log_id = BTN_NONE; static uint32_t s_log_ms = 0;
+    bool off_idle = (s_mv_a < 2790) || (s_mv_b < 2790);
+    if (s_raw_id != s_log_id || (off_idle && now - s_log_ms >= 2000)) {
+      s_log_id = s_raw_id; s_log_ms = now;
+      Serial0.printf("UI: raw %s  A=%d mV B=%d mV\n", BTN_NAME[s_raw_id], s_mv_a, s_mv_b);
+    }
+  }
   int id = s_raw_id;
   bool raw = (id != BTN_NONE);
   if (raw && !s_btn_stable && id != s_btn_id) { s_btn_id = id; s_btn_change_ms = now; s_btn_raw = !raw; }
@@ -216,8 +266,15 @@ void ui_tick(uint32_t now)
 
   /* long press: fires while still HELD DOWN, not on release — so the user
    * feels it happen and need not guess when to release */
-  if (s_btn_stable && !s_long_fired && (now - s_btn_down_ms) >= UI_LONG_MS) {
+  if (s_btn_stable && !s_long_fired && (now - s_btn_down_ms) >= UI_LONG_MS
+#if BRD_BTN_LADDER
+      /* ladder pad: only BACK has a long-press meaning (demod off + status);
+       * every other button acts on release however long it was held */
+      && s_btn_id == BTN_BACK
+#endif
+     ) {
     s_long_fired = true;
+    Serial0.println("UI: long press -> demod off, status page");
     ui_stop_demod(now);
   }
 

@@ -253,7 +253,11 @@
  * if it does not light up, try those. The Heltec V3 has no RGB LED.
  * NOTE: 47 was the display TE in the waterfall bench -> TE moved to 48. */
 #ifndef RGB_LED_PIN
+#ifdef BRD_RGB_LED_PIN
+#define RGB_LED_PIN            BRD_RGB_LED_PIN   /* board profile (board.h) */
+#else
 #define RGB_LED_PIN            47
+#endif
 #endif
 #define OLED_SDA_PIN           17
 #define OLED_SCL_PIN           18
@@ -2285,7 +2289,9 @@ static void bench_console_tick(void)
     if (c == '\n' || c == '\r') {
       if (n) {
         cmd[n] = '\0';
-        if (!fg23_prog_cmd(cmd, DIAG) && !wifi_bench_cmd(cmd) && !rgb_load_cmd(cmd)) iq_fft_cmd(cmd);
+        if (!strcmp(cmd, "U")) ui_ladder_diag();
+        else if (cmd[0] == 'T') { if (cmd[1] == 'x') tft_test_end(); else tft_test(cmd[1] ? atoi(cmd + 1) : -1); }
+        else if (!fg23_prog_cmd(cmd, DIAG) && !wifi_bench_cmd(cmd) && !rgb_load_cmd(cmd)) iq_fft_cmd(cmd);
       }
       n = 0;
     } else if (n < sizeof cmd - 1) {
@@ -2547,6 +2553,9 @@ void setup()
 
   /* WS2812 load indicator. The LED cycles colours faster the more loaded the
    * CPU is. Some clones use pin 38, not 48. */
+#ifdef BRD_RGB_BRIGHTNESS
+  { char b[24]; snprintf(b, sizeof b, "Lset fenyero=%d", BRD_RGB_BRIGHTNESS); rgb_load_cmd(b); }
+#endif
   rgb_load_init(RGB_LED_PIN);
   DIAG.println("RGB: 'L' = status, 'Ltest' = colour cycle, 'Lset fenyero=20' etc.");
 
@@ -2751,7 +2760,10 @@ void loop()
   /* On a page change draw IMMEDIATELY, do not wait for the next period -
    * otherwise nothing happens for a second and a half after the button
    * press, and it would seem broken. */
-  if (ui_dirty()) { ui_clear_dirty(); oled_force(); }
+  if (ui_dirty()) {
+    ui_clear_dirty(); oled_force();
+    tft_set_page(ui_page_name(ui_page()), ui_page_name(ui_mode()));
+  }
   SECT(S_OLED, oled_tick(now));
 
 #if FLASHLOG_ENABLE

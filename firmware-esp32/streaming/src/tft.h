@@ -33,6 +33,10 @@ typedef struct {
 
 void tft_init(void);
 void tft_show(const tft_stat_t *s);      /* header, every 2 s */
+/* Current UI page and demod mode in the header (drawn at once, so a button
+ * press has visible feedback - the UI pages themselves live on the OLED,
+ * which the ionos-sdr-mini does not have). */
+void tft_set_page(const char *page, const char *mode);
 bool tft_ok(void);
 
 /* One scan row into the waterfall. Call from the same place as
@@ -52,6 +56,11 @@ void tft_set_autoscale(bool on);
 
 /* Number of dropped rows - diagnostics */
 uint32_t tft_dropped(void);
+/* Bring-up aid (console 'T<vsp>' / 'Tx'): freeze the waterfall, paint test
+ * bands (red header area, green scroll area, white ticks every 20 px) and
+ * set the scroll start address - shows how the panel maps scroll vs. MADCTL. */
+void tft_test(int vsp);
+void tft_test_end(void);
 
 #ifdef __cplusplus
 }

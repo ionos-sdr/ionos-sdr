@@ -218,8 +218,47 @@ static lgfx::rgb565_t      s_line[W];         /* converted to colour            
 static TaskHandle_t        s_task = NULL;
 static volatile uint32_t   s_drop = 0;
 static uint16_t            s_vsp  = TFA;
+static volatile bool       s_test = false;
 
 uint32_t tft_dropped(void) { return s_drop; }
+
+/* Bring-up aid: test bands + explicit scroll start (console 'T<vsp>', 'Tx').
+ * The header refresh (tft_show, every 2 s) keeps drawing on top - that is
+ * part of the test: it shows where screen y<50 lands relative to the bands. */
+void tft_test(int vsp)
+{
+    if (!s_ok) return;
+    s_test = true;
+    lcd_lock();
+    lcd.startWrite();
+    lcd.fillRect(0, 0, W, HDR_H, TFT_RED);
+    lcd.fillRect(0, HDR_H, W, H - HDR_H, TFT_GREEN);
+    lcd.fillRect(0, HDR_H, W, 3, TFT_BLUE);                 /* header/scroll boundary */
+    for (int y = 0; y < H; y += 20) lcd.fillRect(0, y, 30 + y / 10, 2, TFT_WHITE);  /* ticks, longer downwards */
+    lcd.setTextSize(2);
+    lcd.setTextColor(TFT_WHITE, TFT_RED);   lcd.setCursor(60, 16);  lcd.print("HDR y0-49");
+    lcd.setTextColor(TFT_BLACK, TFT_GREEN); lcd.setCursor(60, 100); lcd.print("y100");
+    lcd.setCursor(60, 200); lcd.print("y200");
+    lcd.setCursor(60, 300); lcd.print("y300");
+    if (vsp >= 0) vscrsadd_inTx((uint16_t)vsp);
+    lcd.endWrite();
+    lcd_unlock();
+    TFT_OUT.printf("TFT-TEST: bands painted, rotation %d, vscrdef %d/%d/%d, VSP=%d ('Tx' ends)\n",
+                   BRD_TFT_ROTATION, TFA, VSA, BFA, vsp);
+}
+
+void tft_test_end(void)
+{
+    if (!s_ok) return;
+    lcd_lock();
+    lcd.startWrite();
+    lcd.fillRect(0, HDR_H, W, H - HDR_H, TFT_BLACK);
+    vscrsadd_inTx(s_vsp);
+    lcd.endWrite();
+    lcd_unlock();
+    s_test = false;
+    TFT_OUT.println("TFT-TEST: end");
+}
 
 /* nbin -> 240 pixels with MAX-hold (correct for a spectrum, unlike an
  * average: a narrow carrier must not vanish in the downscaling) */
@@ -274,6 +313,7 @@ static void tft_task(void *arg)
     for (;;) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);   /* BLOCKS, no spinning */
         if (!s_row_full) continue;
+        if (s_test) { s_row_full = false; continue; }  /* test pattern on screen */
 
         auto_scale(s_row);
         /* 0 = "outside the grid, no measurement" -> dark grey, so the extent
@@ -285,7 +325,14 @@ static void tft_task(void *arg)
         }
         s_row_full = false;                        /* the buffer may be written again */
 
-        /* new row at the TOP of the scroll area, then step */
+        /* new row at the TOP of the scroll area, then step.
+         * Rotation 2 (panel upside-down on the ionos-sdr-mini cradle) needs
+         * NO special arithmetic: measured 2026-11-03 with the 'T<vsp>' band
+         * test, on this ILI9341 the MADCTL MY/MX mirror applies to the gate
+         * scan, so the 33h/37h scroll registers work in SCREEN coordinates
+         * exactly as in rotation 0 (top fixed area = the header at y 0..49,
+         * scroll area y 50..319). A "physical memory row" model (fixed area
+         * at the bottom, 0/270/50) put the header into the scrolled ring. */
         uint16_t new_vsp = (s_vsp == TFA) ? (uint16_t)(TFA + VSA - 1)
                                           : (uint16_t)(s_vsp - 1);
         wait_te();
@@ -316,17 +363,7 @@ void tft_init(void)
     }
     s_ok = true;
     lcd.setRotation(BRD_TFT_ROTATION);
-#if BRD_TFT_FLIP180
-    /* Panel mounted upside-down. NOT done with MADCTL (rotation 2): the
-     * hardware vertical scroll (VSCRDEF/VSCRSADD) follows the gate scan, and
-     * with MY set the fixed header and the scroll area land in the wrong place
-     * (seen 2026-11-02: header in mid-screen). Instead the panel's own scan
-     * directions are reversed - Display Function Control (B6h) GS + SS - so
-     * the frame memory and all scroll arithmetic stay exactly as on the bench. */
-    lcd.startWrite();
-    raw_cmd(0xB6); raw_dat(0x08); raw_dat(0x82 | 0x40 | 0x20); raw_dat(0x27);
-    lcd.endWrite();
-#endif
+    lcd.setTextWrap(false);        /* a padded field at x=150 must NOT wrap to x=0 of the next line (it clipped "Ionos") */
     lcd.fillScreen(TFT_BLACK);
     build_palette();
 
@@ -338,7 +375,7 @@ void tft_init(void)
     lcd.drawFastHLine(0, HDR_H - 1, W, TFT_DARKGREY);
 
     /* scroll area: the header is fixed, everything below scrolls */
-    vscrdef(TFA, VSA, BFA);
+    vscrdef(TFA, VSA, BFA);        /* screen coordinates in every rotation (see tft_task) */
     s_vsp = TFA;
 
     /* Enable TEARING EFFECT on the panel (0x35, mode 0 = V-blank only),
@@ -441,14 +478,30 @@ void tft_show(const tft_stat_t *s)
     snprintf(b, sizeof b, "%u%%", s->terheles_pct);
     mezo(196, 20, "LOAD", b, (s->terheles_pct > 80) ? TFT_ORANGE : TFT_WHITE);
 
-    /* IP next to the title, small */
+    /* IP next to the title, small (the page/mode line sits right under it) */
     lcd.setTextSize(1);
     lcd.setTextColor(s->lost ? TFT_RED : TFT_DARKGREY, TFT_BLACK);
-    lcd.setCursor(150, 6);
-    if (s->lost) snprintf(b, sizeof b, "LOST %lu   ", (unsigned long)s->lost);
-    else         snprintf(b, sizeof b, "%s        ", s->ip ? s->ip : "-");
+    lcd.setCursor(150, 2);
+    char v[24];
+    if (s->lost) snprintf(v, sizeof v, "LOST %lu", (unsigned long)s->lost);
+    else         snprintf(v, sizeof v, "%s", s->ip ? s->ip : "-");
+    snprintf(b, sizeof b, "%-15.15s", v);           /* exactly 15 chars = 90 px, fits x 150..239 */
     lcd.print(b);
 
     draw_scale();          /* draws only when the band changed */
+    lcd_unlock();
+}
+
+void tft_set_page(const char *page, const char *mode)
+{
+    if (!s_ok) return;
+    char v[32], b[20];
+    snprintf(v, sizeof v, "%s>%s", page ? page : "-", mode ? mode : "-");
+    snprintf(b, sizeof b, "%-15.15s", v);           /* 15 chars, no wrap (see tft_show) */
+    lcd_lock();
+    lcd.setTextSize(1);
+    lcd.setTextColor(TFT_CYAN, TFT_BLACK);
+    lcd.setCursor(150, 11);
+    lcd.print(b);
     lcd_unlock();
 }

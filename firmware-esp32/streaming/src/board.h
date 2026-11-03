@@ -40,8 +40,8 @@
 #define BRD_TFT_RST        16
 #define BRD_TFT_BL         17
 #define BRD_TFT_TE         18
-#define BRD_TFT_ROTATION   0
-#define BRD_TFT_FLIP180    1             /* panel upside-down: scan reversed in the panel (B6h) */
+#define BRD_TFT_ROTATION   2             /* panel upside-down on the cradle (MADCTL MY|MX; the HW scroll follows, no extra arithmetic) */
+#define BRD_TFT_FLIP180    0
 /* ---- buttons: two ADC1 ladders, 10 k pull-up, 0R / 2k2 / 6k8 / 22k ---- */
 #define BRD_BTN_LADDER     1
 #define BRD_BTN_A_PIN      1             /* BACK, OK, (SPARE) */
@@ -50,6 +50,12 @@
 #define BRD_SWD_SWCLK      39
 #define BRD_SWD_SWDIO      38
 #define BRD_SWD_RESETN     40
+/* ---- WS2812 on the DevKit (YD-ESP32-S3 clone): DIN reaches GPIO48 only
+ * with the "RGB" solder bridge closed; open, the LED floats and glows random
+ * (bright white) and no GPIO affects it. 48 is also SWO on the mezzanine -
+ * unused, the FG23 PA03 sees the LED frames as an input. Keep it dim. ---- */
+#define BRD_RGB_LED_PIN    48
+#define BRD_RGB_BRIGHTNESS 3
 #else
 #define BRD_FG23_SCLK      GPIO_NUM_15   /* FG23 PC05 / EXP 15 */
 #define BRD_FG23_MOSI      GPIO_NUM_16   /* FG23 PC00 / EXP 10 */
