@@ -242,11 +242,15 @@
  * receiving blocks as long as queued transactions remain. NQUEUE=24 gives
  * ~123 ms of reserve on i8, so the 13 ms is absorbed. That is why it was raised. */
 #ifndef OLED_ENABLE
+#if BOARD_IONOS_MINI
+#define OLED_ENABLE            1     /* 2026-11-03: SSD1306 on the mini carrier (I2C 41/42) */
+#else
 #define OLED_ENABLE            0     /* 2026-08-19: Heltec V3 retired.
                                       * ESP32-S3 devkit + ILI9341 240x320.
                                       * This removed the 21 ms stall from the
                                       * main loop and the GPIO36 conflict
                                       * (octal PSRAM pin). */
+#endif
 #endif
 /* WS2812 load indicator LED. ON THIS board (Ali S3 dual-USB, N16R8) the
  * pinout says GPIO47 = RGB_LED (48 is SPICLK_N). Other clones use 48 or 38 -
@@ -259,10 +263,20 @@
 #define RGB_LED_PIN            47
 #endif
 #endif
+#if BOARD_IONOS_MINI
+/* ionos-sdr-mini: SSD1306 128x64 module on the carrier's I2C (shared with the
+ * radio-board ID EEPROM at 0x51), 4k7 pull-ups, no reset, no Vext. Second
+ * screen: the UI pages (LEFT/RIGHT) live here, the TFT keeps the waterfall. */
+#define OLED_SDA_PIN           41
+#define OLED_SCL_PIN           42
+#define OLED_RST_PIN           (-1)
+#define OLED_VEXT_PIN          (-1)
+#else
 #define OLED_SDA_PIN           17
 #define OLED_SCL_PIN           18
 #define OLED_RST_PIN           21
 #define OLED_VEXT_PIN          36     /* -1 = no Vext control */
+#endif
 #define OLED_VEXT_ACTIVE_LOW   1
 #define OLED_I2C_HZ            800000u
 /* Back to 1500: the measurement is closed, and it is proven that the 21 ms
@@ -949,11 +963,14 @@ static void oled_init(void)
   delay(100);
 #endif
 
+#if (OLED_RST_PIN >= 0)
   /* Reset is issued manually, not left to U8g2: this guarantees it happens
-   * AFTER Vext is switched on, and it is in a visible place. */
+   * AFTER Vext is switched on, and it is in a visible place. (The mini's
+   * SSD1306 module has no reset pin: -1.) */
   pinMode(OLED_RST_PIN, OUTPUT);
   digitalWrite(OLED_RST_PIN, LOW);   delay(20);
   digitalWrite(OLED_RST_PIN, HIGH);  delay(20);
+#endif
 
   /* REAL presence check before calling U8g2. U8g2's begin() always returns
    * true - it does not look back at the bus. Without this you could not tell
@@ -1049,7 +1066,7 @@ static void oled_header(const char *title)
 static void oled_page_status(void)
 {
   char buf[40];
-  oled_header("FG23 SDR");
+  oled_header(usbhost_usb_mode() ? "Ionos USB" : "Ionos SDR");
 
   if (wifi_is_ap) {
     snprintf(buf, sizeof buf, "AP %s", WIFI_AP_SSID);
