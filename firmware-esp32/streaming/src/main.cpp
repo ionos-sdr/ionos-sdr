@@ -1326,9 +1326,12 @@ static void oled_draw(void)
   u8g2.sendBuffer();
 }
 
+/* 'O0' / 'O1' on the console: pause / resume the periodic OLED refresh
+ * (measurement aid: the 21 ms sendBuffer() blocks the main loop, 2026-11-03). */
+static bool oled_paused = false;
 static void oled_tick(uint32_t now)
 {
-  if (!oled_ok) return;
+  if (!oled_ok || oled_paused) return;
   /* Faster refresh on the SCAN page (~3 Hz) so the waterfall flows */
   uint32_t period = (ui_page() == UI_PAGE_SCAN) ? 300u : OLED_REFRESH_MS;
   if (now - oled_last_ms < period) return;
@@ -1347,6 +1350,7 @@ static void oled_force(void)
 
 #else
 static void oled_init(void) { }
+static bool oled_paused = false;
 static void oled_tick(uint32_t now) { (void)now; }
 static void oled_force(void) { }
 static uint32_t oled_khz = 0;
@@ -1846,6 +1850,8 @@ static void rtl_agc_tick(uint32_t now)
  *
  * With no host connected we do NOT wait at all - see the (bool)RAW branch. */
 #define USB_TX_TIMEOUT_MS   3u
+#define USB_TX_BUF_BLOCKS   24u   /* HWCDC TX ring, see setTxBufferSize() in setup() */
+#define USB_GONE_MS         500u  /* !RAW this long = host really gone, see flush_usb() */
 
 static void flush_usb(void)
 {
@@ -1854,8 +1860,20 @@ static void flush_usb(void)
   /* NO HOST -> immediate drop, no waiting. Otherwise every flush would waste
    * the full timeout even when nobody reads the USB (the normal state: the
    * measurement tool only runs occasionally). */
-  if (!(bool)RAW) {
-    st_usbdrop++;
+  /* 2026-11-03: (bool)RAW is HWCDC::isCDC_Connected(), which also asks
+   * isPlugged() - a SOF watchdog run from the tick hook that FLAPS for a
+   * moment on a healthy link (the core's own comment says so). Every flap
+   * here threw away the whole aggregator (up to 4 blocks) and counted ONE
+   * drop: the 10-minute soaks lost 6-9 blocks in 1-3 block bursts, each
+   * matching an ESP usb_drop +1, independent of the TX ring size (8 vs 24
+   * blocks). Only a host gone for USB_GONE_MS is a real disconnect; a flap
+   * goes through the normal write path, the ring keeps the data. */
+  static uint32_t usb_seen_ms = 0;
+  const uint32_t now_ms = millis();
+  if ((bool)RAW) {
+    usb_seen_ms = now_ms;
+  } else if (now_ms - usb_seen_ms > USB_GONE_MS) {
+    st_usbdrop += agg_usb_n / BLK_BYTES;
     agg_usb_n = 0;
     return;
   }
@@ -1906,15 +1924,15 @@ static void flush_usb(void)
      * The raw I/Q USB path is NOT critical: if there is no room, drop the
      * block and move on. The (-N) counter shows it anyway. Reception and the
      * demod however must NEVER stop because of a terminal. */
-    if (RAW.availableForWrite() < (int)BLK_BYTES) { st_usbdrop++; break; }
+    if (RAW.availableForWrite() < (int)BLK_BYTES) { st_usbdrop += (agg_usb_n - off) / BLK_BYTES; break; }
     size_t w = RAW.write(agg_usb + off, BLK_BYTES);
     st_usbbytes += w;
     if (w != BLK_BYTES) {
       /* SHORT write: the host froze or is slow. The remainder is dropped. The
        * PC resynchronises on the next magic and books the missing sequence
        * number as 1 hole - so the PC-side SPI HOLE measurement is only clean
-       * when this counter reads (-0). */
-      st_usbdrop++;
+       * when this counter reads (-0). Counted in BLOCKS (2026-11-03). */
+      st_usbdrop += (agg_usb_n - off) / BLK_BYTES;
       break;
     }
     off += BLK_BYTES;
@@ -2341,6 +2359,7 @@ static void console_dispatch(const char *cmd)
 {
   if (!strcmp(cmd, "U")) ui_ladder_diag();
   else if (!strcmp(cmd, "M")) { if (menu_is_open()) menu_close(); else menu_open(); }
+  else if (cmd[0] == 'O' && (cmd[1] == '0' || cmd[1] == '1') && !cmd[2]) { oled_paused = (cmd[1] == '0'); DIAG.printf("OLED refresh %s\n", oled_paused ? "PAUSED" : "on"); }
   else if (cmd[0] == 'T') { if (cmd[1] == 'x') tft_test_end(); else tft_test(cmd[1] ? atoi(cmd + 1) : -1); }
   else if (!fg23_prog_cmd(cmd, DIAG) && !wifi_bench_cmd(cmd) && !rgb_load_cmd(cmd)) iq_fft_cmd(cmd);
 }
@@ -2478,7 +2497,12 @@ void setup()
    * the status line in MODE=0, add to the pioarduino custom_sdkconfig:
    *   CONFIG_TINYUSB_CDC_TX_BUFSIZE=4096
    * (same place as CONFIG_SPI_SLAVE_ISR_IN_IRAM=y). */
-  RAW.setTxBufferSize(AGG_BLK * BLK_BYTES + 4096);
+  /* 2026-11-03: 8256 bytes (~42 ms of the 50 ksps stream) was too little -
+   * a Windows host misses its read window that long about once a minute,
+   * the ring fills, flush_usb() drops a whole block (measured: every
+   * host-side sequence gap matched an ESP usb_drop +1 within one status
+   * period, ~1 block/min, 0.007 %). 24 blocks = ~128 ms of headroom. */
+  RAW.setTxBufferSize(USB_TX_BUF_BLOCKS * BLK_BYTES);
 #endif
   RAW.setTxTimeoutMs(USB_TX_TIMEOUT_MS);   /* see the explanation above flush_usb() */
 #if FG23_USB_TINYUSB
