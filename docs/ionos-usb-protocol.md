@@ -67,7 +67,7 @@ does not burn a number: a gap in `seq` is a real lost block, nothing else.
 | `F<kHz>` | absolute tune, kHz | 100 000…1 000 000 kHz; stops and restarts the stream with the same R (a few ms gap); **kHz resolution only** |
 | `o<ticks>` | fine offset, 1 tick ≈ 4.649 Hz, clamped to ±0x3FFF (≈ ±76 kHz) | this is how sub-kHz tuning is reached today (`o482` = +2.22 kHz is the measured crystal calibration at 144.8 MHz) |
 | `f<ch>` | raw channel (radioconf grid) | bounded by `TUNE_MAX_CHANNEL` |
-| `i<R>` | start the I/Q stream with total decimation R (integer, not log2); `i` alone = autostart R; `i` while running = stop | rate = 400 000 / R; R = 8 → 50 ksps, R = 4 → 100 ksps, R = 2 → 200 ksps (needs the 712 kB/s class link) |
+| `i<R>` | start the I/Q stream with total decimation R (integer, not log2); `i` alone = autostart R; `i` while running = stop | rate = 400 000 / R; **`stream_start_R` clamps R to ≥ 8 and rounds to a multiple of 8** (two-stage CIC) → 50 ksps is today's maximum; R = 16 → 25 ksps … |
 | `W<center_kHz>,<span_kHz>,<nbin>[,floor,range]` / `W0` | wideband RSSI scan → `SPC1` blocks / stop and resume I/Q | the scan parser only accepts digits, `,` and `-` |
 | `T<avg_us>,<wait_us>[,method]` | scan timing | |
 | `t<dBm>` | RSSI trigger threshold | capture mode only |
@@ -82,7 +82,7 @@ Commands in `NEEDS_STOP = "cwpxbzydfkngMW"` stop the stream first and resume aft
 | line | effect |
 |---|---|
 | `FH<Hz>` | tune with Hz resolution: the ESP computes `F<kHz>` + `o<ticks>` (ticks = (Hz − kHz·1000)/4.649, within ±0x3FFF) and sends both; answers with the resulting exact frequency in `MSG1` |
-| `R<sps>` | sample rate request in sps; the ESP picks the nearest R = round(400000/sps) and sends `i<R>`; answers with the achieved rate |
+| `R<sps>` | sample rate request in sps; the ESP picks the nearest valid R (round(400000/sps) to a multiple of 8, ≥ 8) and sends `i<R>`; answers with the achieved rate |
 | `G<shift>` | digital gain shift 0…4 (replaces `IQ_AUTOSTART_SHIFT`); the only "gain" there is |
 | `CAP?` | capability block (`MSG1` type 1 content, re-sent on demand) |
 | `VER?` | firmware versions: ESP (`git describe`), FG23 (from the FG23 `v?` reply or the version struct read over SWD), board ID (EEPROM 0x51) |
@@ -106,7 +106,7 @@ fw_fg23=<version>
 freq_min_hz=430000000     ; capability table of THIS radio board / radioconf
 freq_max_hz=440025000
 fs_in_hz=400000
-decim_list=2,4,8,16,32,64
+decim_list=8,16,24,32,48,64
 gain_shift_max=4
 rssi=1
 spectrum=1                ; SPC1 scan supported
@@ -147,6 +147,22 @@ device← MSG1 t2: blk_s=390.0 lost=0 rssi=-118 usbdrop=0 heap_min=81   (every 2
 - Hello on DTR, `CAP?`, `VER?` (needs `FW_VERSION` from `git describe` in `platformio.ini` and a version string in `iq_capture` + `v?`).
 - `FH`, `R`, `G` wrappers; `MODE` wired to UI-M4.
 - Optional later: own PID; TX exposure (`tx=1`).
+
+## 7b. Implementation status (firmware `board/ionos-mini-idf`, 2026-11-03)
+
+Implemented in `src/usb_host.{h,cpp}`: CDC line parser, `MSG1` queue (4 blocks,
+written only when a whole block fits, after the I/Q flush), hello on connect
+(`(bool)Serial` edge on HWCDC) and on `CAP?`, `VER?` (`fw_fg23=n/a` until the FG23
+`v?` exists), `MODE USB|STANDALONE` (gates the APRS/CW demodulators off, header
+shows `USB`), `STAT <s>`, `FH<Hz>` (= `F<kHz>` through the rate-limited tuning
+path + `o<ticks>` 400 ms later), `R<sps>` (through the ESP's decimation logic,
+see menu.h), forwarding of `F o f i W T t s`, rejection of the TX/diagnostic
+letters. Deviations from the table above:
+- `G<shift>` answers `ERR`: the digital shift is compile-time on the FG23.
+- periodic status (`MSG1` type 2, 2 s) starts only after the host has sent its
+  first line, so a v1 host (iq_bridge.py) sees one hello block and nothing else.
+- `decim_list` follows the FG23 rule (≥ 8, multiples of 8); `R` rounds the same way. Measured 2026-11-03: `R 100000` → `i4` → the FG23 kept R=8.
+Reference client: `tools/usb_host_test.py COM7 --cmd "VER?" --cmd "R 100000"`.
 
 ## 8. Open points
 

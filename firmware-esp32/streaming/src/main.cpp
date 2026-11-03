@@ -298,6 +298,7 @@
  * screens and switches the demodulators. Details: ui.h */
 #include "ui.h"
 #include "menu.h"             /* on-screen menu (ionos-sdr-mini), host glue below */
+#include "usb_host.h"         /* host command channel on the CDC port (docs/ionos-usb-protocol.md) */
 #include "flashlog.h"
 #include "specline.h"      /* SPECLINE (scan line) block format, shared with the FG23 */
 #include "oled_spectrum.h"  /* 128x64 mini spectrum + 1-bit waterfall */
@@ -1961,13 +1962,16 @@ static void deliver(const uint8_t *b)
   /* --- APRS demodulator. It gets the RAW int16 samples, before any further
    * processing: no AGC, no 8-bit truncation, no interpolation spoils the
    * demodulation. --- */
+  /* USB host mode (MODE USB / menu): no demodulation at all, the CPU and the
+   * USB path belong to the stream (docs/ionos-usb-protocol.md). */
+  const bool demod_on = !usbhost_usb_mode();
 #if APRS_RX_ENABLE
   /* Demodulate ONLY when the APRS mode is active. So the button really
    * frees the CPU for another measurement. */
-  if (ui_mode() == UI_PAGE_APRS) aprs_rx_feed(iq, nsamp, cur_sps);
+  if (demod_on && ui_mode() == UI_PAGE_APRS) aprs_rx_feed(iq, nsamp, cur_sps);
 #endif
   /* CW: the same raw int16 I/Q, it only needs the envelope */
-  if (ui_mode() == UI_PAGE_CW) cw_rx_feed(iq, nsamp, cur_sps);
+  if (demod_on && ui_mode() == UI_PAGE_CW) cw_rx_feed(iq, nsamp, cur_sps);
 
   /* --- (a) USB: the WHOLE block goes, header included. The PC side strips
    * the header; in return it can resynchronise on the magic at any time,
@@ -2343,6 +2347,7 @@ extern "C" void menu_host_info(menu_host_info_t *o)
   o->sps        = cur_sps;
   o->blk_s      = s_last_blk_s;
   o->lost       = bench_tot_ro_hole + st_ro_hole;
+  o->usb_drop   = st_usbdrop;
   o->heap_min_k = (uint32_t)(esp_get_minimum_free_heap_size() / 1024u);
   o->psram_k    = (uint32_t)(ESP.getFreePsram() / 1024u);
   o->uptime_s   = millis() / 1000u;
@@ -2356,7 +2361,11 @@ extern "C" bool menu_host_console(const char *line) { DIAG.printf("MENU: %s\n", 
 extern "C" void menu_host_set_mode(int mode)
 {
   s_menu_mode = mode;
-  DIAG.printf("MENU: mode = %s (effect: UI-M4)\n", mode ? "USB" : "STANDALONE");
+  usbhost_set_mode(mode != 0);
+  /* USB host mode: the demodulators are gated off in deliver() (CPU and the
+   * USB path belong to the stream); the header shows "USB" as the mode. */
+  tft_set_page(ui_page_name(ui_page()), mode ? "USB" : ui_page_name(ui_mode()));
+  DIAG.printf("MENU: mode = %s\n", mode ? "USB (demods off)" : "STANDALONE");
 }
 
 /* FG23 'i' semantics: 'i<R>' while the stream runs STOPS it (the argument is
@@ -2647,6 +2656,7 @@ void setup()
    * the FG23 (decimation, tuning) once the stream state is known. */
   menu_init();
   menu_apply_boot();
+  usbhost_init();
   DIAG.println("MENU: OK button opens it; console 'M' toggles it");
 
   /* Put the IP on the display immediately, no 1.5 s wait for it. */
@@ -2820,6 +2830,8 @@ void loop()
   SECT(S_UI, ui_tick(now));
   menu_tick(now);
   menu_decim_tick(now);
+  usbhost_tick(now);
+  usbhost_flush();          /* MSG1 blocks, only when a whole block fits (after flush_usb) */
 #if APRS_RX_ENABLE
   /* CONNECTION HANDLING (async DNS, connect, drain, backoff) ALWAYS runs -
    * regardless of the mode. If it only ran in APRS mode, after a long button
@@ -2850,7 +2862,7 @@ void loop()
    * press, and it would seem broken. */
   if (ui_dirty()) {
     ui_clear_dirty(); oled_force();
-    tft_set_page(ui_page_name(ui_page()), ui_page_name(ui_mode()));
+    tft_set_page(ui_page_name(ui_page()), usbhost_usb_mode() ? "USB" : ui_page_name(ui_mode()));
   }
   SECT(S_OLED, oled_tick(now));
 

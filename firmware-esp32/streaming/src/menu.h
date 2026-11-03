@@ -62,6 +62,7 @@ typedef struct {
   uint32_t    sps;
   float       blk_s;
   uint32_t    lost;
+  uint32_t    usb_drop;    /* blocks dropped on the USB path */
   uint32_t    heap_min_k;
   uint32_t    psram_k;
   uint32_t    uptime_s;
