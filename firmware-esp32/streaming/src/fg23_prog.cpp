@@ -117,7 +117,24 @@ out:
 bool fg23_prog_cmd(const char *line, HardwareSerial &io)
 {
   if (!strcmp(line, "FGINFO")) { info(io); return true; }
-  unsigned long a, l, c;
+  unsigned long a, l = 1, c;
+  /* FGRD <hex addr> [words]: read FG23 memory over SWD while it runs (the
+   * AHB-AP read does not halt the core). Debug aid for the cmdlink: the
+   * FG23 has no serial output on the mini board, so its counters are
+   * read this way (addresses from arm-none-eabi-nm on the .axf). */
+  if (!strncmp(line, "FGRD ", 5) && sscanf(line + 5, "%lx %lu", &a, &l) >= 1) {
+    if (l < 1 || l > 64) l = 1;
+    uint32_t dpidr = 0, apidr = 0;
+    if (!swd::connect(&dpidr, &apidr)) { io.println("ERR swd"); swd::release(); return true; }
+    for (unsigned long i = 0; i < l; i++) {
+      uint32_t v = 0; bool ok = swd::mem_r((uint32_t)(a + 4 * i), &v);
+      if ((i & 3) == 0) io.printf("\n%08lX:", (unsigned long)(a + 4 * i));
+      if (ok) io.printf(" %08lX", (unsigned long)v); else io.print(" ????????");
+    }
+    io.println();
+    swd::release();
+    return true;
+  }
   if (!strncmp(line, "FGFW ", 5) && sscanf(line + 5, "%lx %lu %lx", &a, &l, &c) == 3) {
     program(io, (uint32_t)a, (uint32_t)l, (uint32_t)c);
     return true;

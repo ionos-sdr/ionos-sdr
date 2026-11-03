@@ -1356,6 +1356,16 @@ static uint32_t oled_khz = 0;
  *                          RETURN PATH
  * =================================================================== */
 
+/* 2026-11-03 (mini): ~25 % of the 16-char lines (W<kHz>,<kHz>,<nbin>) were
+ * never acted on by the FG23. Root cause (found with FGRD, the SWD RAM read
+ * in fg23_prog.cpp): the FG23's 16-deep EUSART RX FIFO overflowed and the
+ * CR of the line was the byte lost - its RX interrupt sat at the lowest
+ * priority behind the stream's RAIL/LDMA handlers; fixed there (priority 0).
+ * Every line is nevertheless sent TWICE, 30 ms apart, as belt and braces
+ * on the one-wire link; the FG23's cmdlink.c executes an identical line
+ * within 1 s only once. The repeat is sent from the loop (cmdlink_tick). */
+static char     s_cmd_repeat[48];
+static uint32_t s_cmd_repeat_ms = 0;
 static void cmdlink_send(const char *s)
 {
 #if CMDLINK_ENABLE
@@ -1364,8 +1374,22 @@ static void cmdlink_send(const char *s)
    * need it within a millisecond. */
   Serial1.print(s);
   Serial1.print("\r");
+  snprintf(s_cmd_repeat, sizeof s_cmd_repeat, "%s", s);
+  s_cmd_repeat_ms = millis();
 #endif
   DIAG.printf("  -> FG23: %s\n", s);
+}
+static void cmdlink_tick(uint32_t now)
+{
+#if CMDLINK_ENABLE
+  if (s_cmd_repeat[0] && now - s_cmd_repeat_ms >= 30u) {
+    Serial1.print(s_cmd_repeat);
+    Serial1.print("\r");
+    s_cmd_repeat[0] = 0;
+  }
+#else
+  (void)now;
+#endif
 }
 
 #if SPY_ENABLE
@@ -2159,6 +2183,15 @@ static void process(const uint8_t *b, size_t nbytes)
       tft_set_autoscale(true);   /* the scan sends an absolute dBm scale */
       tft_push_specline(L->bins, L->hdr.nbin);
       tft_set_span(L->hdr.f_center_hz, L->span_hz);
+      /* USB host (docs/ionos-usb-protocol.md): the scan line goes out as a
+       * block like everything else - the web SDR's scan mode reads SPC1.
+       * 2026-11-03: it returned before the aggregator, so the host saw no
+       * scan at all. */
+      if (agg_usb_n + BLK_BYTES <= sizeof agg_usb) {
+        memcpy(agg_usb + agg_usb_n, b, BLK_BYTES);
+        agg_usb_n += BLK_BYTES;
+      }
+      if (agg_usb_n >= sizeof agg_usb) flush_usb();
     }
     return;
   }
@@ -2347,6 +2380,8 @@ static int      s_menu_mode = 0;          /* 0 standalone, 1 USB host - UI-M4 wi
 static float    s_last_blk_s = 0.0f;      /* copy of the 2 s status figure for the INFO page */
 static int32_t  s_decim_pending = 0;      /* R to apply once the stream state is known */
 static uint32_t s_decim_pending_ms = 0;
+static char     s_decim_start[16];        /* "i<R>" waiting 150 ms behind the "i" stop */
+static uint32_t s_decim_start_ms = 0;
 
 extern "C" void menu_host_info(menu_host_info_t *o)
 {
@@ -2400,12 +2435,22 @@ static void menu_decim_tick(uint32_t now)
   bool running = (cur_decim != 0) && (s_last_blk_s > 1.0f || (now - s_decim_pending_ms) < 2500u);
   if (cur_decim == 0 && (now - s_decim_pending_ms) < 5000u) return;   /* wait for the header */
   if (cur_decim == (uint32_t)s_decim_pending) { s_decim_pending = 0; return; }   /* already there */
-  char b[16];
-  snprintf(b, sizeof b, "i%ld", (long)s_decim_pending);
-  if (running) cmdlink_send("i");                   /* stop first */
-  cmdlink_send(b);
+  snprintf(s_decim_start, sizeof s_decim_start, "i%ld", (long)s_decim_pending);
+  if (running) {
+    cmdlink_send("i");                              /* stop first; the start line follows 150 ms later
+                                                     * (each line is sent twice, see cmdlink_send) */
+    s_decim_start_ms = now;
+  } else {
+    cmdlink_send(s_decim_start); s_decim_start[0] = 0;
+  }
   DIAG.printf("MENU: decimation -> R=%ld (%s)\n", (long)s_decim_pending, running ? "restart" : "start");
   s_decim_pending = 0;
+}
+static void menu_decim_start_tick(uint32_t now)
+{
+  if (s_decim_start[0] && s_decim_start_ms && now - s_decim_start_ms >= 150u) {
+    cmdlink_send(s_decim_start); s_decim_start[0] = 0; s_decim_start_ms = 0;
+  }
 }
 
 /* ===================================================================
@@ -2847,6 +2892,8 @@ void loop()
   SECT(S_UI, ui_tick(now));
   menu_tick(now);
   menu_decim_tick(now);
+  menu_decim_start_tick(now);
+  cmdlink_tick(now);
   usbhost_tick(now);
   usbhost_flush();          /* MSG1 blocks, only when a whole block fits (after flush_usb) */
 #if APRS_RX_ENABLE

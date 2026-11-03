@@ -164,6 +164,29 @@ letters. Deviations from the table above:
 - `decim_list` follows the FG23 rule (≥ 8, multiples of 8); `R` rounds the same way. Measured 2026-11-03: `R 100000` → `i4` → the FG23 kept R=8.
 Reference client: `tools/usb_host_test.py COM7 --cmd "VER?" --cmd "R 100000"`.
 
+Scan over USB (2026-11-03, later the same day): `SPC1` blocks reach the host
+(`W433775,1000,512` → ~76 lines per 2.5 s, 16/16 trials). Two fixes were
+needed:
+- ESP `main.cpp`: a `SPECLINE` block from the FG23 returned before the USB
+  copy was made, so scan lines never left the ESP over USB (SpyServer/TFT
+  only).
+- FG23 `cmdlink.c`: the 16-char scan line lost its CR (17th byte) in ~30 % of
+  the cases while the stream ran — read back over SWD (`FGRD`, see below),
+  the line buffer held `W…512W…512`. The EUSART RX FIFO is 16 deep and the
+  RX interrupt sat at the lowest priority behind the stream's RAIL/LDMA
+  handlers (> 1.4 ms). Priority 0 fixed it; the hardware `RXOF` overflow is
+  now counted in `cmdlink_stats()`.
+Also added: the ESP sends every cmdlink line twice (30 ms apart) and the
+FG23 executes an identical line within 1 s only once; `FGRD <hex> [words]`
+on the ESP console reads FG23 RAM over SWD without halting it (addresses
+from `arm-none-eabi-nm` on the `.axf`) — the mini board has no FG23 serial
+output, this is how its counters are inspected.
+
+Known issue: after the host closes and reopens the USB port the ESP32-S3
+USB-serial/JTAG bridge sometimes delivers nothing until the ESP is reset
+(`esptool --chip esp32s3 --port COM4 chip-id` does it). A host should keep
+one open; the websdr hands the probed port over without a reopen.
+
 ## 8. Open points
 
 - USB identity: own PID vs. hello-only identification (hello is mandatory regardless).
