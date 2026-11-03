@@ -260,6 +260,49 @@ void tft_test_end(void)
     TFT_OUT.println("TFT-TEST: end");
 }
 
+/* ===================== menu overlay ===================================
+ * Same freeze flag as the band test: while it is set the display task
+ * drops the rows (the radio never waits). The scroll start address is left
+ * alone, so the waterfall continues where it stopped. */
+void tft_overlay(bool on)
+{
+    if (!s_ok) return;
+    if (on) s_test = true;                 /* freeze first, then clear */
+    lcd_lock();
+    lcd.startWrite();
+    lcd.fillRect(0, HDR_H, W, H - HDR_H, TFT_BLACK);
+    /* The menu draws in screen coordinates, but the panel shows the scroll
+     * area rotated by the vertical scroll pointer the waterfall left behind
+     * -> the list appeared shifted after the first open/close. Park the
+     * pointer at the top of the scroll area while the overlay is up, give
+     * it back to the waterfall on close (its ring keeps s_vsp). */
+    vscrsadd_inTx(on ? (uint16_t)TFA : s_vsp);
+    lcd.endWrite();
+    lcd_unlock();
+    if (!on) s_test = false;
+}
+
+bool tft_overlay_on(void) { return s_test; }
+
+void tft_fill(int x, int y, int w, int h, uint16_t color)
+{
+    if (!s_ok) return;
+    lcd_lock();
+    lcd.fillRect(x, y, w, h, color);
+    lcd_unlock();
+}
+
+void tft_text(int x, int y, int size, uint16_t fg, uint16_t bg, const char *s)
+{
+    if (!s_ok || !s) return;
+    lcd_lock();
+    lcd.setTextSize(size);
+    lcd.setTextColor(fg, bg);
+    lcd.setCursor(x, y);
+    lcd.print(s);
+    lcd_unlock();
+}
+
 /* nbin -> 240 pixels with MAX-hold (correct for a spectrum, unlike an
  * average: a narrow carrier must not vanish in the downscaling) */
 void tft_push_specline(const uint8_t *bins, uint16_t nbin)

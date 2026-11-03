@@ -47,4 +47,5 @@ idf_component_register(
     soc                 # soc/gpio_struct.h
     esp_rom             # esp_rom_crc.h
     esp_system          # esp_system.h, esp_freertos_hooks.h
+    nvs_flash           # menu.cpp: settings in NVS (nvs.h, nvs_flash.h)
     freertos)

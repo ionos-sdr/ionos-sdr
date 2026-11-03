@@ -11,6 +11,7 @@
 #include <Arduino.h>
 #include "driver/gpio.h"
 #include "esp_adc/adc_oneshot.h"
+#include "menu.h"
 #include "board.h"
 
 /* ==================== CONFIG ==================== */
@@ -37,9 +38,9 @@ static const ui_entry_t UI_TABLE[UI_PAGE_COUNT] = {
   /* name         demod   ready */
   { "STATUS",     false,  true  },
   { "RF",         false,  true  },
-  { "SDR STREAM", false,  true  },
+  { "SDR",        false,  true  },   /* stream statistics (short: fits the TFT header) */
   { "SCAN",       false,  true  },   /* dithered waterfall — view */
-  { "APRS iGATE", true,   true  },
+  { "APRS",       true,   true  },   /* AFSK1200 iGate */
   { "CW",         true,   true  },
   { "WSPR",       true,   false },
   { "FT8",        true,   false },
@@ -249,12 +250,17 @@ void ui_tick(uint32_t now)
 #if BRD_BTN_LADDER
       if (!s_long_fired) {
         Serial0.printf("UI: button %s\n", BTN_NAME[s_btn_id]);
-        switch (s_btn_id) {
-          case BTN_BACK:  ui_stop_demod(now); break;
-          case BTN_LEFT:
-          case BTN_UP:    ui_prev(now); break;
-          case BTN_SPARE: break;
-          default:        ui_next(now); break;           /* OK, RIGHT, DOWN */
+        if (menu_is_open()) {
+          menu_key((menu_key_t)s_btn_id, now);          /* same numbering */
+          s_last_activity_ms = now;
+        } else {
+          switch (s_btn_id) {
+            case BTN_BACK:  ui_stop_demod(now); break;
+            case BTN_OK:    menu_open(); s_last_activity_ms = now; break;
+            case BTN_LEFT:  ui_prev(now); break;
+            case BTN_RIGHT: ui_next(now); break;
+            default:        break;                        /* UP, DOWN, SPARE: reserved */
+          }
         }
       }
       s_btn_id = BTN_NONE;
@@ -274,8 +280,13 @@ void ui_tick(uint32_t now)
 #endif
      ) {
     s_long_fired = true;
-    Serial0.println("UI: long press -> demod off, status page");
-    ui_stop_demod(now);
+#if BRD_BTN_LADDER
+    if (menu_is_open()) { Serial0.println("UI: long BACK -> menu closed"); menu_close(); } else
+#endif
+    {
+      Serial0.println("UI: long press -> demod off, status page");
+      ui_stop_demod(now);
+    }
   }
 
   /* --- inactivity: back to status, but the MODE STAYS ---

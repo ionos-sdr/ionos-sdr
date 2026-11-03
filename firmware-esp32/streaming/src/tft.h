@@ -62,6 +62,26 @@ uint32_t tft_dropped(void);
 void tft_test(int vsp);
 void tft_test_end(void);
 
+/* ---- overlay drawing for the menu (menu.cpp) ----
+ * tft_overlay(true) freezes the waterfall and clears the scroll area (y 50..319),
+ * the header stays; tft_overlay(false) clears it again and the waterfall resumes.
+ * Colours are RGB565. Text uses the built-in 6x8 font scaled by 'size'. */
+#define TFTC_BLACK    0x0000
+#define TFTC_WHITE    0xFFFF
+#define TFTC_CYAN     0x07FF
+#define TFTC_YELLOW   0xFFE0
+#define TFTC_GREEN    0x07E0
+#define TFTC_RED      0xF800
+#define TFTC_DARKGREY 0x7BEF
+#define TFTC_NAVY     0x000F
+#define TFT_W 240
+#define TFT_H 320
+#define TFT_HDR_H 50
+void tft_overlay(bool on);
+bool tft_overlay_on(void);
+void tft_fill(int x, int y, int w, int h, uint16_t color);
+void tft_text(int x, int y, int size, uint16_t fg, uint16_t bg, const char *s);
+
 #ifdef __cplusplus
 }
 #endif
