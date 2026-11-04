@@ -97,6 +97,16 @@
  * a Heltec dev board, and IO_MUX pins can be designed in. */
 #define SPI_HZ            4000000u
 
+/* SPI clock for R < 8 (100 / 200 ksps, 2026-11-04). 200 ksps is 812 kB/s
+ * including headers - 4 MHz (500 kB/s) cannot carry it. USART0 runs from
+ * PCLK and synchronous mode allows only integer dividers: PCLK / 2 is the
+ * maximum. With the 78 MHz core PCLK = 39 MHz -> 19.5 MHz, 1040 bytes in
+ * 427 us. (Measured at the 39 MHz core: a 13 MHz request gave 6.5 MHz,
+ * 1276 us per block.) Only the fast rates use it, so a Dupont-wired bench
+ * board keeps the proven 4 MHz unless it asks for R < 8. */
+#define SPI_HZ_FAST       19500000u
+static uint32_t s_spi_hz = SPI_HZ;
+
 /* Complex samples per block. 256 samples = 20.5 ms @ 12.5 ksps.
  * Block size = 16-byte header + 256*4 = 1040 bytes. */
 #define BLK_SAMPLES       256u
@@ -110,7 +120,8 @@
  * the header AT SEND TIME. Thus:
  *   blocks/s drops, LOST is zero -> the problem is HERE (see 'dropped blocks')
  *   LOST grows                   -> the ESP32 did not take it, look there */
-#define NBLK              6u
+#define IQ_FIFO_THRESHOLD 512u   /* RX FIFO event level, see iq_stream_start() */
+#define NBLK              12u   /* 2026-11-04: 6 -> 12, ~15 ms at 200 ksps */
 
 /* THE CHIP'S I/Q SAMPLE RATE — from the 'k' benchmark measurement!
  *
@@ -328,8 +339,26 @@ static uint16_t      s_channel_for_restart = 0;
  * bottleneck (the third-order version managed only 522 ksps instead of
  * 1000). Acceptable because our final band is very narrow compared to the
  * intermediate rate, so the alias bands of stage 1 fall on the CIC nulls. */
-#define CIC_R1        8u
-#define CIC_SH1       6u                    /* 2*log2(8) */
+#define CIC_R1        8u                    /* first-stage decimation for R >= 8 */
+
+/* 2026-11-04: the first stage was FIXED at 8, so R < 8 was impossible
+ * (50 ksps max). For R = 2 and 4 the first stage decimates by R itself and
+ * the second stage runs with R2 = 1 (a CIC with R = 1 is the identity, so
+ * no special path is needed). Gain of the second-order first stage is
+ * R1^2, removed by the shift 2*log2(R1). R = 1 (400 ksps, 1.6 MB/s) is not
+ * offered: no link downstream carries it. */
+static uint32_t s_R1  = CIC_R1;
+static uint32_t s_sh1 = 6u;                       /* 2*log2(s_R1) */
+static uint32_t s_out_shift = 0u;                 /* extra output gain, R2 = 1 path */
+
+/* The rates the chain supports: 2, 4, and multiples of 8 up to 4096. */
+uint16_t iq_stream_norm_decim(uint32_t d)
+{
+  if (d < 3u) return 2u;
+  if (d < 8u) return 4u;
+  if (d > 4096u) d = 4096u;
+  return (uint16_t)((d / CIC_R1) * CIC_R1);
+}
 
 static int32_t a1_i, a2_i, a1_q, a2_q;                  /* stage 1 integrator */
 static int32_t b1_i, b2_i, b1_q, b2_q;                  /* stage 1 comb */
@@ -498,7 +527,7 @@ static void spi_setup(void)
 
   USART_InitSync_TypeDef init = USART_INITSYNC_DEFAULT;
   init.enable       = usartEnableTx;      /* transmit only */
-  init.baudrate     = SPI_HZ;
+  init.baudrate     = s_spi_hz;
   init.databits     = usartDatabits16;    /* 16-bit frame, as before */
   init.master       = true;
   init.msbf         = true;               /* MSB first — SPI convention */
@@ -521,13 +550,13 @@ static void spi_setup(void)
       GPIO_USART_ROUTEEN_TXPEN | GPIO_USART_ROUTEEN_CLKPEN;
 
   printf("# SPI: %lu Hz, mode 0, 16 bit, MSB first\r\n",
-         (unsigned long)SPI_HZ);
+         (unsigned long)s_spi_hz);
   printf("# SPI pins: MOSI=PC%02u/EXP10  SCLK=PC%02u/EXP15  "
          "CS=PA%02u/EXP13 (manual)\r\n",
          (unsigned)SPI_MOSI_PIN, (unsigned)SPI_CLK_PIN, (unsigned)SPI_CS_PIN);
   printf("# block: %lu bytes (%lu samples), ~%lu us transmit time\r\n",
          (unsigned long)BLK_BYTES, (unsigned long)BLK_SAMPLES,
-         (unsigned long)((uint64_t)BLK_BYTES * 8ull * 1000000ull / SPI_HZ));
+         (unsigned long)((uint64_t)BLK_BYTES * 8ull * 1000000ull / s_spi_hz));
 }
 
 static void spi_teardown(void)
@@ -662,9 +691,7 @@ bool iq_stream_active(void) { return s_active; }
 
 uint32_t iq_stream_out_sps(uint16_t decim)
 {
-  uint32_t r = (decim < CIC_R1) ? CIC_R1 : (uint32_t)decim;
-  r = (r / CIC_R1) * CIC_R1;
-  if (r == 0u) r = CIC_R1;
+  uint32_t r = iq_stream_norm_decim(decim);
   /* From the MEASURED rate, not the define. Until a measurement exists,
    * the define is the default. */
   return s_fs_in_hz / r;
@@ -695,6 +722,12 @@ static inline void blk_put_sample(int16_t vi, int16_t vq)
 
 /* ================= CIC ================= */
 
+/* Runs in the RAIL RX-FIFO interrupt for EVERY input sample (400 ksps).
+ * The project builds with -Og; this function alone is compiled with -O3
+ * (2026-11-04): at R = 8 the -Og version already used ~90 % of the time
+ * budget, and R = 4 / 2 overflowed the RX FIFO (measured input rate fell
+ * to 295 / 178 ksps, i.e. 33 / 20 ksps out instead of 100 / 200). */
+__attribute__((optimize("O3")))
 static void process_block(const uint8_t *p, uint16_t nbytes)
 {
   typedef struct { int16_t q, i; } iq_in_t;   /* BUFC order: Q FIRST */
@@ -716,34 +749,43 @@ static void process_block(const uint8_t *p, uint16_t nbytes)
     A1i += i;  A2i += A1i;
     A1q += q;  A2q += A1q;
 
-    if (++cnt1 < CIC_R1) continue;
+    if (++cnt1 < s_R1) continue;
     cnt1 = 0;
 
     int32_t e, f;
     e = A2i - b1_i;  b1_i = A2i;
     f = e    - b2_i;  b2_i = e;
-    int32_t s1i = f >> CIC_SH1;
+    int32_t s1i = f >> s_sh1;
 
     e = A2q - b1_q;  b1_q = A2q;
     f = e    - b2_q;  b2_q = e;
-    int32_t s1q = f >> CIC_SH1;
+    int32_t s1q = f >> s_sh1;
 
-    c1_i += s1i;  c2_i += c1_i;  c3_i += c2_i;
-    c1_q += s1q;  c2_q += c1_q;  c3_q += c2_q;
+    int32_t oi, oq;
+    if (s_R2 == 1u) {
+      /* R <= 8: the second stage would be a CIC with R = 1 (identity) and
+       * a normaliser of exactly 2^shift - skip both, they cost more than
+       * the whole first stage at 200 ksps. */
+      oi = s1i << s_out_shift;
+      oq = s1q << s_out_shift;
+    } else {
+      c1_i += s1i;  c2_i += c1_i;  c3_i += c2_i;
+      c1_q += s1q;  c2_q += c1_q;  c3_q += c2_q;
 
-    if (++s_cnt2 < s_R2) continue;
-    s_cnt2 = 0;
+      if (++s_cnt2 < s_R2) continue;
+      s_cnt2 = 0;
 
-    int32_t g;
-    e = c3_i - d1_i;  d1_i = c3_i;
-    f = e     - d2_i;  d2_i = e;
-    g = f     - d3_i;  d3_i = f;
-    int32_t oi = (int32_t)(((int64_t)g * s_norm) >> NORM_SHIFT);
+      int32_t g;
+      e = c3_i - d1_i;  d1_i = c3_i;
+      f = e     - d2_i;  d2_i = e;
+      g = f     - d3_i;  d3_i = f;
+      oi = (int32_t)(((int64_t)g * s_norm) >> NORM_SHIFT);
 
-    e = c3_q - d1_q;  d1_q = c3_q;
-    f = e     - d2_q;  d2_q = e;
-    g = f     - d3_q;  d3_q = f;
-    int32_t oq = (int32_t)(((int64_t)g * s_norm) >> NORM_SHIFT);
+      e = c3_q - d1_q;  d1_q = c3_q;
+      f = e     - d2_q;  d2_q = e;
+      g = f     - d3_q;  d3_q = f;
+      oq = (int32_t)(((int64_t)g * s_norm) >> NORM_SHIFT);
+    }
 
 #if IQ_STREAM_DC_BLOCK
     if (oi >  DC_PRECLAMP) oi =  DC_PRECLAMP;
@@ -794,7 +836,7 @@ bool iq_stream_on_event(RAIL_Handle_t rail, RAIL_Events_t events)
     uint8_t guard = 8u;
     uint16_t avail = RAIL_GetRxFifoBytesAvailable(rail);
 
-    while (avail >= 512u && guard--) {
+    while (avail >= IQ_FIFO_THRESHOLD && guard--) {
       uint16_t n = (uint16_t)(avail & ~3u);
       if (n > 4096u) n = 4096u;
       if (n == 0u) break;
@@ -825,18 +867,20 @@ bool iq_stream_on_event(RAIL_Handle_t rail, RAIL_Events_t events)
 void iq_stream_start(RAIL_Handle_t rail, uint16_t channel,
                      uint16_t decim, uint8_t out_shift)
 {
-  if (decim < CIC_R1) decim = CIC_R1;
-  if (decim > 4096u)  decim = 4096u;
-  decim = (uint16_t)((decim / CIC_R1) * CIC_R1);
+  decim = iq_stream_norm_decim(decim);
 
   s_decim_R = decim;
-  s_R2      = decim / CIC_R1;
+  s_R1      = (decim < CIC_R1) ? decim : CIC_R1;
+  s_sh1     = (s_R1 == 2u) ? 2u : (s_R1 == 4u) ? 4u : 6u;
+  s_R2      = decim / s_R1;
   if (s_R2 < 1u) s_R2 = 1u;
+  s_spi_hz  = (decim < CIC_R1) ? SPI_HZ_FAST : SPI_HZ;
 
   uint64_t gain = (uint64_t)s_R2 * s_R2 * s_R2;
   s_norm = (int32_t)(((1ull << NORM_SHIFT) + gain / 2ull) / gain);
   if (s_norm < 1) s_norm = 1;
   if (out_shift < 8u) s_norm = (int32_t)(s_norm << out_shift);
+  s_out_shift = (out_shift < 8u) ? out_shift : 0u;
 
   a1_i = a2_i = a1_q = a2_q = 0;
   b1_i = b2_i = b1_q = b2_q = 0;
@@ -859,7 +903,14 @@ void iq_stream_start(RAIL_Handle_t rail, uint16_t channel,
   RAIL_ResetFifo(rail, false, true);
   s_rd = 0;
 
-  RAIL_SetRxFifoThreshold(rail, 2048u);
+  /* 2026-11-04: 2048 -> 512 bytes. The CIC runs in this interrupt; with
+   * 2048 one event took ~1.3 ms of input in one go, and the main loop (which
+   * completes an SPI block and starts the next) waited behind it: at R = 2
+   * a 427 us block took 1.5 ms from LDMA start to the next block, capping
+   * the stream at 611 of 781 blocks/s. Smaller, more frequent events give
+   * the pump a turn every ~0.3 ms. The handler still drains everything
+   * available, so the level always falls back under the threshold. */
+  RAIL_SetRxFifoThreshold(rail, IQ_FIFO_THRESHOLD);
   RAIL_ConfigEvents(rail, RAIL_EVENTS_ALL,
                     RAIL_EVENT_RX_FIFO_ALMOST_FULL
                     | RAIL_EVENT_RX_FIFO_OVERFLOW);
@@ -953,7 +1004,7 @@ void iq_stream_stop(RAIL_Handle_t rail, uint16_t channel)
     uint32_t a_ldma = (uint32_t)(s_sum_ldma_us / s_cs_meas);
     uint32_t a_txc  = (uint32_t)(s_sum_txc_us  / s_cs_meas);
     uint32_t elm    = (uint32_t)((uint64_t)BLK_BYTES * 8ull
-                                 * 1000000ull / SPI_HZ);
+                                 * 1000000ull / s_spi_hz);
     printf("# CS low: avg %lu us (theoretical %lu us), max %lu us\r\n",
            (unsigned long)(a_ldma + a_txc), (unsigned long)elm,
            (unsigned long)s_max_cs_us);
@@ -1190,7 +1241,7 @@ void iq_stream_dump_uart_cfg(void)
   printf("# ---- SPI (USART0) ----\r\n");
   printf("# USART0 clock=%lu Hz, requested SPI=%lu Hz\r\n",
          (unsigned long)CMU_ClockFreqGet(cmuClock_USART0),
-         (unsigned long)SPI_HZ);
+         (unsigned long)s_spi_hz);
   printf("# USARTROUTE: TX=0x%08lX CLK=0x%08lX ROUTEEN=0x%08lX "
          "(CSPEN DELIBERATELY absent)\r\n",
          (unsigned long)GPIO->USARTROUTE[0].TXROUTE,

@@ -149,7 +149,7 @@ typedef struct {
  * including 'i<R>' to restart.
  *
  *   IQ_AUTOSTART        1 = start automatically, 0 = keep the old behaviour
- *   IQ_AUTOSTART_DECIM  the TOTAL decimation (multiple of 8, 8..4096)
+ *   IQ_AUTOSTART_DECIM  the TOTAL decimation (2, 4, or a multiple of 8 up to 4096)
  *                         8 ->  50 000 sps  (+-25 kHz)
  *                        16 ->  25 000 sps
  *                        32 ->  12 500 sps  <- this is "i32"
@@ -428,9 +428,7 @@ static void cmdlink_yield(void) { cmdlink_poll(); }
 
 static void stream_start_R(uint32_t R, uint8_t shift, const char *honnan)
 {
-  if (R < 8u)    R = 8u;
-  if (R > 4096u) R = 4096u;
-  R = (R / 8u) * 8u;
+  R = iq_stream_norm_decim(R);   /* 2, 4, or a multiple of 8 (2026-11-04) */
   s_stream_R = R;
   armed = false;
 

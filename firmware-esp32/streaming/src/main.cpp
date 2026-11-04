@@ -2023,7 +2023,9 @@ static void deliver(const uint8_t *b)
    * demodulation. --- */
   /* USB host mode (MODE USB / menu): no demodulation at all, the CPU and the
    * USB path belong to the stream (docs/ionos-usb-protocol.md). */
-  const bool demod_on = !usbhost_usb_mode();
+  /* The APRS / CW demodulators are sized for <= 50 ksps; at 100 / 200 ksps
+   * (R = 4 / 2, 2026-11-04) they stay off - those rates are for a host. */
+  const bool demod_on = !usbhost_usb_mode() && cur_sps <= 50000u;
 #if APRS_RX_ENABLE
   /* Demodulate ONLY when the APRS mode is active. So the button really
    * frees the CPU for another measurement. */

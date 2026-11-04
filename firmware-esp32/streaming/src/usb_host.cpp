@@ -97,7 +97,7 @@ static void send_hello(void)
   snprintf(b, sizeof b,
            "ionos=1\nproduct=ionos-sdr-mini\nhw=rev-b3-2l\nboard=%s\nchip=EFR32FG23\n"
            "fw_esp=%s\nfw_fg23=%s\nfreq_min_hz=430000000\nfreq_max_hz=440025000\n"
-           "fs_in_hz=%lu\ndecim_list=8,16,24,32,48,64\ngain_shift_max=0\nrssi=1\nspectrum=1\ntx=0\n"
+           "fs_in_hz=%lu\ndecim_list=2,4,8,16,24,32,48,64\ngain_shift_max=0\nrssi=1\nspectrum=1\ntx=0\n"
            "mode=%s\n",
            i.board, i.fw_esp, i.fw_fg23, (unsigned long)FG23_FS_IN, s_usb_mode ? "USB" : "STANDALONE");
   usbhost_send(MSG1_HELLO, b);
@@ -164,8 +164,11 @@ static void handle_line(char *line)
     long sps = atol(line + 1);
     if (sps <= 0) { reply("ERR usage: R <sps>\n"); return; }
     long R = lroundf((float)FG23_FS_IN / (float)sps);
-    R = ((R + 4) / 8) * 8;              /* FG23 stream_start_R: R >= 8, multiple of 8 */
-    if (R < 8) R = 8;
+    /* FG23 iq_stream_norm_decim(): 2, 4, or a multiple of 8 (2026-11-04;
+     * 200 / 100 ksps need the 78 MHz FG23 core and the 19.5 MHz SPI). */
+    if (R < 3) R = 2;
+    else if (R < 6) R = 4;
+    else { R = ((R + 4) / 8) * 8; if (R < 8) R = 8; }
     if (R > 4096) R = 4096;
     menu_host_set_decim((int32_t)R);
     reply("OK\nfs=%ld decim=%ld\n", (long)FG23_FS_IN / R, R);
