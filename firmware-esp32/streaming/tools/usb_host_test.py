@@ -40,7 +40,7 @@ def open_port(port, baud, timeout):
     s.rts = False; s.dtr = True
     s.open(); return s
 s = open_port(a.port, 115200, 0.05)   # DTR on: the ESP sees 'connected' once we drain
-buf = b""
+buf = bytearray()
 t0 = time.time()
 stats = {"IQ": 0, "SPC": 0, "MSG": 0, "resync": 0, "gaps": 0}
 last_seq = None
@@ -69,22 +69,28 @@ while time.time() - t0 < a.sec:
         print(f"[{time.time()-t0:6.2f}s] -> {c}")
         s.write((c + "\n").encode())
         next_cmd_t = time.time() + 1.0
-    d = s.read(16384)
+    d = s.read(65536)
     if d:
         buf += d
-    while len(buf) >= BLK:
-        if buf[:4] in MAGICS:
-            handle(buf[:BLK]); buf = buf[BLK:]
+    # Parse by offset: "buf = buf[BLK:]" copied the whole buffer for every
+    # block, which at 200 ksps (781 blocks/s) made this script the bottleneck
+    # (measured 2026-11-04: ~770 blocks/s and growing loss, while a reader
+    # without the copies took all 781 blocks/s).
+    off = 0
+    while len(buf) - off >= BLK:
+        if bytes(buf[off:off + 4]) in MAGICS:
+            handle(bytes(buf[off:off + BLK])); off += BLK
         else:
-            # resync: find the next magic at 4-byte alignment
+            # resync: find the next magic
             i = -1
             for m in MAGICS:
-                j = buf.find(m, 4)
+                j = buf.find(m, off + 4)
                 if j >= 0 and (i < 0 or j < i):
                     i = j
             if i < 0:
-                buf = buf[-3:]; break
-            buf = buf[i:]; stats["resync"] += 1
+                off = len(buf) - 3; break
+            off = i; stats["resync"] += 1
+    del buf[:off]
 
 dt = time.time() - t0
 print(f"\n{dt:.1f} s: IQB2 {stats['IQ']} blocks ({stats['IQ']/dt:.1f}/s, {stats['IQ']*256/dt:.0f} sps), "

@@ -698,7 +698,12 @@ static void spi_rx_task(void *arg)
 }
 
 #define DIAG  Serial0     /* CP2102: text diagnostics */
+#if IONOS_USB_TINYUSB
+#include "tusb_cdc.h"
+#define RAW   TusbSerial  /* native USB: USB-OTG + TinyUSB CDC-ACM (tusb_cdc.h) */
+#else
 #define RAW   Serial      /* native USB CDC: raw stream */
+#endif
 
 /* ---------------- output aggregators ---------------- */
 static uint8_t  agg_usb[AGG_BLK * BLK_BYTES];      static size_t agg_usb_n = 0;
@@ -2504,7 +2509,9 @@ void setup()
    * the ring fills, flush_usb() drops a whole block (measured: every
    * host-side sequence gap matched an ESP usb_drop +1 within one status
    * period, ~1 block/min, 0.007 %). 24 blocks = ~128 ms of headroom. */
+#if !IONOS_USB_TINYUSB
   RAW.setTxBufferSize(USB_TX_BUF_BLOCKS * BLK_BYTES);
+#endif   /* TinyUSB: tusb_cdc.cpp keeps its 256 kB PSRAM ring */
 #endif
   RAW.setTxTimeoutMs(USB_TX_TIMEOUT_MS);   /* see the explanation above flush_usb() */
 #if FG23_USB_TINYUSB
@@ -2528,7 +2535,11 @@ void setup()
   DIAG.println("\n=== FG23 -> ESP32-S3 -> USB + WiFi + rtl_tcp ===");
   /* Make it VISIBLE in the log which USB mode is running - the two behave
    * quite differently with the PC-side measurement tool. */
-#if FG23_USB_TINYUSB
+#if IONOS_USB_TINYUSB
+  DIAG.printf("USB: USB-OTG + TinyUSB CDC-ACM (esp_tinyusb), %lu kB PSRAM ring, "
+              "no reset on DTR/RTS, new COM number\n",
+              (unsigned long)(RAW.ring_size() / 1024u));
+#elif FG23_USB_TINYUSB
   DIAG.println("USB: TinyUSB CDC (MODE=0), DTR/RTS reset DISABLED "
                "- recommended for measurement");
 #else

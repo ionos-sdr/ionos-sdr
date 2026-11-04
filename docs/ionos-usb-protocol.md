@@ -14,7 +14,7 @@ Scope: the native USB CDC link between the ESP32-S3 and a PC. The WiFi paths
 
 | item | v1 (today) | v2 |
 |---|---|---|
-| USB class | CDC-ACM, one interface (ESP32-S3 USB-Serial-JTAG, `ARDUINO_USB_MODE=1`) | same; a TinyUSB composite (2× CDC) is **not** required |
+| USB class | CDC-ACM, one interface (ESP32-S3 USB-Serial-JTAG, `ARDUINO_USB_MODE=1`) | **since 2026-11-04: CDC-ACM on the USB-OTG peripheral (TinyUSB via esp_tinyusb, `IONOS_USB_TINYUSB=1`)** — new PID, so a new COM number; no chip reset on DTR/RTS; flashing stays on the UART. A composite (2× CDC) is not required |
 | identity | Espressif VID 0x303A / PID 0x1001, serial = chip MAC (ESP ROM) | own PID (pid.codes request) **or** keep 0x303A:0x1001 and identify by the `MSG1` hello block (see 4.3). Decision open; the hello block is mandatory either way, so hosts never depend on VID/PID alone. |
 | baud / flow control | ignored (USB bulk); DTR/RTS must **not** reset the board (`enableReboot(false)` / HWCDC: no auto-reset on this path) | same |
 | direction device → host | binary blocks, fixed **1040 B** | same, three block types |
@@ -45,7 +45,7 @@ does not burn a number: a gap in `seq` is a real lost block, nothing else.
 - sample rate = `fs_in_hz & 0xFFFFF` / `decim` (today 400 000 / 8 = 50 000 sps).
 - RSSI = `(int16)((fs_in_hz >> 20) & 0xFFF)` sign-extended from 12 bits, dBm, refreshed every ~20 blocks (~100 ms).
 - full scale: int16; the FG23 applies a digital shift (`IQ_AUTOSTART_SHIFT`), no analogue RX gain control exists (RAIL AGC).
-- rate: 195 blocks/s at R=8; the chain is proven at 712–747 kB/s over WiFi, USB is not the bottleneck.
+- rate: 195 / 391 / 781 blocks/s at R = 8 / 4 / 2 (50 / 100 / 200 ksps, 204 / 407 / 813 kB/s). Measured 2026-11-04 over USB (TinyUSB CDC): R = 2 for 600 s without a lost block. WiFi carries 712–747 kB/s, i.e. 100 ksps comfortably, 200 ksps not.
 
 ### 3.2 `SPC1` — spectrum line (v1, scan mode)
 - payload: `u32 span_hz`, `i16 floor_dbm`, `u16 range_db`, then `nbin × u8` with dB = floor + v·range/255.
@@ -67,7 +67,7 @@ does not burn a number: a gap in `seq` is a real lost block, nothing else.
 | `F<kHz>` | absolute tune, kHz | 100 000…1 000 000 kHz; stops and restarts the stream with the same R (a few ms gap); **kHz resolution only** |
 | `o<ticks>` | fine offset, 1 tick ≈ 4.649 Hz, clamped to ±0x3FFF (≈ ±76 kHz) | this is how sub-kHz tuning is reached today (`o482` = +2.22 kHz is the measured crystal calibration at 144.8 MHz) |
 | `f<ch>` | raw channel (radioconf grid) | bounded by `TUNE_MAX_CHANNEL` |
-| `i<R>` | start the I/Q stream with total decimation R (integer, not log2); `i` alone = autostart R; `i` while running = stop | rate = 400 000 / R; **`stream_start_R` clamps R to ≥ 8 and rounds to a multiple of 8** (two-stage CIC) → 50 ksps is today's maximum; R = 16 → 25 ksps … |
+| `i<R>` | start the I/Q stream with total decimation R (integer, not log2); `i` alone = autostart R; `i` while running = stop | rate = 400 000 / R; R ∈ {2, 4} ∪ multiples of 8 up to 4096 (`iq_stream_norm_decim()`; R = 2 / 4 use the first CIC stage only, the FG23 core runs at 78 MHz and the SPI at 19.5 MHz for them) → **200 ksps maximum** since 2026-11-04; R = 16 → 25 ksps … |
 | `W<center_kHz>,<span_kHz>,<nbin>[,floor,range]` / `W0` | wideband RSSI scan → `SPC1` blocks / stop and resume I/Q | the scan parser only accepts digits, `,` and `-` |
 | `T<avg_us>,<wait_us>[,method]` | scan timing | |
 | `t<dBm>` | RSSI trigger threshold | capture mode only |
@@ -82,7 +82,7 @@ Commands in `NEEDS_STOP = "cwpxbzydfkngMW"` stop the stream first and resume aft
 | line | effect |
 |---|---|
 | `FH<Hz>` | tune with Hz resolution: the ESP computes `F<kHz>` + `o<ticks>` (ticks = (Hz − kHz·1000)/4.649, within ±0x3FFF) and sends both; answers with the resulting exact frequency in `MSG1` |
-| `R<sps>` | sample rate request in sps; the ESP picks the nearest valid R (round(400000/sps) to a multiple of 8, ≥ 8) and sends `i<R>`; answers with the achieved rate |
+| `R<sps>` | sample rate request in sps; the ESP picks the nearest valid R (2, 4, or round(400000/sps) to a multiple of 8) and sends `i<R>`; answers with the achieved rate |
 | `G<shift>` | digital gain shift 0…4 (replaces `IQ_AUTOSTART_SHIFT`); the only "gain" there is |
 | `CAP?` | capability block (`MSG1` type 1 content, re-sent on demand) |
 | `VER?` | firmware versions: ESP (`git describe`), FG23 (from the FG23 `v?` reply or the version struct read over SWD), board ID (EEPROM 0x51) |
@@ -106,7 +106,7 @@ fw_fg23=<version>
 freq_min_hz=430000000     ; capability table of THIS radio board / radioconf
 freq_max_hz=440025000
 fs_in_hz=400000
-decim_list=8,16,24,32,48,64
+decim_list=2,4,8,16,24,32,48,64
 gain_shift_max=4
 rssi=1
 spectrum=1                ; SPC1 scan supported
@@ -161,7 +161,7 @@ letters. Deviations from the table above:
 - `G<shift>` answers `ERR`: the digital shift is compile-time on the FG23.
 - periodic status (`MSG1` type 2, 2 s) starts only after the host has sent its
   first line, so a v1 host (iq_bridge.py) sees one hello block and nothing else.
-- `decim_list` follows the FG23 rule (≥ 8, multiples of 8); `R` rounds the same way. Measured 2026-11-03: `R 100000` → `i4` → the FG23 kept R=8.
+- `decim_list` follows the FG23 rule (2, 4, multiples of 8); `R` rounds the same way. (Until 2026-11-04 the FG23 accepted only R ≥ 8: `R 100000` → `i4` → R stayed 8.) Above 50 ksps the ESP's APRS / CW demodulators stay off; those rates are for a host.
 Reference client: `tools/usb_host_test.py COM7 --cmd "VER?" --cmd "R 100000"`.
 
 Scan over USB (2026-11-03, later the same day): `SPC1` blocks reach the host
@@ -193,6 +193,18 @@ every host sets DTR=1, RTS=0 *before* opening — `tools/usb_host_test.py`
 `open_port()`, `iq_bridge.py`, `usb_sink.py` do; the websdr sets
 `{dataTerminalReady: true, requestToSend: false}` right after `open()` and
 hands the probed port over without a reopen.
+
+**USB-OTG + TinyUSB (2026-11-04).** `src/tusb_cdc.{h,cpp}` replaces the HWCDC
+behind `RAW` / `USBH_RAW`: writes go into a 256 kB PSRAM ring, a pump task on
+core 0 moves it into the TinyUSB CDC FIFO (16 kB, IN transfers of 4 kB, woken by
+`tud_cdc_tx_complete_cb`). esp_tinyusb 1.7.6 is vendored in
+`third_party/esp_tinyusb` with its `TINYUSB_CDC_ENABLED` Kconfig symbol renamed:
+the Arduino core compiles its own `USBCDC.cpp` when that symbol is set and fails
+without the Arduino-only `arduino_tinyusb`. Host-side lesson from the same day: a
+Python reader that does `buf = buf[1040:]` per block copies the whole buffer each
+time and cannot keep up with 781 blocks/s (it showed ~770 blocks/s and growing
+loss); parse by offset (`tools/usb_host_test.py` fixed). Because of that the
+~776 kB/s measured earlier through the USB-Serial/JTAG is not a proven HWCDC limit.
 
 ## 8. Open points
 

@@ -18,6 +18,10 @@
 #include <math.h>
 #include <stdarg.h>
 
+#if IONOS_USB_TINYUSB
+#include "tusb_cdc.h"
+#define USBH_RAW  TusbSerial    /* USB-OTG + TinyUSB CDC-ACM, see tusb_cdc.h */
+#endif
 #ifndef USBH_RAW
 #define USBH_RAW  Serial        /* native USB CDC: raw stream + host lines */
 #endif
