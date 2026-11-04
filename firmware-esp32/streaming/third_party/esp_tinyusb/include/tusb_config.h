@@ -153,6 +153,13 @@ extern "C" {
 // CONFIG_TINYUSB_CDC_TX_BUFSIZE. 2048 / 4096: ~800 kB/s, the ring still grew.
 #undef  CFG_TUD_CDC_TX_BUFSIZE
 #define CFG_TUD_CDC_TX_BUFSIZE      16384
+// ionos-sdr (2026-11-04): DWC2 TX FIFO of the CDC data IN endpoint (EP2).
+// TinyUSB gives a bulk IN endpoint a hardware FIFO of one packet (16 words);
+// bm_double_buffered (official option) makes it two. Measured: no change in
+// throughput - nor with 64 or 128 words (console UT<words>). During the stalls the
+// FIFO is full and the transfer armed: the host is not polling, the FIFO is not
+// the limit. Kept: harmless, and one packet of slack between DMA and the bus.
+#define CFG_TUD_CONFIGURE_DWC2_DEFAULT {.bm_double_buffered = (1u << 2), .vbus_sensing = CFG_TUD_VBUS_DETECT_HW}
 
 // MSC Buffer size of Device Mass storage
 #define CFG_TUD_MSC_BUFSIZE         CONFIG_TINYUSB_MSC_BUFSIZE

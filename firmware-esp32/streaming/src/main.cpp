@@ -2368,6 +2368,9 @@ static void console_dispatch(const char *cmd)
   else if (!strcmp(cmd, "M")) { if (menu_is_open()) menu_close(); else menu_open(); }
   else if (cmd[0] == 'O' && (cmd[1] == '0' || cmd[1] == '1') && !cmd[2]) { oled_paused = (cmd[1] == '0'); DIAG.printf("OLED refresh %s\n", oled_paused ? "PAUSED" : "on"); }
   else if (cmd[0] == 'T') { if (cmd[1] == 'x') tft_test_end(); else tft_test(cmd[1] ? atoi(cmd + 1) : -1); }
+#if IONOS_USB_TINYUSB
+  else if (tusb_cdc_cmd(cmd)) { }
+#endif
   else if (!fg23_prog_cmd(cmd, DIAG) && !wifi_bench_cmd(cmd) && !rgb_load_cmd(cmd)) iq_fft_cmd(cmd);
 }
 

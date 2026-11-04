@@ -35,6 +35,7 @@ public:
 
   /* internal, used by the pump task */
   void pump_once(uint32_t *moved);
+  volatile uint32_t m_flood_until_ms = 0;   /* USB throughput test, see tusb_cdc_cmd() */
 private:
   size_t   m_ring_req = 256u * 1024u;
   uint8_t *m_ring = nullptr;
@@ -47,3 +48,14 @@ private:
 };
 
 extern TusbCdc TusbSerial;
+
+/* Console commands (2026-11-04, USB throughput investigation):
+ *   US         stats since the last US: IN transfers completed, bytes, gaps
+ *   UF<sec>    flood: dummy data as fast as the link takes it, <sec> seconds
+ *              (the I/Q ring is drained and dropped meanwhile)
+ *   UP<prio>   priority of the TinyUSB task
+ *   UT<words>  resize the EP2 (CDC data IN) hardware TX FIFO at run time
+ * US also prints USBGAP / USBGAP2: what EP2 and the bus look like while no
+ * transfer completes for > 10 ms (armed? FIFO full? device NAK? SOFs running?).
+ * Returns true when the line was one of these. */
+bool tusb_cdc_cmd(const char *line);
