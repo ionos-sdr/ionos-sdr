@@ -37,7 +37,9 @@ public:
   void pump_once(uint32_t *moved);
   volatile uint32_t m_flood_until_ms = 0;   /* USB throughput test, see tusb_cdc_cmd() */
 private:
-  size_t   m_ring_req = 256u * 1024u;
+  /* 2 MB PSRAM = ~2.5 s of the 200 ksps stream (812.5 kB/s). 256 kB (~320 ms) was
+   * too little: a 3 h soak showed two Windows host read stalls > 320 ms (2026-11-04). */
+  size_t   m_ring_req = 2048u * 1024u;
   uint8_t *m_ring = nullptr;
   uint32_t m_size = 0;
   volatile uint32_t m_head = 0;    /* written by write() (producer) */
