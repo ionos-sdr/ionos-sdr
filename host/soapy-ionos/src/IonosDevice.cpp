@@ -147,11 +147,15 @@ bool IonosDevice::handshake(double helloWaitS, double capWaitS) {
     double t0 = nowS();
     while (!_haveCap && nowS() - t0 < helloWaitS && !_portError)
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    SoapySDR::logf(SOAPY_SDR_DEBUG, "SoapyIonos: handshake: after hello wait haveCap=%d iq=%llu portError=%d",
+                   (int)_haveCap.load(), (unsigned long long)_iqSeen.load(), (int)_portError.load());
     if (_haveCap) return true;
     sendRaw("CAP?");
     t0 = nowS();
     while (!_haveCap && nowS() - t0 < capWaitS && !_portError)
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    SoapySDR::logf(SOAPY_SDR_DEBUG, "SoapyIonos: handshake: after CAP? wait haveCap=%d iq=%llu portError=%d",
+                   (int)_haveCap.load(), (unsigned long long)_iqSeen.load(), (int)_portError.load());
     return _haveCap;
 }
 

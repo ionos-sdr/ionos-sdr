@@ -11,6 +11,14 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
+if(MSVC)
+    # VS 2022 17.10+ made std::mutex's constructor constexpr; a module built that way
+    # deadlocks on its first lock when the host process has already loaded an older
+    # msvcp140.dll (PothosSDR, radioconda and SDR++ ship their own). Seen on hardware:
+    # the reader thread hung on its first mutex, the hello was never registered.
+    add_compile_definitions(_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR _CRT_SECURE_NO_WARNINGS)
+endif()
+
 find_package(SoapySDR "0.7" CONFIG REQUIRED)
 find_package(Threads REQUIRED)
 
