@@ -50,7 +50,9 @@ bool SerialPort::open(const std::string &path, std::string &err, bool /*exclusiv
         err = (e == ERROR_ACCESS_DENIED) ? "port busy (opened by another program)" : "CreateFile failed, error " + std::to_string(e);
         return false;
     }
-    SetupComm(h, 256 * 1024, 4096);
+    // usbser.sys queue: 4 MB (~5 s at 200 ksps) - the same size the Python
+    // reference client asks for; 256 kB lost blocks on the first real-hardware run.
+    SetupComm(h, 4 * 1024 * 1024, 4096);
     DCB dcb;
     std::memset(&dcb, 0, sizeof dcb);
     dcb.DCBlength = sizeof dcb;
@@ -97,11 +99,15 @@ void SerialPort::close() {
 long SerialPort::read(void *buf, size_t n, int timeoutMs) {
     if (!isOpen()) return -1;
     if (timeoutMs != _rdTimeoutMs) {
-        // MAXDWORD / MAXDWORD / T: return as soon as any byte is there, else after T ms.
+        // 0 / 0 / T: return when the buffer is full or after T ms, with whatever
+        // arrived (pyserial's timeout= mode). The earlier MAXDWORD/MAXDWORD/T
+        // returned after every USB transfer (~4 kB); with the reader's nap after
+        // short reads (Windows sleep granularity ~15.6 ms) that drained only
+        // ~300 kB/s of the 813 kB/s stream: 400 lost blocks in 30 s on hardware.
         COMMTIMEOUTS to;
         std::memset(&to, 0, sizeof to);
-        to.ReadIntervalTimeout = MAXDWORD;
-        to.ReadTotalTimeoutMultiplier = MAXDWORD;
+        to.ReadIntervalTimeout = 0;
+        to.ReadTotalTimeoutMultiplier = 0;
         to.ReadTotalTimeoutConstant = (DWORD)(timeoutMs > 0 ? timeoutMs : 1);
         to.WriteTotalTimeoutConstant = 1000;
         SetCommTimeouts((HANDLE)_h, &to);

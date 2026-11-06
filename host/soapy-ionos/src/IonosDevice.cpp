@@ -198,7 +198,11 @@ void IonosDevice::readerLoop() {
     const size_t chunk = 64 * 1024;
     while (_running) {
         uint8_t *dst = _parser.prepare(chunk);
+#ifdef _WIN32
+        const long n = _port.read(dst, chunk, 20);   // blocks until 64 kB or 20 ms
+#else
         const long n = _port.read(dst, chunk, 50);
+#endif
         if (n < 0) {
             if (!_portError) SoapySDR::logf(SOAPY_SDR_ERROR, "SoapyIonos: port read error (device unplugged?)");
             _portError = true;
@@ -220,7 +224,11 @@ void IonosDevice::readerLoop() {
         // CDC drivers hand data over per USB transfer (often 64-512 B); after a
         // short read let it accumulate so each read moves kilobytes, not packets.
         // The OS buffers (64 kB tty / 256 kB usbser) cover the 1-16 ms nap.
+#ifndef _WIN32
+        // (Windows: the read itself waits up to 20 ms for 64 kB - no nap; a
+        // Sleep(1) there lasts up to ~15.6 ms.)
         if (n < 8192) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+#endif
     }
 }
 
