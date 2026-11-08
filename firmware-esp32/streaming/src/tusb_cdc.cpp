@@ -93,6 +93,13 @@ void TusbCdc::begin()
   xTaskCreatePinnedToCore(pump_task, "usbpump", 3072, this, 6, &s_pump_task, 0);
 }
 
+void TusbCdc::discard()
+{
+  if (!m_ok) return;
+  m_tail = m_head;                           /* the pump only advances m_tail */
+  tud_cdc_n_write_clear(0);
+}
+
 TusbCdc::operator bool() const
 {
   return m_ok && tud_mounted() && tud_cdc_n_connected(0);

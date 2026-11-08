@@ -117,6 +117,17 @@ out:
 bool fg23_prog_cmd(const char *line, HardwareSerial &io)
 {
   if (!strcmp(line, "FGINFO")) { info(io); return true; }
+  if (!strcmp(line, "FGRST")) {
+    /* System reset of the FG23 over SWD (AIRCR.SYSRESETREQ) - recovers it when an
+     * app call never returns (e.g. RAIL_ConfigChannels() with a base frequency
+     * the PHY's synthesizer cannot reach). FGINFO alone does NOT reset it. */
+    uint32_t dpidr = 0, apidr = 0;
+    bool c = swd::connect(&dpidr, &apidr);
+    bool ok = c && swd::mem_w(swd::DEMCR, 0) && swd::mem_w(swd::AIRCR, 0x05FA0004);
+    swd::release();
+    io.printf("FGRST %s\n", ok ? "OK" : "FAIL");
+    return true;
+  }
   unsigned long a, l = 1, c;
   /* FGRD <hex addr> [words]: read FG23 memory over SWD while it runs (the
    * AHB-AP read does not halt the core). Debug aid for the cmdlink: the

@@ -33,6 +33,10 @@ public:
   uint32_t ring_size() const { return m_size; }
   uint32_t pump_bytes() const { return m_pumped; }
 
+  /* Drop everything not yet sent (ring + TinyUSB FIFO). On a new host connection:
+   * with the 2 MB ring the hello otherwise queues behind ~2.5 s of stale I/Q. */
+  void discard();
+
   /* internal, used by the pump task */
   void pump_once(uint32_t *moved);
   volatile uint32_t m_flood_until_ms = 0;   /* USB throughput test, see tusb_cdc_cmd() */

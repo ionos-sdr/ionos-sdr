@@ -805,6 +805,7 @@ static WiFiClient cli_rtl;
 static bool       have_raw = false, have_rtl = false;
 static bool       wifi_up = false;
 static bool       wifi_is_ap = false;
+static bool       wifi_forced_off = false;   /* console "WIFIOFF" (USB soak A/B test) */
 static IPAddress  my_ip;
 static WiFiMulti  wifiMulti;
 static uint32_t   wifi_last_try_ms = 0;
@@ -1640,6 +1641,7 @@ static void wifi_tick(uint32_t now)
 {
 #if WIFI_ENABLE
   if (wifi_is_ap) return;                       /* nothing to do in AP mode */
+  if (wifi_forced_off) return;                  /* switched off from the console */
   if (WiFi.status() == WL_CONNECTED) return;
   if (have_raw || have_rtl) return;
   if (wifi_scan_req) return;                    /* an attempt is already running */
@@ -2364,6 +2366,18 @@ static void bench_ext_cb(wb_ext_t *o)
  * every menu item has a console twin, so a test script can drive the same path. */
 static void console_dispatch(const char *cmd)
 {
+#if WIFI_ENABLE
+  /* WIFIOFF / WIFION: radio off for A/B tests (does the WiFi stack disturb the USB
+   * stream?). Off = no reconnect attempts until WIFION. */
+  if (!strcmp(cmd, "WIFIOFF")) {
+    wifi_forced_off = true; WiFi.setAutoReconnect(false); WiFi.disconnect(true); WiFi.mode(WIFI_OFF);
+    wifi_up = false; DIAG.println("WiFi forced OFF"); return;
+  }
+  if (!strcmp(cmd, "WIFION")) {
+    wifi_forced_off = false; WiFi.mode(WIFI_STA); WiFi.setAutoReconnect(true);
+    wifi_last_try_ms = 0; wifi_scan_req = true; DIAG.println("WiFi back ON, reconnecting"); return;
+  }
+#endif
   if (!strcmp(cmd, "U")) ui_ladder_diag();
   else if (!strcmp(cmd, "M")) { if (menu_is_open()) menu_close(); else menu_open(); }
   else if (cmd[0] == 'O' && (cmd[1] == '0' || cmd[1] == '1') && !cmd[2]) { oled_paused = (cmd[1] == '0'); DIAG.printf("OLED refresh %s\n", oled_paused ? "PAUSED" : "on"); }

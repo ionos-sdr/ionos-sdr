@@ -119,7 +119,7 @@ static void send_status(void)
 }
 
 /* ===================== command handling =============================== */
-static const char FORWARD[] = "FofiWTts";          /* -> FG23 handle_line() */
+static const char FORWARD[] = "FofiWTtsB";         /* -> FG23 handle_line(); B<kHz> = base override (wideband sweep) */
 static const char REJECT[]  = "cwpxbzydkngvM";     /* TX / bench / diagnostics */
 
 static void handle_line(char *line)
@@ -209,7 +209,15 @@ void usbhost_tick(uint32_t now)
 {
   /* hello on connect (HWCDC: 'connected' = the host drains the TX FIFO) */
   bool conn = (bool)USBH_RAW;
-  if (conn && !s_conn_prev) { send_hello(); s_stat_last_ms = now; }
+  if (conn && !s_conn_prev) {
+#if IONOS_USB_TINYUSB
+    /* new host: drop the backlog (up to 2 MB = ~2.5 s of old I/Q) so the hello and
+     * the stream start fresh - a host waiting <= 1 s for the hello saw none. */
+    USBH_RAW.discard();
+#endif
+    s_host_spoke = false;                      /* a v1 host after a v2 one gets no status */
+    send_hello(); s_stat_last_ms = now;
+  }
   s_conn_prev = conn;
 
   /* host lines */
