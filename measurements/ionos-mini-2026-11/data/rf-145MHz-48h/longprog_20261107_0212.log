@@ -1,0 +1,256 @@
+2026-11-07 02:12:58 START 20261107_0212 port COM9, pad 30.5 dB, F145000
+2026-11-07 02:13:01 MODE USB -> OK; o0 -> OK; F -> OK
+2026-11-07 02:13:01 VSG SignalHound,VSG60,23041470,6; modulation off
+2026-11-07 02:13:08 cycle 1: offset -1573.5 Hz, spectrum normal (tone -37.0 dBFS at -90 dBm board)
+2026-11-07 02:24:49 cycle 1 done: iq 349796 lost 18201 resync 1888
+2026-11-07 02:32:14 cycle 2: offset -1576.5 Hz, spectrum normal (tone -36.9 dBFS at -90 dBm board)
+2026-11-07 02:44:32 cycle 2 done: iq 1062693 lost 19660 resync 2800
+2026-11-07 02:51:59 cycle 3: offset -1579.6 Hz, spectrum normal (tone -37.4 dBFS at -90 dBm board)
+2026-11-07 03:03:42 cycle 3 done: iq 1753839 lost 19661 resync 3712
+2026-11-07 03:11:13 cycle 4: offset -1585.7 Hz, spectrum normal (tone -37.0 dBFS at -90 dBm board)
+2026-11-07 03:22:49 cycle 4 done: iq 2447024 lost 19662 resync 4624
+2026-11-07 03:30:14 cycle 5: offset -1585.7 Hz, spectrum normal (tone -37.0 dBFS at -90 dBm board)
+2026-11-07 03:41:55 cycle 5 done: iq 3135656 lost 19663 resync 5536
+2026-11-07 03:49:21 cycle 6: offset -1588.7 Hz, spectrum normal (tone -36.9 dBFS at -90 dBm board)
+2026-11-07 04:00:56 cycle 6 done: iq 3825047 lost 19663 resync 5536
+2026-11-07 04:08:23 cycle 7: offset -1594.8 Hz, spectrum normal (tone -37.4 dBFS at -90 dBm board)
+2026-11-07 04:19:55 cycle 7 done: iq 4512137 lost 19664 resync 6448
+2026-11-07 04:27:20 cycle 8: offset -1597.9 Hz, spectrum normal (tone -37.7 dBFS at -90 dBm board)
+2026-11-07 04:38:50 cycle 8 done: iq 5196942 lost 19664 resync 6448
+2026-11-07 04:46:16 cycle 9: offset -1597.9 Hz, spectrum normal (tone -37.0 dBFS at -90 dBm board)
+2026-11-07 04:57:49 cycle 9 done: iq 5884311 lost 19666 resync 8272
+2026-11-07 05:05:15 cycle 10: offset -1601.0 Hz, spectrum normal (tone -36.9 dBFS at -90 dBm board)
+2026-11-07 05:16:47 cycle 10 done: iq 6569463 lost 19666 resync 8272
+2026-11-07 05:24:13 cycle 11: offset -1604.0 Hz, spectrum normal (tone -36.9 dBFS at -90 dBm board)
+2026-11-07 05:35:41 cycle 11 done: iq 7253842 lost 19666 resync 8272
+2026-11-07 05:43:07 cycle 12: offset -1604.0 Hz, spectrum normal (tone -37.0 dBFS at -90 dBm board)
+2026-11-07 05:54:38 cycle 12 done: iq 7939525 lost 19666 resync 8272
+2026-11-07 06:02:04 cycle 13: offset -1607.1 Hz, spectrum normal (tone -36.9 dBFS at -90 dBm board)
+2026-11-07 06:13:32 cycle 13 done: iq 8623458 lost 19667 resync 9184
+2026-11-07 06:20:58 cycle 14: offset -1610.1 Hz, spectrum normal (tone -37.7 dBFS at -90 dBm board)
+2026-11-07 06:32:29 cycle 14 done: iq 9308628 lost 19669 resync 11008
+2026-11-07 06:39:54 cycle 15: offset -1610.1 Hz, spectrum normal (tone -37.1 dBFS at -90 dBm board)
+2026-11-07 06:51:28 cycle 15 done: iq 9995123 lost 19669 resync 11008
+2026-11-07 06:58:54 cycle 16: offset -1613.2 Hz, spectrum normal (tone -37.1 dBFS at -90 dBm board)
+2026-11-07 07:10:23 cycle 16 done: iq 10679203 lost 19669 resync 11008
+2026-11-07 07:17:48 cycle 17: offset -1610.1 Hz, spectrum normal (tone -37.4 dBFS at -90 dBm board)
+2026-11-07 07:29:19 cycle 17 done: iq 11364108 lost 19672 resync 13744
+2026-11-07 07:36:45 cycle 18: offset -1622.3 Hz, spectrum normal (tone -37.5 dBFS at -90 dBm board)
+2026-11-07 07:48:20 cycle 18 done: iq 12051879 lost 19676 resync 17456
+2026-11-07 07:55:46 cycle 19: offset -1619.3 Hz, spectrum normal (tone -37.3 dBFS at -90 dBm board)
+2026-11-07 08:07:15 cycle 19 done: iq 12736580 lost 19678 resync 19280
+2026-11-07 08:14:40 cycle 20: offset -1616.2 Hz, spectrum normal (tone -37.0 dBFS at -90 dBm board)
+2026-11-07 08:26:09 cycle 20 done: iq 13420642 lost 19678 resync 19280
+2026-11-07 08:33:34 cycle 21: offset -1616.2 Hz, spectrum normal (tone -36.9 dBFS at -90 dBm board)
+2026-11-07 08:45:03 cycle 21 done: iq 14104642 lost 19678 resync 19280
+2026-11-07 08:52:28 cycle 22: offset -1616.2 Hz, spectrum normal (tone -36.9 dBFS at -90 dBm board)
+2026-11-07 09:03:57 cycle 22 done: iq 14788495 lost 19678 resync 19280
+2026-11-07 09:11:22 cycle 23: offset -1619.3 Hz, spectrum normal (tone -37.3 dBFS at -90 dBm board)
+2026-11-07 09:22:50 cycle 23 done: iq 15472335 lost 19679 resync 20192
+2026-11-07 09:30:16 cycle 24: offset -1613.2 Hz, spectrum normal (tone -37.9 dBFS at -90 dBm board)
+2026-11-07 09:41:45 cycle 24 done: iq 16156430 lost 19682 resync 22928
+2026-11-07 09:49:10 cycle 25: offset -1597.9 Hz, spectrum normal (tone -36.9 dBFS at -90 dBm board)
+2026-11-07 10:00:39 cycle 25 done: iq 16840530 lost 19682 resync 22928
+2026-11-07 10:08:04 cycle 26: offset -1576.5 Hz, spectrum normal (tone -36.9 dBFS at -90 dBm board)
+2026-11-07 10:19:44 cycle 26 done: iq 17527728 lost 19683 resync 23904
+2026-11-07 10:27:09 cycle 27: offset -1533.8 Hz, spectrum normal (tone -37.6 dBFS at -90 dBm board)
+2026-11-07 10:38:48 cycle 27 done: iq 18219051 lost 19683 resync 23904
+2026-11-07 10:46:13 cycle 28: offset -1518.6 Hz, spectrum normal (tone -36.9 dBFS at -90 dBm board)
+2026-11-07 10:57:41 cycle 28 done: iq 18903020 lost 19683 resync 23904
+2026-11-07 11:05:06 cycle 29: offset -1488.0 Hz, spectrum normal (tone -37.0 dBFS at -90 dBm board)
+2026-11-07 11:16:35 cycle 29 done: iq 19586983 lost 19683 resync 23904
+2026-11-07 11:24:01 cycle 30: offset -1475.8 Hz, spectrum normal (tone -37.0 dBFS at -90 dBm board)
+2026-11-07 11:35:29 cycle 30 done: iq 20270761 lost 19684 resync 24816
+2026-11-07 11:42:54 cycle 31: offset -1466.7 Hz, spectrum normal (tone -37.2 dBFS at -90 dBm board)
+2026-11-07 11:54:22 cycle 31 done: iq 20954499 lost 19684 resync 24816
+2026-11-07 12:01:47 cycle 32: offset -1463.6 Hz, spectrum normal (tone -37.0 dBFS at -90 dBm board)
+2026-11-07 12:13:15 cycle 32 done: iq 21638254 lost 19684 resync 24816
+2026-11-07 12:20:41 cycle 33: offset -1466.7 Hz, spectrum normal (tone -36.9 dBFS at -90 dBm board)
+2026-11-07 12:32:09 cycle 33 done: iq 22321933 lost 19684 resync 24816
+2026-11-07 12:39:34 cycle 34: offset -1472.8 Hz, spectrum normal (tone -37.0 dBFS at -90 dBm board)
+2026-11-07 12:51:02 cycle 34 done: iq 23005758 lost 19684 resync 24816
+2026-11-07 12:58:27 cycle 35: offset -1478.9 Hz, spectrum normal (tone -36.9 dBFS at -90 dBm board)
+2026-11-07 13:09:56 cycle 35 done: iq 23689759 lost 19686 resync 26640
+2026-11-07 13:17:21 cycle 36: offset -1491.1 Hz, spectrum normal (tone -37.1 dBFS at -90 dBm board)
+2026-11-07 13:28:49 cycle 36 done: iq 24373361 lost 19686 resync 26640
+2026-11-07 13:36:14 cycle 37: offset -1503.3 Hz, spectrum normal (tone -37.0 dBFS at -90 dBm board)
+2026-11-07 13:47:43 cycle 37 done: iq 25057118 lost 19686 resync 26640
+2026-11-07 13:55:08 cycle 38: offset -1509.4 Hz, spectrum normal (tone -37.4 dBFS at -90 dBm board)
+2026-11-07 14:06:36 cycle 38 done: iq 25740870 lost 19686 resync 26640
+2026-11-07 14:14:02 cycle 39: offset -1509.4 Hz, spectrum normal (tone -36.9 dBFS at -90 dBm board)
+2026-11-07 14:25:30 cycle 39 done: iq 26424512 lost 19687 resync 27552
+2026-11-07 14:32:55 cycle 40: offset -1512.5 Hz, spectrum normal (tone -36.9 dBFS at -90 dBm board)
+2026-11-07 14:44:23 cycle 40 done: iq 27108033 lost 19687 resync 27552
+2026-11-07 14:51:48 cycle 41: offset -1515.5 Hz, spectrum normal (tone -37.3 dBFS at -90 dBm board)
+2026-11-07 15:03:17 cycle 41 done: iq 27791960 lost 19688 resync 28464
+2026-11-07 15:10:42 cycle 42: offset -1518.6 Hz, spectrum normal (tone -37.5 dBFS at -90 dBm board)
+2026-11-07 15:22:10 cycle 42 done: iq 28475596 lost 19691 resync 31200
+2026-11-07 15:29:35 cycle 43: offset -1521.6 Hz, spectrum normal (tone -37.9 dBFS at -90 dBm board)
+2026-11-07 15:41:03 cycle 43 done: iq 29159436 lost 19691 resync 31200
+2026-11-07 15:48:28 cycle 44: offset -1524.7 Hz, spectrum normal (tone -37.6 dBFS at -90 dBm board)
+2026-11-07 15:59:57 cycle 44 done: iq 29843468 lost 19692 resync 32112
+2026-11-07 16:07:22 cycle 45: offset -1530.8 Hz, spectrum normal (tone -37.0 dBFS at -90 dBm board)
+2026-11-07 16:18:50 cycle 45 done: iq 30527098 lost 19692 resync 32112
+2026-11-07 16:26:15 cycle 46: offset -1536.9 Hz, spectrum normal (tone -37.6 dBFS at -90 dBm board)
+2026-11-07 16:37:43 cycle 46 done: iq 31210707 lost 19692 resync 32112
+2026-11-07 16:45:09 cycle 47: offset -1539.9 Hz, spectrum normal (tone -37.8 dBFS at -90 dBm board)
+2026-11-07 16:56:37 cycle 47 done: iq 31894260 lost 19692 resync 32112
+2026-11-07 17:04:02 cycle 48: offset -1543.0 Hz, spectrum normal (tone -38.0 dBFS at -90 dBm board)
+2026-11-07 17:15:33 cycle 48 done: iq 32578486 lost 19693 resync 33024
+2026-11-07 17:22:58 cycle 49: offset -1549.1 Hz, spectrum normal (tone -37.2 dBFS at -90 dBm board)
+2026-11-07 17:34:30 cycle 49 done: iq 33263324 lost 19693 resync 33024
+2026-11-07 17:41:55 cycle 50: offset -1552.1 Hz, spectrum normal (tone -37.3 dBFS at -90 dBm board)
+2026-11-07 17:53:24 cycle 50 done: iq 33947336 lost 19693 resync 33024
+2026-11-07 18:00:49 cycle 51: offset -1555.2 Hz, spectrum normal (tone -37.0 dBFS at -90 dBm board)
+2026-11-07 18:12:18 cycle 51 done: iq 34631375 lost 19693 resync 33024
+2026-11-07 18:19:43 cycle 52: offset -1561.3 Hz, spectrum normal (tone -36.9 dBFS at -90 dBm board)
+2026-11-07 18:31:12 cycle 52 done: iq 35315252 lost 19693 resync 33024
+2026-11-07 18:38:37 cycle 53: offset -1564.3 Hz, spectrum normal (tone -37.9 dBFS at -90 dBm board)
+2026-11-07 18:50:06 cycle 53 done: iq 35999128 lost 19693 resync 33024
+2026-11-07 18:57:31 cycle 54: offset -1570.4 Hz, spectrum normal (tone -36.8 dBFS at -90 dBm board)
+2026-11-07 19:09:00 cycle 54 done: iq 36683218 lost 19693 resync 33024
+2026-11-07 19:16:25 cycle 55: offset -1573.5 Hz, spectrum normal (tone -37.0 dBFS at -90 dBm board)
+2026-11-07 19:27:54 cycle 55 done: iq 37367505 lost 19693 resync 33024
+2026-11-07 19:35:20 cycle 56: offset -1579.6 Hz, spectrum normal (tone -37.3 dBFS at -90 dBm board)
+2026-11-07 19:46:48 cycle 56 done: iq 38051290 lost 19694 resync 33936
+2026-11-07 19:54:13 cycle 57: offset -1582.6 Hz, spectrum normal (tone -37.2 dBFS at -90 dBm board)
+2026-11-07 20:05:43 cycle 57 done: iq 38735497 lost 19694 resync 33936
+2026-11-07 20:13:08 cycle 58: offset -1582.6 Hz, spectrum normal (tone -36.9 dBFS at -90 dBm board)
+2026-11-07 20:24:37 cycle 58 done: iq 39419468 lost 19694 resync 33936
+2026-11-07 20:32:02 cycle 59: offset -1588.7 Hz, spectrum normal (tone -36.9 dBFS at -90 dBm board)
+2026-11-07 20:43:31 cycle 59 done: iq 40103524 lost 19694 resync 33936
+2026-11-07 20:50:56 cycle 60: offset -1591.8 Hz, spectrum normal (tone -37.0 dBFS at -90 dBm board)
+2026-11-07 21:02:25 cycle 60 done: iq 40787551 lost 19694 resync 33936
+2026-11-07 21:09:50 cycle 61: offset -1594.8 Hz, spectrum normal (tone -37.9 dBFS at -90 dBm board)
+2026-11-07 21:21:19 cycle 61 done: iq 41471683 lost 19695 resync 34848
+2026-11-07 21:28:44 cycle 62: offset -1594.8 Hz, spectrum normal (tone -37.8 dBFS at -90 dBm board)
+2026-11-07 21:40:13 cycle 62 done: iq 42155626 lost 19696 resync 35760
+2026-11-07 21:47:38 cycle 63: offset -1601.0 Hz, spectrum normal (tone -37.5 dBFS at -90 dBm board)
+2026-11-07 21:59:08 cycle 63 done: iq 42839664 lost 19696 resync 35760
+2026-11-07 22:06:33 cycle 64: offset -1604.0 Hz, spectrum normal (tone -37.0 dBFS at -90 dBm board)
+2026-11-07 22:18:02 cycle 64 done: iq 43524040 lost 19696 resync 35760
+2026-11-07 22:25:28 cycle 65: offset -1604.0 Hz, spectrum normal (tone -37.5 dBFS at -90 dBm board)
+2026-11-07 22:37:25 cycle 65 done: iq 44230246 lost 19936 resync 36672
+2026-11-07 22:44:51 cycle 66: offset -1604.0 Hz, spectrum normal (tone -36.9 dBFS at -90 dBm board)
+2026-11-07 22:56:25 cycle 66 done: iq 44917389 lost 20287 resync 39408
+2026-11-07 23:03:50 cycle 67: offset -1607.1 Hz, spectrum normal (tone -37.5 dBFS at -90 dBm board)
+2026-11-07 23:15:24 cycle 67 done: iq 45605067 lost 20287 resync 39408
+2026-11-07 23:22:49 cycle 68: offset -1607.1 Hz, spectrum normal (tone -37.3 dBFS at -90 dBm board)
+2026-11-07 23:34:19 cycle 68 done: iq 46289237 lost 20287 resync 39408
+2026-11-07 23:41:44 cycle 69: offset -1610.1 Hz, spectrum normal (tone -37.9 dBFS at -90 dBm board)
+2026-11-07 23:53:13 cycle 69 done: iq 46973519 lost 20287 resync 39408
+2026-11-08 00:00:38 cycle 70: offset -1616.2 Hz, spectrum normal (tone -37.7 dBFS at -90 dBm board)
+2026-11-08 00:12:08 cycle 70 done: iq 47657563 lost 20288 resync 40320
+2026-11-08 00:19:33 cycle 71: offset -1619.3 Hz, spectrum normal (tone -36.9 dBFS at -90 dBm board)
+2026-11-08 00:31:02 cycle 71 done: iq 48341679 lost 20288 resync 40320
+2026-11-08 00:38:27 cycle 72: offset -1619.3 Hz, spectrum normal (tone -37.2 dBFS at -90 dBm board)
+2026-11-08 00:49:56 cycle 72 done: iq 49025655 lost 20289 resync 41296
+2026-11-08 00:57:21 cycle 73: offset -1622.3 Hz, spectrum normal (tone -36.9 dBFS at -90 dBm board)
+2026-11-08 01:08:51 cycle 73 done: iq 49709882 lost 20289 resync 41296
+2026-11-08 01:16:16 cycle 74: offset -1628.4 Hz, spectrum normal (tone -37.8 dBFS at -90 dBm board)
+2026-11-08 01:27:45 cycle 74 done: iq 50393828 lost 20290 resync 42208
+2026-11-08 01:35:10 cycle 75: offset -1625.4 Hz, spectrum normal (tone -36.9 dBFS at -90 dBm board)
+2026-11-08 01:46:39 cycle 75 done: iq 51077671 lost 20290 resync 42208
+2026-11-08 01:54:04 cycle 76: offset -1628.4 Hz, spectrum normal (tone -37.4 dBFS at -90 dBm board)
+2026-11-08 02:05:33 cycle 76 done: iq 51761677 lost 20290 resync 42208
+2026-11-08 02:12:58 cycle 77: offset -1631.5 Hz, spectrum normal (tone -37.0 dBFS at -90 dBm board)
+2026-11-08 02:24:27 cycle 77 done: iq 52445642 lost 20291 resync 43120
+2026-11-08 02:31:52 cycle 78: offset -1631.5 Hz, spectrum normal (tone -37.0 dBFS at -90 dBm board)
+2026-11-08 02:43:21 cycle 78 done: iq 53129697 lost 20292 resync 44032
+2026-11-08 02:50:47 cycle 79: offset -1634.5 Hz, spectrum normal (tone -37.0 dBFS at -90 dBm board)
+2026-11-08 03:02:16 cycle 79 done: iq 53813762 lost 20292 resync 44032
+2026-11-08 03:09:41 cycle 80: offset -1637.6 Hz, spectrum normal (tone -37.4 dBFS at -90 dBm board)
+2026-11-08 03:21:10 cycle 80 done: iq 54497825 lost 20292 resync 44032
+2026-11-08 03:28:35 cycle 81: offset -1643.7 Hz, spectrum normal (tone -36.9 dBFS at -90 dBm board)
+2026-11-08 03:40:04 cycle 81 done: iq 55181874 lost 20292 resync 44032
+2026-11-08 03:47:29 cycle 82: offset -1649.8 Hz, spectrum normal (tone -37.2 dBFS at -90 dBm board)
+2026-11-08 03:58:58 cycle 82 done: iq 55865825 lost 20292 resync 44032
+2026-11-08 04:06:23 cycle 83: offset -1662.0 Hz, spectrum normal (tone -37.9 dBFS at -90 dBm board)
+2026-11-08 04:17:52 cycle 83 done: iq 56549830 lost 20292 resync 44032
+2026-11-08 04:25:17 cycle 84: offset -1674.2 Hz, spectrum normal (tone -36.8 dBFS at -90 dBm board)
+2026-11-08 04:36:46 cycle 84 done: iq 57233810 lost 20292 resync 44032
+2026-11-08 04:44:11 cycle 85: offset -1680.3 Hz, spectrum normal (tone -37.1 dBFS at -90 dBm board)
+2026-11-08 04:55:40 cycle 85 done: iq 57917867 lost 20292 resync 44032
+2026-11-08 05:03:06 cycle 86: offset -1689.5 Hz, spectrum normal (tone -37.8 dBFS at -90 dBm board)
+2026-11-08 05:14:34 cycle 86 done: iq 58601772 lost 20293 resync 44944
+2026-11-08 05:22:00 cycle 87: offset -1695.6 Hz, spectrum normal (tone -37.1 dBFS at -90 dBm board)
+2026-11-08 05:33:29 cycle 87 done: iq 59285800 lost 20294 resync 45856
+2026-11-08 05:40:54 cycle 88: offset -1701.7 Hz, spectrum normal (tone -37.4 dBFS at -90 dBm board)
+2026-11-08 05:52:23 cycle 88 done: iq 59969685 lost 20294 resync 45856
+2026-11-08 05:59:48 cycle 89: offset -1704.7 Hz, spectrum normal (tone -37.2 dBFS at -90 dBm board)
+2026-11-08 06:11:17 cycle 89 done: iq 60654009 lost 20294 resync 45856
+2026-11-08 06:18:42 cycle 90: offset -1707.8 Hz, spectrum normal (tone -37.0 dBFS at -90 dBm board)
+2026-11-08 06:30:11 cycle 90 done: iq 61337893 lost 20294 resync 45856
+2026-11-08 06:37:36 cycle 91: offset -1713.9 Hz, spectrum normal (tone -37.8 dBFS at -90 dBm board)
+2026-11-08 06:49:05 cycle 91 done: iq 62022086 lost 20294 resync 45856
+2026-11-08 06:56:31 cycle 92: offset -1713.9 Hz, spectrum normal (tone -37.5 dBFS at -90 dBm board)
+2026-11-08 07:07:59 cycle 92 done: iq 62706063 lost 20294 resync 45856
+2026-11-08 07:15:25 cycle 93: offset -1720.0 Hz, spectrum normal (tone -37.2 dBFS at -90 dBm board)
+2026-11-08 07:26:54 cycle 93 done: iq 63390171 lost 20294 resync 45856
+2026-11-08 07:34:19 cycle 94: offset -1720.0 Hz, spectrum normal (tone -37.8 dBFS at -90 dBm board)
+2026-11-08 07:45:48 cycle 94 done: iq 64074187 lost 20294 resync 45856
+2026-11-08 07:53:13 cycle 95: offset -1723.0 Hz, spectrum normal (tone -37.4 dBFS at -90 dBm board)
+2026-11-08 08:04:42 cycle 95 done: iq 64758340 lost 20294 resync 45856
+2026-11-08 08:12:07 cycle 96: offset -1729.1 Hz, spectrum normal (tone -37.9 dBFS at -90 dBm board)
+2026-11-08 08:23:36 cycle 96 done: iq 65442438 lost 20294 resync 45856
+2026-11-08 08:31:01 cycle 97: offset -1729.1 Hz, spectrum normal (tone -36.8 dBFS at -90 dBm board)
+2026-11-08 08:42:31 cycle 97 done: iq 66126684 lost 20294 resync 45856
+2026-11-08 08:49:56 cycle 98: offset -1729.1 Hz, spectrum normal (tone -37.0 dBFS at -90 dBm board)
+2026-11-08 09:01:25 cycle 98 done: iq 66810996 lost 20294 resync 45856
+2026-11-08 09:08:50 cycle 99: offset -1726.1 Hz, spectrum normal (tone -36.8 dBFS at -90 dBm board)
+2026-11-08 09:20:19 cycle 99 done: iq 67495057 lost 20294 resync 45856
+2026-11-08 09:27:44 cycle 100: offset -1732.2 Hz, spectrum normal (tone -36.8 dBFS at -90 dBm board)
+2026-11-08 09:39:13 cycle 100 done: iq 68179035 lost 20294 resync 45856
+2026-11-08 09:46:39 cycle 101: offset -1716.9 Hz, spectrum normal (tone -36.8 dBFS at -90 dBm board)
+2026-11-08 09:58:08 cycle 101 done: iq 68863026 lost 20294 resync 45856
+2026-11-08 10:05:33 cycle 102: offset -1680.3 Hz, spectrum normal (tone -36.9 dBFS at -90 dBm board)
+2026-11-08 10:17:02 cycle 102 done: iq 69547063 lost 20294 resync 45856
+2026-11-08 10:24:27 cycle 103: offset -1643.7 Hz, spectrum normal (tone -37.7 dBFS at -90 dBm board)
+2026-11-08 10:35:56 cycle 103 done: iq 70231036 lost 20295 resync 46832
+2026-11-08 10:43:21 cycle 104: offset -1601.0 Hz, spectrum normal (tone -37.0 dBFS at -90 dBm board)
+2026-11-08 10:54:50 cycle 104 done: iq 70915072 lost 20296 resync 47744
+2026-11-08 11:02:15 cycle 105: offset -1573.5 Hz, spectrum normal (tone -38.0 dBFS at -90 dBm board)
+2026-11-08 11:13:44 cycle 105 done: iq 71599041 lost 20296 resync 47744
+2026-11-08 11:21:09 cycle 106: offset -1546.0 Hz, spectrum normal (tone -37.1 dBFS at -90 dBm board)
+2026-11-08 11:32:38 cycle 106 done: iq 72282907 lost 20299 resync 50480
+2026-11-08 11:40:03 cycle 107: offset -1539.9 Hz, spectrum normal (tone -37.0 dBFS at -90 dBm board)
+2026-11-08 11:51:32 cycle 107 done: iq 72967110 lost 20299 resync 50480
+2026-11-08 11:58:58 cycle 108: offset -1527.7 Hz, spectrum normal (tone -37.6 dBFS at -90 dBm board)
+2026-11-08 12:10:26 cycle 108 done: iq 73651034 lost 20299 resync 50480
+2026-11-08 12:17:51 cycle 109: offset -1512.5 Hz, spectrum normal (tone -36.9 dBFS at -90 dBm board)
+2026-11-08 12:29:21 cycle 109 done: iq 74335021 lost 20299 resync 50480
+2026-11-08 12:36:46 cycle 110: offset -1515.5 Hz, spectrum normal (tone -37.2 dBFS at -90 dBm board)
+2026-11-08 12:48:14 cycle 110 done: iq 75018852 lost 20299 resync 50480
+2026-11-08 12:55:40 cycle 111: offset -1527.7 Hz, spectrum normal (tone -36.9 dBFS at -90 dBm board)
+2026-11-08 13:07:08 cycle 111 done: iq 75702980 lost 20299 resync 50480
+2026-11-08 13:14:34 cycle 112: offset -1546.0 Hz, spectrum normal (tone -37.6 dBFS at -90 dBm board)
+2026-11-08 13:26:03 cycle 112 done: iq 76387086 lost 20299 resync 50480
+2026-11-08 13:33:28 cycle 113: offset -1533.8 Hz, spectrum normal (tone -37.6 dBFS at -90 dBm board)
+2026-11-08 13:44:57 cycle 113 done: iq 77071184 lost 20299 resync 50480
+2026-11-08 13:52:22 cycle 114: offset -1567.4 Hz, spectrum normal (tone -37.8 dBFS at -90 dBm board)
+2026-11-08 14:03:51 cycle 114 done: iq 77755283 lost 20299 resync 50480
+2026-11-08 14:11:17 cycle 115: offset -1567.4 Hz, spectrum normal (tone -36.9 dBFS at -90 dBm board)
+2026-11-08 14:22:46 cycle 115 done: iq 78439412 lost 20300 resync 51392
+2026-11-08 14:30:11 cycle 116: offset -1567.4 Hz, spectrum normal (tone -36.9 dBFS at -90 dBm board)
+2026-11-08 14:41:40 cycle 116 done: iq 79123496 lost 20300 resync 51392
+2026-11-08 14:49:05 cycle 117: offset -1573.5 Hz, spectrum normal (tone -36.9 dBFS at -90 dBm board)
+2026-11-08 15:00:34 cycle 117 done: iq 79807587 lost 20300 resync 51392
+2026-11-08 15:08:00 cycle 118: offset -1576.5 Hz, spectrum normal (tone -37.1 dBFS at -90 dBm board)
+2026-11-08 15:19:29 cycle 118 done: iq 80491685 lost 20301 resync 52304
+2026-11-08 15:26:54 cycle 119: offset -1582.6 Hz, spectrum normal (tone -36.9 dBFS at -90 dBm board)
+2026-11-08 15:38:23 cycle 119 done: iq 81175820 lost 20301 resync 52304
+2026-11-08 15:45:48 cycle 120: offset -1585.7 Hz, spectrum normal (tone -37.7 dBFS at -90 dBm board)
+2026-11-08 15:57:18 cycle 120 done: iq 81860079 lost 20301 resync 52304
+2026-11-08 16:04:43 cycle 121: offset -1588.7 Hz, spectrum normal (tone -37.0 dBFS at -90 dBm board)
+2026-11-08 16:16:12 cycle 121 done: iq 82543976 lost 20302 resync 53216
+2026-11-08 16:23:37 cycle 122: offset -1582.6 Hz, spectrum normal (tone -37.1 dBFS at -90 dBm board)
+2026-11-08 16:35:06 cycle 122 done: iq 83228234 lost 20302 resync 53216
+2026-11-08 16:42:31 cycle 123: offset -1582.6 Hz, spectrum normal (tone -36.9 dBFS at -90 dBm board)
+2026-11-08 16:54:00 cycle 123 done: iq 83912165 lost 20304 resync 55040
+2026-11-08 17:01:25 cycle 124: offset -1585.7 Hz, spectrum normal (tone -37.0 dBFS at -90 dBm board)
+2026-11-08 17:12:55 cycle 124 done: iq 84596291 lost 20304 resync 55040
+2026-11-08 17:20:20 cycle 125: offset -1582.6 Hz, spectrum normal (tone -37.0 dBFS at -90 dBm board)
+2026-11-08 17:31:48 cycle 125 done: iq 85280131 lost 20304 resync 55040
+2026-11-08 17:39:14 cycle 126: offset -1591.8 Hz, spectrum normal (tone -37.3 dBFS at -90 dBm board)
+2026-11-08 17:50:43 cycle 126 done: iq 85964273 lost 20307 resync 57776
+2026-11-08 17:50:43 END cycles 126
