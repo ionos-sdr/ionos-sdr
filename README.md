@@ -46,7 +46,7 @@ The I/Q stream is the mode that has had the most measurement time: block‑bound
 | Feature | State |
 |---|---|
 | Narrowband 16‑bit I/Q streaming over WiFi (SpyServer protocol) | validated, ~712 kB/s sustained, glitch‑free |
-| I/Q over USB (mini: TinyUSB CDC on USB‑OTG) | 200 ksps int16, 40 h soak: 0 device drops, 0.65 ppm host loss |
+| I/Q over USB CDC | ~250 ksps int16 |
 | APRS AX.25/AFSK‑1200 TX (NCO) | validated on‑air, decoded on APRS‑IS |
 | NBFM voice TX, CW TX (ramped envelope) | validated |
 | WSPR encoder | bit‑exact vs. independent reference; on‑air WSPR TX (VCTCXO pulling) in progress |
@@ -55,24 +55,8 @@ The I/Q stream is the mode that has had the most measurement time: block‑bound
 | Multi‑point frequency calibration | validated |
 | GPS time + locator | working |
 | Open KiCad hardware (6‑layer) | in progress — prototype runs on BRD4265B + custom carrier |
-| Native USB protocol spec + SoapySDR driver (SoapyIonos) | working on Windows (GQRX, SoapySDRUtil, Python), branch `host/soapy-ionos` |
-| DSP plugin API | planned |
+| Native streaming protocol spec, SoapySDR driver, DSP plugin API | planned |
 | SatNOGS ground‑station client | planned |
-
-### Measurement log
-
-**Time on test so far: ≈ 86 hours** (ionos-sdr-mini rev-B3, 2–9 Nov 2026): ≈ 54 h RF with a calibrated signal generator, ≈ 32 h USB-only soaks.
-Full report: [`docs/ionos-mini-measurements-2026-11.md`](docs/ionos-mini-measurements-2026-11.md) ([magyarul](docs/hu/ionos-mini-meresi-jelentes-2026-11.md)) · raw data and scripts: [`measurements/ionos-mini-2026-11/`](measurements/ionos-mini-2026-11/).
-
-| ionos-sdr-mini (BRD4265B, 434 MHz match, measured at 145 MHz) | |
-|---|---|
-| Gain / clipping | dBFS = P_in + 53.68 dB (σ 0.10 dB over 40 h), clip ≈ −52 dBm |
-| NF / MDS | ≈ 8.6 dB / ≈ −128 dBm (10 dB SNR, 500 Hz) |
-| 200 ksps bandwidth / image rejection | 88 kHz at −3 dB (PHY channel filter) / ≥ 42 dB |
-| Frequency | crystal +4.2 ppm raw (firmware correction currently over-corrects to −11 ppm), 1.9 ppm p‑p diurnal |
-| Tuning range with the 145 MHz PHY | 128.34 – 198.07 MHz; CW NF 7.9 – 11.9 dB across it |
-| 2‑FSK 5 kbps, BER 10⁻² | median −110 dBm (simple discriminator reference) |
-| Known artefact | ±6.25 kHz sidebands (−74 dBc at 5 kHz, −43 dBc at 37 kHz tone offset) from the I/Q path — open |
 
 ## Measured facts you need before touching the code
 

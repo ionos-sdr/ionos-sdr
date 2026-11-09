@@ -1,7 +1,0 @@
-2026-11-09 09:01:50 SoapyIonos: {'board': 'BRD4265B', 'chip': 'EFR32FG23', 'decim_list': '2,4,8,16,24,32,48,64', 'freq_max_hz': '440025000', 'freq_min_hz': '430000000', 'fs_in_hz': '400000', 'fw_esp': '623697e-dirty', 'fw_fg23': 'n/a', 'gain_shift_max': '0', 'hw': 'rev-b3-2l', 'ionos': '1', 'mode': 'USB', 'port': 'COM9', 'product': 'ionos-sdr-mini', 'protocol': 'v2', 'rssi': '1', 'spectrum': '1', 'tx': '0'}
-2026-11-09 09:01:50 RECHECK start
-2026-11-09 09:01:51 B done (noise spectra, VSG off)
-2026-11-09 09:02:54 C done (side lines)
-2026-11-09 09:03:02 arb load: True 408800 minta @ 100000 Hz
-2026-11-09 09:21:48 A done (FSK)
-2026-11-09 09:21:52 RECHECK end; sensors {'lost_blocks': '0', 'gap_events': '0', 'truncated_blocks': '0', 'resyncs': '0', 'stream_restarts': '46', 'host_overflows': '0', 'blocks': '275244'}
