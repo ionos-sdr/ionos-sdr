@@ -39,6 +39,7 @@ static float    s_cos[NMAX / 2], s_sin[NMAX / 2];
 
 /* sample collector: NMAX samples, filled block by block */
 static int16_t  s_buf[NMAX * 2];      /* Q,I pairs                        */
+#define IQF_MIN_PERIOD_MS 20u   /* FFT rate cap: <= 50/s whatever the sample rate */
 static uint16_t s_fill = 0;
 
 static uint16_t s_n     = 1024;       /* current FFT length (256/512/1024) */
@@ -262,6 +263,16 @@ static void process(void)
 void iq_fft_push_block(const uint8_t *payload)
 {
     if (!s_on || !payload) return;
+
+    /* At most one FFT per IQF_MIN_PERIOD_MS (2026-11-04). The FFT rate used
+     * to follow the sample rate: ~49/s at 50 ksps (which the baseline
+     * time constant assumes, see "49.0f" in process()), but ~195/s at
+     * 200 ksps, which alone took the ESP main loop out (SPI queue 24/24,
+     * 611 of 781 blocks/s). A new collection starts only when the period
+     * has passed; the samples inside one FFT stay contiguous. */
+    static uint32_t s_t_last = 0;
+    if (s_fill == 0 && (uint32_t)(millis() - s_t_last) < IQF_MIN_PERIOD_MS) return;
+    if (s_fill == 0) s_t_last = millis();
 
     /* Collection: s_n samples are needed, 256 per block. */
     if (s_fill + BLKSAMP <= s_n) {

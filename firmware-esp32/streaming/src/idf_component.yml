@@ -1,0 +1,12 @@
+## SPDX-License-Identifier: MIT
+## ESP-IDF component manager manifest of the main component ([env:ionos_mini]).
+## 2026-11-04: the native USB moved from the USB-Serial/JTAG (HWCDC, ~776 kB/s
+## ceiling) to the USB-OTG peripheral with TinyUSB CDC-ACM, for the 200 ksps
+## stream (812 kB/s). See src/tusb_cdc.h. esp_tinyusb is vendored with one
+## renamed Kconfig symbol, see third_party/esp_tinyusb/README.ionos.md.
+dependencies:
+  espressif/esp_tinyusb:
+    version: "*"          # the vendored copy is 1.7.6~2
+    override_path: "../third_party/esp_tinyusb"
+    rules:
+      - if: "target in [esp32s2, esp32s3]"

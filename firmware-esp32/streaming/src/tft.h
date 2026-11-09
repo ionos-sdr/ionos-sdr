@@ -33,6 +33,10 @@ typedef struct {
 
 void tft_init(void);
 void tft_show(const tft_stat_t *s);      /* header, every 2 s */
+/* Current UI page and demod mode in the header (drawn at once, so a button
+ * press has visible feedback - the UI pages themselves live on the OLED,
+ * which the ionos-sdr-mini does not have). */
+void tft_set_page(const char *page, const char *mode);
 bool tft_ok(void);
 
 /* One scan row into the waterfall. Call from the same place as
@@ -52,6 +56,31 @@ void tft_set_autoscale(bool on);
 
 /* Number of dropped rows - diagnostics */
 uint32_t tft_dropped(void);
+/* Bring-up aid (console 'T<vsp>' / 'Tx'): freeze the waterfall, paint test
+ * bands (red header area, green scroll area, white ticks every 20 px) and
+ * set the scroll start address - shows how the panel maps scroll vs. MADCTL. */
+void tft_test(int vsp);
+void tft_test_end(void);
+
+/* ---- overlay drawing for the menu (menu.cpp) ----
+ * tft_overlay(true) freezes the waterfall and clears the scroll area (y 50..319),
+ * the header stays; tft_overlay(false) clears it again and the waterfall resumes.
+ * Colours are RGB565. Text uses the built-in 6x8 font scaled by 'size'. */
+#define TFTC_BLACK    0x0000
+#define TFTC_WHITE    0xFFFF
+#define TFTC_CYAN     0x07FF
+#define TFTC_YELLOW   0xFFE0
+#define TFTC_GREEN    0x07E0
+#define TFTC_RED      0xF800
+#define TFTC_DARKGREY 0x7BEF
+#define TFTC_NAVY     0x000F
+#define TFT_W 240
+#define TFT_H 320
+#define TFT_HDR_H 50
+void tft_overlay(bool on);
+bool tft_overlay_on(void);
+void tft_fill(int x, int y, int w, int h, uint16_t color);
+void tft_text(int x, int y, int size, uint16_t fg, uint16_t bg, const char *s);
 
 #ifdef __cplusplus
 }

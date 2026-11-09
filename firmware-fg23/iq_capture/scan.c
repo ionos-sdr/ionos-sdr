@@ -300,6 +300,15 @@ bool scan_start(uint32_t center_khz, uint32_t span_khz, uint16_t nbin)
   if (span_khz < 100u || span_khz > 100000u) return false;
   if (center_khz < 1000u) return false;
 
+  /* 2026-11-03: reconfiguring a RUNNING scan reset s_line while the ext
+   * LDMA could still be sending it - after that no line ever left and even
+   * W0 could not revive the stream. Let the transfer in flight finish first. */
+  if (s_active) {
+    RAIL_Time_t tl = RAIL_GetTime() + 5000u;
+    while (iq_stream_ext_busy() && (int32_t)(RAIL_GetTime() - tl) < 0) {
+      iq_stream_ext_pump();
+    }
+  }
   s_center_khz = center_khz;
   s_span_khz   = span_khz;
   s_nbin       = nbin;

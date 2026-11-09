@@ -9,10 +9,16 @@
 
 #include "ui.h"
 #include <Arduino.h>
+#include "driver/gpio.h"
+#include "esp_adc/adc_oneshot.h"
+#include "menu.h"
+#include "board.h"
 
 /* ==================== CONFIG ==================== */
 
-#define UI_BTN_PIN        0           /* Heltec V3 PRG button (GPIO0) */
+#if !BRD_BTN_LADDER
+#define UI_BTN_PIN        BRD_BTN_PIN /* Heltec V3 PRG button (GPIO0) */
+#endif
 #define UI_DEBOUNCE_MS    30
 #define UI_LONG_MS        800
 #define UI_IDLE_BACK_MS   20000       /* back to STATUS after inactivity */
@@ -32,9 +38,9 @@ static const ui_entry_t UI_TABLE[UI_PAGE_COUNT] = {
   /* name         demod   ready */
   { "STATUS",     false,  true  },
   { "RF",         false,  true  },
-  { "SDR STREAM", false,  true  },
+  { "SDR",        false,  true  },   /* stream statistics (short: fits the TFT header) */
   { "SCAN",       false,  true  },   /* dithered waterfall — view */
-  { "APRS iGATE", true,   true  },
+  { "APRS",       true,   true  },   /* AFSK1200 iGate */
   { "CW",         true,   true  },
   { "WSPR",       true,   false },
   { "FT8",        true,   false },
@@ -91,6 +97,81 @@ static void ui_next(uint32_t now)
   s_demod_pinned = (UI_TABLE[p].is_demod && UI_TABLE[p].ready);
 }
 
+/* Previous page (ionos-sdr-mini LEFT / UP). Same rules as ui_next. */
+static void ui_prev(uint32_t now)
+{
+  ui_page_t p = (ui_page_t)((s_page + UI_PAGE_COUNT - 1) % UI_PAGE_COUNT);
+  ui_set_page(p, now);
+  if (UI_TABLE[p].is_demod && UI_TABLE[p].ready && s_mode != p) {
+    s_mode = p;
+    Serial0.printf("\nUI: mode -> %s\n", UI_TABLE[p].name);
+  }
+  s_hold_until_ms = 0;
+  s_demod_pinned = (UI_TABLE[p].is_demod && UI_TABLE[p].ready);
+}
+
+#if BRD_BTN_LADDER
+/* ionos-sdr-mini: two ADC1 ladders, 10 k pull-up to 3V3, buttons to GND via
+ * 0R / 2k2 / 6k8 / 22k. Thresholds at the level midpoints (mV). */
+enum { BTN_NONE = 0, BTN_BACK, BTN_OK, BTN_SPARE, BTN_UP, BTN_DOWN, BTN_LEFT, BTN_RIGHT };
+static const char *BTN_NAME[] = {"-", "BACK", "OK", "SPARE", "UP", "DOWN", "LEFT", "RIGHT"};
+static int ladder_level(int mv)
+{
+  if (mv < 300)  return 0;
+  if (mv < 970)  return 1;
+  if (mv < 1800) return 2;
+  if (mv < 2790) return 3;
+  return -1;
+}
+static int s_mv_a = 0, s_mv_b = 0;                        /* last raw readings (diag) */
+static int read_buttons(void)
+{
+  s_mv_a = analogReadMilliVolts(BRD_BTN_A_PIN);
+  s_mv_b = analogReadMilliVolts(BRD_BTN_B_PIN);
+  int a = ladder_level(s_mv_a);
+  if (a >= 0 && a <= 2) return BTN_BACK + a;              /* BACK, OK, SPARE */
+  int b = ladder_level(s_mv_b);
+  if (b >= 0) return BTN_UP + b;                          /* UP, DOWN, LEFT, RIGHT */
+  return BTN_NONE;
+}
+static int s_btn_id = BTN_NONE;
+
+/* Console 'U': print both ladders in mV and the decoded button (bring-up aid). */
+void ui_ladder_diag(void)
+{
+  int a = analogReadMilliVolts(BRD_BTN_A_PIN), b = analogReadMilliVolts(BRD_BTN_B_PIN);
+  int ra = analogRead(BRD_BTN_A_PIN), rb = analogRead(BRD_BTN_B_PIN);
+  Serial0.printf("UI: ladder A GPIO%d %d mV (raw %d) -> %s | B GPIO%d %d mV (raw %d) -> %s\n",
+                 BRD_BTN_A_PIN, a, ra, BTN_NAME[(ladder_level(a) >= 0 && ladder_level(a) <= 2) ? BTN_BACK + ladder_level(a) : BTN_NONE],
+                 BRD_BTN_B_PIN, b, rb, BTN_NAME[(ladder_level(b) >= 0) ? BTN_UP + ladder_level(b) : BTN_NONE]);
+  gpio_dump_io_configuration(stdout, BIT64(BRD_BTN_A_PIN) | BIT64(BRD_BTN_B_PIN));
+  fflush(stdout);
+  /* ADC self-test: the internal ~45 k pull-down against the external 10 k
+   * pull-up must drag the pin to ~0.6 V. If the reading stays at full scale
+   * the ADC is not sampling this pin at all. */
+  gpio_pulldown_en((gpio_num_t)BRD_BTN_A_PIN); delay(5);
+  int a_pd = analogReadMilliVolts(BRD_BTN_A_PIN), ra_pd = analogRead(BRD_BTN_A_PIN);
+  gpio_pulldown_dis((gpio_num_t)BRD_BTN_A_PIN); delay(5);
+  int a_back = analogReadMilliVolts(BRD_BTN_A_PIN);
+  /* second opinion: raw oneshot driver, own handle, ADC1 ch0/ch1 (GPIO1/2) */
+  adc_oneshot_unit_handle_t h = NULL;
+  adc_oneshot_unit_init_cfg_t uc = { .unit_id = ADC_UNIT_1, .clk_src = (adc_oneshot_clk_src_t)0, .ulp_mode = ADC_ULP_MODE_DISABLE };
+  int r0 = -1, r1 = -1; esp_err_t e = adc_oneshot_new_unit(&uc, &h);
+  if (e == ESP_OK) {
+    adc_oneshot_chan_cfg_t cc = { .atten = ADC_ATTEN_DB_12, .bitwidth = ADC_BITWIDTH_DEFAULT };
+    adc_oneshot_config_channel(h, ADC_CHANNEL_0, &cc);
+    adc_oneshot_config_channel(h, ADC_CHANNEL_1, &cc);
+    adc_oneshot_read(h, ADC_CHANNEL_0, &r0);
+    adc_oneshot_read(h, ADC_CHANNEL_1, &r1);
+    adc_oneshot_del_unit(h);
+  }
+  Serial0.printf("UI: selftest A with int. pull-down: %d mV (raw %d), after: %d mV | raw oneshot unit: %s ch0=%d ch1=%d\n",
+                 a_pd, ra_pd, a_back, esp_err_to_name(e), r0, r1);
+}
+#else
+void ui_ladder_diag(void) { Serial0.println("UI: no ladder on this board"); }
+#endif
+
 static void ui_stop_demod(uint32_t now)
 {
   if (s_mode != UI_PAGE_STATUS) {
@@ -107,23 +188,55 @@ void ui_init(void)
 {
   /* With pull-up: the button pulls to GND. GPIO0 is a strapping pin, but a
    * plain input at run time. */
+#if BRD_BTN_LADDER
+  analogSetPinAttenuation(BRD_BTN_A_PIN, ADC_11db);
+  analogSetPinAttenuation(BRD_BTN_B_PIN, ADC_11db);
+#else
   pinMode(UI_BTN_PIN, INPUT_PULLUP);
+#endif
   s_btn_raw = s_btn_stable = false;
   s_page = UI_PAGE_STATUS;
   s_mode = UI_DEFAULT_MODE;
   s_dirty = true;
 
+#if BRD_BTN_LADDER
+  Serial0.printf("UI: ladder buttons GPIO%d/%d, start page %s, start mode %s\n",
+                 BRD_BTN_A_PIN, BRD_BTN_B_PIN, UI_TABLE[UI_PAGE_STATUS].name,
+                 UI_TABLE[s_mode].name);
+  Serial0.println("UI: OK/RIGHT/DOWN = next page, LEFT/UP = previous, "
+                  "BACK or any long press = demod off + back to status");
+#else
   Serial0.printf("UI: button GPIO%d, start page %s, start mode %s\n",
                  UI_BTN_PIN, UI_TABLE[UI_PAGE_STATUS].name,
                  UI_TABLE[s_mode].name);
   Serial0.println("UI: short press = next page, "
                   "long = demod off + back to status");
+#endif
 }
 
 void ui_tick(uint32_t now)
 {
   /* --- button: debounce --- */
+#if BRD_BTN_LADDER
+  static uint32_t s_adc_ms = 0;
+  static int s_raw_id = BTN_NONE;
+  if (now - s_adc_ms >= 10) {
+    s_adc_ms = now; s_raw_id = read_buttons();
+    /* bring-up diag: every raw change, with the ladder voltages. Also a
+     * 2 s heartbeat whenever a ladder is off its idle level (>2790 mV). */
+    static int s_log_id = BTN_NONE; static uint32_t s_log_ms = 0;
+    bool off_idle = (s_mv_a < 2790) || (s_mv_b < 2790);
+    if (s_raw_id != s_log_id || (off_idle && now - s_log_ms >= 2000)) {
+      s_log_id = s_raw_id; s_log_ms = now;
+      Serial0.printf("UI: raw %s  A=%d mV B=%d mV\n", BTN_NAME[s_raw_id], s_mv_a, s_mv_b);
+    }
+  }
+  int id = s_raw_id;
+  bool raw = (id != BTN_NONE);
+  if (raw && !s_btn_stable && id != s_btn_id) { s_btn_id = id; s_btn_change_ms = now; s_btn_raw = !raw; }
+#else
   bool raw = (digitalRead(UI_BTN_PIN) == LOW);
+#endif
   if (raw != s_btn_raw) {
     s_btn_raw = raw;
     s_btn_change_ms = now;
@@ -134,15 +247,46 @@ void ui_tick(uint32_t now)
       s_long_fired = false;
     } else {
       /* release: if the long press did not fire, this was a short press */
+#if BRD_BTN_LADDER
+      if (!s_long_fired) {
+        Serial0.printf("UI: button %s\n", BTN_NAME[s_btn_id]);
+        if (menu_is_open()) {
+          menu_key((menu_key_t)s_btn_id, now);          /* same numbering */
+          s_last_activity_ms = now;
+        } else {
+          switch (s_btn_id) {
+            case BTN_BACK:  ui_stop_demod(now); break;
+            case BTN_OK:    menu_open(); s_last_activity_ms = now; break;
+            case BTN_LEFT:  ui_prev(now); break;
+            case BTN_RIGHT: ui_next(now); break;
+            default:        break;                        /* UP, DOWN, SPARE: reserved */
+          }
+        }
+      }
+      s_btn_id = BTN_NONE;
+#else
       if (!s_long_fired) ui_next(now);
+#endif
     }
   }
 
   /* long press: fires while still HELD DOWN, not on release — so the user
    * feels it happen and need not guess when to release */
-  if (s_btn_stable && !s_long_fired && (now - s_btn_down_ms) >= UI_LONG_MS) {
+  if (s_btn_stable && !s_long_fired && (now - s_btn_down_ms) >= UI_LONG_MS
+#if BRD_BTN_LADDER
+      /* ladder pad: only BACK has a long-press meaning (demod off + status);
+       * every other button acts on release however long it was held */
+      && s_btn_id == BTN_BACK
+#endif
+     ) {
     s_long_fired = true;
-    ui_stop_demod(now);
+#if BRD_BTN_LADDER
+    if (menu_is_open()) { Serial0.println("UI: long BACK -> menu closed"); menu_close(); } else
+#endif
+    {
+      Serial0.println("UI: long press -> demod off, status page");
+      ui_stop_demod(now);
+    }
   }
 
   /* --- inactivity: back to status, but the MODE STAYS ---

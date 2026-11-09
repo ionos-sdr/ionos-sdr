@@ -76,6 +76,8 @@
  */
 
 #include <Arduino.h>
+#include "board.h"
+#include "fg23_prog.h"
 #include <WiFi.h>
 #include <WiFiMulti.h>
 #include "driver/spi_slave.h"
@@ -240,23 +242,41 @@
  * receiving blocks as long as queued transactions remain. NQUEUE=24 gives
  * ~123 ms of reserve on i8, so the 13 ms is absorbed. That is why it was raised. */
 #ifndef OLED_ENABLE
+#if BOARD_IONOS_MINI
+#define OLED_ENABLE            1     /* 2026-11-03: SSD1306 on the mini carrier (I2C 41/42) */
+#else
 #define OLED_ENABLE            0     /* 2026-08-19: Heltec V3 retired.
                                       * ESP32-S3 devkit + ILI9341 240x320.
                                       * This removed the 21 ms stall from the
                                       * main loop and the GPIO36 conflict
                                       * (octal PSRAM pin). */
 #endif
+#endif
 /* WS2812 load indicator LED. ON THIS board (Ali S3 dual-USB, N16R8) the
  * pinout says GPIO47 = RGB_LED (48 is SPICLK_N). Other clones use 48 or 38 -
  * if it does not light up, try those. The Heltec V3 has no RGB LED.
  * NOTE: 47 was the display TE in the waterfall bench -> TE moved to 48. */
 #ifndef RGB_LED_PIN
+#ifdef BRD_RGB_LED_PIN
+#define RGB_LED_PIN            BRD_RGB_LED_PIN   /* board profile (board.h) */
+#else
 #define RGB_LED_PIN            47
 #endif
+#endif
+#if BOARD_IONOS_MINI
+/* ionos-sdr-mini: SSD1306 128x64 module on the carrier's I2C (shared with the
+ * radio-board ID EEPROM at 0x51), 4k7 pull-ups, no reset, no Vext. Second
+ * screen: the UI pages (LEFT/RIGHT) live here, the TFT keeps the waterfall. */
+#define OLED_SDA_PIN           41
+#define OLED_SCL_PIN           42
+#define OLED_RST_PIN           (-1)
+#define OLED_VEXT_PIN          (-1)
+#else
 #define OLED_SDA_PIN           17
 #define OLED_SCL_PIN           18
 #define OLED_RST_PIN           21
 #define OLED_VEXT_PIN          36     /* -1 = no Vext control */
+#endif
 #define OLED_VEXT_ACTIVE_LOW   1
 #define OLED_I2C_HZ            800000u
 /* Back to 1500: the measurement is closed, and it is proven that the 21 ms
@@ -291,6 +311,8 @@
 /* ---- Menu and button. The Heltec V3 PRG button (GPIO0) pages through the
  * screens and switches the demodulators. Details: ui.h */
 #include "ui.h"
+#include "menu.h"             /* on-screen menu (ionos-sdr-mini), host glue below */
+#include "usb_host.h"         /* host command channel on the CDC port (docs/ionos-usb-protocol.md) */
 #include "flashlog.h"
 #include "specline.h"      /* SPECLINE (scan line) block format, shared with the FG23 */
 #include "oled_spectrum.h"  /* 128x64 mini spectrum + 1-bit waterfall */
@@ -315,11 +337,11 @@
  * Counterpart: iq_stream.c, IQ_RDY_ENABLE. While the wire is not connected,
  * leave it at 0 on the FG23 - the ESP32 side is harmless when driven. */
 #define RDY_ENABLE   1
-#define RDY_PIN      2
+#define RDY_PIN      BRD_RDY_PIN
 
 /* ---- Return path to the FG23 (tuning from the phone). 0 = disabled. */
 #define CMDLINK_ENABLE   1
-#define CMDLINK_TX_PIN   18         /* ESP GPIO18 -> FG23 PA06 / EXP 11
+#define CMDLINK_TX_PIN   BRD_CMDLINK_TX_PIN         /* ESP GPIO18 -> FG23 PA06 / EXP 11
                                      * (2026-08-19: moved from 4; pin 4 goes
                                      * to the display/touch on the devkit) */
 #define CMDLINK_BAUD     115200
@@ -331,10 +353,10 @@
  * more than sufficient for it. In the FINAL layout this is reversed: the
  * FG23 gets the IO_MUX (10/11/12 + RDY 14 + CMD 13), the display goes to
  * SPI3 - that is the precondition for the 700 ksps direction. */
-#define PIN_SCLK   GPIO_NUM_15    /* FG23 PC05 / EXP 15 */
-#define PIN_MOSI   GPIO_NUM_16    /* FG23 PC00 / EXP 10 */
-#define PIN_CS     GPIO_NUM_17    /* FG23 PA07 / EXP 13 */
-#define FG23_SPI_HOST SPI3_HOST
+#define PIN_SCLK   BRD_FG23_SCLK    /* FG23 PC05 / EXP 15 */
+#define PIN_MOSI   BRD_FG23_MOSI    /* FG23 PC00 / EXP 10 */
+#define PIN_CS     BRD_FG23_CS    /* FG23 PA07 / EXP 13 */
+#define FG23_SPI_HOST BRD_FG23_SPI_HOST
 
 /* ---------------- BLOCK (must match iq_stream.c!) ---------------- */
 #define BLK_SAMPLES   256
@@ -630,6 +652,10 @@ static volatile uint32_t rx_tail = 0;      /* counter, written only by the loop 
 static uint32_t          rx_head_idx = 0;  /* slot, used ONLY by the task */
 static uint32_t          rx_tail_idx = 0;  /* slot, used ONLY by the loop */
 static volatile uint32_t rx_ring_ovf = 0;  /* ring full -> dropped block (must be 0!) */
+/* Raw transaction length != 1040 bytes, BEFORE the clip below hides it (2026-11-02,
+ * ionos-sdr-mini signal-integrity hunt): extra SCLK edges show up as LONG, missing
+ * ones as SHORT transactions. Last odd length kept for the printout. */
+static volatile uint32_t rx_len_long = 0, rx_len_short = 0, rx_len_last = 0;
 static volatile uint32_t rx_ring_max = 0;  /* highest fill level (watermark) */
 static TaskHandle_t      rx_task_handle = NULL;
 
@@ -642,6 +668,11 @@ static void spi_rx_task(void *arg)
         || r == NULL)
       continue;
 
+    if (r->trans_len != BLK_BYTES * 8u) {
+      if (r->trans_len > BLK_BYTES * 8u) rx_len_long = rx_len_long + 1u;
+      else rx_len_short = rx_len_short + 1u;
+      rx_len_last = r->trans_len;
+    }
     size_t n = (size_t)(r->trans_len / 8);
     if (n > BLK_BYTES) n = BLK_BYTES;
 
@@ -667,7 +698,12 @@ static void spi_rx_task(void *arg)
 }
 
 #define DIAG  Serial0     /* CP2102: text diagnostics */
+#if IONOS_USB_TINYUSB
+#include "tusb_cdc.h"
+#define RAW   TusbSerial  /* native USB: USB-OTG + TinyUSB CDC-ACM (tusb_cdc.h) */
+#else
 #define RAW   Serial      /* native USB CDC: raw stream */
+#endif
 
 /* ---------------- output aggregators ---------------- */
 static uint8_t  agg_usb[AGG_BLK * BLK_BYTES];      static size_t agg_usb_n = 0;
@@ -769,6 +805,7 @@ static WiFiClient cli_rtl;
 static bool       have_raw = false, have_rtl = false;
 static bool       wifi_up = false;
 static bool       wifi_is_ap = false;
+static bool       wifi_forced_off = false;   /* console "WIFIOFF" (USB soak A/B test) */
 static IPAddress  my_ip;
 static WiFiMulti  wifiMulti;
 static uint32_t   wifi_last_try_ms = 0;
@@ -932,11 +969,14 @@ static void oled_init(void)
   delay(100);
 #endif
 
+#if (OLED_RST_PIN >= 0)
   /* Reset is issued manually, not left to U8g2: this guarantees it happens
-   * AFTER Vext is switched on, and it is in a visible place. */
+   * AFTER Vext is switched on, and it is in a visible place. (The mini's
+   * SSD1306 module has no reset pin: -1.) */
   pinMode(OLED_RST_PIN, OUTPUT);
   digitalWrite(OLED_RST_PIN, LOW);   delay(20);
   digitalWrite(OLED_RST_PIN, HIGH);  delay(20);
+#endif
 
   /* REAL presence check before calling U8g2. U8g2's begin() always returns
    * true - it does not look back at the bus. Without this you could not tell
@@ -1032,7 +1072,7 @@ static void oled_header(const char *title)
 static void oled_page_status(void)
 {
   char buf[40];
-  oled_header("FG23 SDR");
+  oled_header(usbhost_usb_mode() ? "Ionos USB" : "Ionos SDR");
 
   if (wifi_is_ap) {
     snprintf(buf, sizeof buf, "AP %s", WIFI_AP_SSID);
@@ -1292,9 +1332,12 @@ static void oled_draw(void)
   u8g2.sendBuffer();
 }
 
+/* 'O0' / 'O1' on the console: pause / resume the periodic OLED refresh
+ * (measurement aid: the 21 ms sendBuffer() blocks the main loop, 2026-11-03). */
+static bool oled_paused = false;
 static void oled_tick(uint32_t now)
 {
-  if (!oled_ok) return;
+  if (!oled_ok || oled_paused) return;
   /* Faster refresh on the SCAN page (~3 Hz) so the waterfall flows */
   uint32_t period = (ui_page() == UI_PAGE_SCAN) ? 300u : OLED_REFRESH_MS;
   if (now - oled_last_ms < period) return;
@@ -1313,6 +1356,7 @@ static void oled_force(void)
 
 #else
 static void oled_init(void) { }
+static bool oled_paused = false;
 static void oled_tick(uint32_t now) { (void)now; }
 static void oled_force(void) { }
 static uint32_t oled_khz = 0;
@@ -1322,6 +1366,16 @@ static uint32_t oled_khz = 0;
  *                          RETURN PATH
  * =================================================================== */
 
+/* 2026-11-03 (mini): ~25 % of the 16-char lines (W<kHz>,<kHz>,<nbin>) were
+ * never acted on by the FG23. Root cause (found with FGRD, the SWD RAM read
+ * in fg23_prog.cpp): the FG23's 16-deep EUSART RX FIFO overflowed and the
+ * CR of the line was the byte lost - its RX interrupt sat at the lowest
+ * priority behind the stream's RAIL/LDMA handlers; fixed there (priority 0).
+ * Every line is nevertheless sent TWICE, 30 ms apart, as belt and braces
+ * on the one-wire link; the FG23's cmdlink.c executes an identical line
+ * within 1 s only once. The repeat is sent from the loop (cmdlink_tick). */
+static char     s_cmd_repeat[48];
+static uint32_t s_cmd_repeat_ms = 0;
 static void cmdlink_send(const char *s)
 {
 #if CMDLINK_ENABLE
@@ -1330,8 +1384,22 @@ static void cmdlink_send(const char *s)
    * need it within a millisecond. */
   Serial1.print(s);
   Serial1.print("\r");
+  snprintf(s_cmd_repeat, sizeof s_cmd_repeat, "%s", s);
+  s_cmd_repeat_ms = millis();
 #endif
   DIAG.printf("  -> FG23: %s\n", s);
+}
+static void cmdlink_tick(uint32_t now)
+{
+#if CMDLINK_ENABLE
+  if (s_cmd_repeat[0] && now - s_cmd_repeat_ms >= 30u) {
+    Serial1.print(s_cmd_repeat);
+    Serial1.print("\r");
+    s_cmd_repeat[0] = 0;
+  }
+#else
+  (void)now;
+#endif
 }
 
 #if SPY_ENABLE
@@ -1573,6 +1641,7 @@ static void wifi_tick(uint32_t now)
 {
 #if WIFI_ENABLE
   if (wifi_is_ap) return;                       /* nothing to do in AP mode */
+  if (wifi_forced_off) return;                  /* switched off from the console */
   if (WiFi.status() == WL_CONNECTED) return;
   if (have_raw || have_rtl) return;
   if (wifi_scan_req) return;                    /* an attempt is already running */
@@ -1788,6 +1857,8 @@ static void rtl_agc_tick(uint32_t now)
  *
  * With no host connected we do NOT wait at all - see the (bool)RAW branch. */
 #define USB_TX_TIMEOUT_MS   3u
+#define USB_TX_BUF_BLOCKS   24u   /* HWCDC TX ring, see setTxBufferSize() in setup() */
+#define USB_GONE_MS         500u  /* !RAW this long = host really gone, see flush_usb() */
 
 static void flush_usb(void)
 {
@@ -1796,8 +1867,20 @@ static void flush_usb(void)
   /* NO HOST -> immediate drop, no waiting. Otherwise every flush would waste
    * the full timeout even when nobody reads the USB (the normal state: the
    * measurement tool only runs occasionally). */
-  if (!(bool)RAW) {
-    st_usbdrop++;
+  /* 2026-11-03: (bool)RAW is HWCDC::isCDC_Connected(), which also asks
+   * isPlugged() - a SOF watchdog run from the tick hook that FLAPS for a
+   * moment on a healthy link (the core's own comment says so). Every flap
+   * here threw away the whole aggregator (up to 4 blocks) and counted ONE
+   * drop: the 10-minute soaks lost 6-9 blocks in 1-3 block bursts, each
+   * matching an ESP usb_drop +1, independent of the TX ring size (8 vs 24
+   * blocks). Only a host gone for USB_GONE_MS is a real disconnect; a flap
+   * goes through the normal write path, the ring keeps the data. */
+  static uint32_t usb_seen_ms = 0;
+  const uint32_t now_ms = millis();
+  if ((bool)RAW) {
+    usb_seen_ms = now_ms;
+  } else if (now_ms - usb_seen_ms > USB_GONE_MS) {
+    st_usbdrop += agg_usb_n / BLK_BYTES;
     agg_usb_n = 0;
     return;
   }
@@ -1848,15 +1931,15 @@ static void flush_usb(void)
      * The raw I/Q USB path is NOT critical: if there is no room, drop the
      * block and move on. The (-N) counter shows it anyway. Reception and the
      * demod however must NEVER stop because of a terminal. */
-    if (RAW.availableForWrite() < (int)BLK_BYTES) { st_usbdrop++; break; }
+    if (RAW.availableForWrite() < (int)BLK_BYTES) { st_usbdrop += (agg_usb_n - off) / BLK_BYTES; break; }
     size_t w = RAW.write(agg_usb + off, BLK_BYTES);
     st_usbbytes += w;
     if (w != BLK_BYTES) {
       /* SHORT write: the host froze or is slow. The remainder is dropped. The
        * PC resynchronises on the next magic and books the missing sequence
        * number as 1 hole - so the PC-side SPI HOLE measurement is only clean
-       * when this counter reads (-0). */
-      st_usbdrop++;
+       * when this counter reads (-0). Counted in BLOCKS (2026-11-03). */
+      st_usbdrop += (agg_usb_n - off) / BLK_BYTES;
       break;
     }
     off += BLK_BYTES;
@@ -1945,13 +2028,18 @@ static void deliver(const uint8_t *b)
   /* --- APRS demodulator. It gets the RAW int16 samples, before any further
    * processing: no AGC, no 8-bit truncation, no interpolation spoils the
    * demodulation. --- */
+  /* USB host mode (MODE USB / menu): no demodulation at all, the CPU and the
+   * USB path belong to the stream (docs/ionos-usb-protocol.md). */
+  /* The APRS / CW demodulators are sized for <= 50 ksps; at 100 / 200 ksps
+   * (R = 4 / 2, 2026-11-04) they stay off - those rates are for a host. */
+  const bool demod_on = !usbhost_usb_mode() && cur_sps <= 50000u;
 #if APRS_RX_ENABLE
   /* Demodulate ONLY when the APRS mode is active. So the button really
    * frees the CPU for another measurement. */
-  if (ui_mode() == UI_PAGE_APRS) aprs_rx_feed(iq, nsamp, cur_sps);
+  if (demod_on && ui_mode() == UI_PAGE_APRS) aprs_rx_feed(iq, nsamp, cur_sps);
 #endif
   /* CW: the same raw int16 I/Q, it only needs the envelope */
-  if (ui_mode() == UI_PAGE_CW) cw_rx_feed(iq, nsamp, cur_sps);
+  if (demod_on && ui_mode() == UI_PAGE_CW) cw_rx_feed(iq, nsamp, cur_sps);
 
   /* --- (a) USB: the WHOLE block goes, header included. The PC side strips
    * the header; in return it can resynchronise on the magic at any time,
@@ -2122,6 +2210,15 @@ static void process(const uint8_t *b, size_t nbytes)
       tft_set_autoscale(true);   /* the scan sends an absolute dBm scale */
       tft_push_specline(L->bins, L->hdr.nbin);
       tft_set_span(L->hdr.f_center_hz, L->span_hz);
+      /* USB host (docs/ionos-usb-protocol.md): the scan line goes out as a
+       * block like everything else - the web SDR's scan mode reads SPC1.
+       * 2026-11-03: it returned before the aggregator, so the host saw no
+       * scan at all. */
+      if (agg_usb_n + BLK_BYTES <= sizeof agg_usb) {
+        memcpy(agg_usb + agg_usb_n, b, BLK_BYTES);
+        agg_usb_n += BLK_BYTES;
+      }
+      if (agg_usb_n >= sizeof agg_usb) flush_usb();
     }
     return;
   }
@@ -2265,6 +2362,32 @@ static void bench_ext_cb(wb_ext_t *o)
 #endif
 }
 
+/* One dispatcher for the console AND the on-screen menu (menu_host_console):
+ * every menu item has a console twin, so a test script can drive the same path. */
+static void console_dispatch(const char *cmd)
+{
+#if WIFI_ENABLE
+  /* WIFIOFF / WIFION: radio off for A/B tests (does the WiFi stack disturb the USB
+   * stream?). Off = no reconnect attempts until WIFION. */
+  if (!strcmp(cmd, "WIFIOFF")) {
+    wifi_forced_off = true; WiFi.setAutoReconnect(false); WiFi.disconnect(true); WiFi.mode(WIFI_OFF);
+    wifi_up = false; DIAG.println("WiFi forced OFF"); return;
+  }
+  if (!strcmp(cmd, "WIFION")) {
+    wifi_forced_off = false; WiFi.mode(WIFI_STA); WiFi.setAutoReconnect(true);
+    wifi_last_try_ms = 0; wifi_scan_req = true; DIAG.println("WiFi back ON, reconnecting"); return;
+  }
+#endif
+  if (!strcmp(cmd, "U")) ui_ladder_diag();
+  else if (!strcmp(cmd, "M")) { if (menu_is_open()) menu_close(); else menu_open(); }
+  else if (cmd[0] == 'O' && (cmd[1] == '0' || cmd[1] == '1') && !cmd[2]) { oled_paused = (cmd[1] == '0'); DIAG.printf("OLED refresh %s\n", oled_paused ? "PAUSED" : "on"); }
+  else if (cmd[0] == 'T') { if (cmd[1] == 'x') tft_test_end(); else tft_test(cmd[1] ? atoi(cmd + 1) : -1); }
+#if IONOS_USB_TINYUSB
+  else if (tusb_cdc_cmd(cmd)) { }
+#endif
+  else if (!fg23_prog_cmd(cmd, DIAG) && !wifi_bench_cmd(cmd) && !rgb_load_cmd(cmd)) iq_fft_cmd(cmd);
+}
+
 static void bench_console_tick(void)
 {
   static char cmd[80];
@@ -2274,7 +2397,7 @@ static void bench_console_tick(void)
     if (c == '\n' || c == '\r') {
       if (n) {
         cmd[n] = '\0';
-        if (!wifi_bench_cmd(cmd) && !rgb_load_cmd(cmd)) iq_fft_cmd(cmd);
+        console_dispatch(cmd);
       }
       n = 0;
     } else if (n < sizeof cmd - 1) {
@@ -2282,6 +2405,94 @@ static void bench_console_tick(void)
     } else {
       n = 0;                    /* overflow: drop the line */
     }
+  }
+}
+
+/* ===================================================================
+ *                    MENU HOST GLUE (menu.h, C linkage)
+ * =================================================================== */
+#if defined(__has_include)
+#  if __has_include("fw_version.h")
+#    include "fw_version.h"            /* generated by tools/pio_fw_version.py */
+#  endif
+#endif
+#ifndef FW_VERSION
+#define FW_VERSION "dev"
+#endif
+static int      s_menu_mode = 0;          /* 0 standalone, 1 USB host - UI-M4 wires the effect */
+static float    s_last_blk_s = 0.0f;      /* copy of the 2 s status figure for the INFO page */
+static int32_t  s_decim_pending = 0;      /* R to apply once the stream state is known */
+static uint32_t s_decim_pending_ms = 0;
+static char     s_decim_start[16];        /* "i<R>" waiting 150 ms behind the "i" stop */
+static uint32_t s_decim_start_ms = 0;
+
+extern "C" void menu_host_info(menu_host_info_t *o)
+{
+  static char ipbuf[20], ssidbuf[33];
+  if (wifi_up) { snprintf(ipbuf, sizeof ipbuf, "%s", WiFi.localIP().toString().c_str());
+                 snprintf(ssidbuf, sizeof ssidbuf, "%s", WiFi.SSID().c_str()); }
+  else         { snprintf(ipbuf, sizeof ipbuf, "-"); ssidbuf[0] = 0; }
+  o->fw_esp     = FW_VERSION;
+  o->fw_fg23    = "n/a";                  /* HOST-M1 v2: VER? */
+  o->board      = "BRD4265B";             /* UI-M2: from the ID EEPROM (0x51) */
+  o->ip         = ipbuf;
+  o->ssid       = ssidbuf;
+  o->wifi_rssi  = wifi_up ? (int)WiFi.RSSI() : 0;
+  o->rf_rssi    = st_rf_rssi;
+  o->sps        = cur_sps;
+  o->blk_s      = s_last_blk_s;
+  o->lost       = bench_tot_ro_hole + st_ro_hole;
+  o->usb_drop   = st_usbdrop;
+  o->heap_min_k = (uint32_t)(esp_get_minimum_free_heap_size() / 1024u);
+  o->psram_k    = (uint32_t)(ESP.getFreePsram() / 1024u);
+  o->uptime_s   = millis() / 1000u;
+  o->freq_khz   = oled_khz;
+  o->mode_live  = s_menu_mode;
+}
+
+extern "C" bool menu_host_tune(uint32_t khz)        { return rtl_pending_set(khz); }
+extern "C" void menu_host_cmdlink(const char *line) { cmdlink_send(line); DIAG.printf("MENU -> FG23: %s\n", line); }
+extern "C" bool menu_host_console(const char *line) { DIAG.printf("MENU: %s\n", line); console_dispatch(line); return true; }
+extern "C" void menu_host_set_mode(int mode)
+{
+  s_menu_mode = mode;
+  usbhost_set_mode(mode != 0);
+  /* USB host mode: the demodulators are gated off in deliver() (CPU and the
+   * USB path belong to the stream); the header shows "USB" as the mode. */
+  tft_set_page(ui_page_name(ui_page()), mode ? "USB" : ui_page_name(ui_mode()));
+  DIAG.printf("MENU: mode = %s\n", mode ? "USB (demods off)" : "STANDALONE");
+}
+
+/* FG23 'i' semantics: 'i<R>' while the stream runs STOPS it (the argument is
+ * ignored), while stopped it starts with R. So the ESP must know the state:
+ * blocks arriving within the last second = running. At boot the header is
+ * not seen yet -> defer until the first block (or 5 s). */
+extern "C" void menu_host_set_decim(int32_t R)
+{
+  s_decim_pending = R;
+  s_decim_pending_ms = millis();
+}
+static void menu_decim_tick(uint32_t now)
+{
+  if (!s_decim_pending) return;
+  bool running = (cur_decim != 0) && (s_last_blk_s > 1.0f || (now - s_decim_pending_ms) < 2500u);
+  if (cur_decim == 0 && (now - s_decim_pending_ms) < 5000u) return;   /* wait for the header */
+  if (cur_decim == (uint32_t)s_decim_pending) { s_decim_pending = 0; return; }   /* already there */
+  snprintf(s_decim_start, sizeof s_decim_start, "i%ld", (long)s_decim_pending);
+  if (running) {
+    cmdlink_send("i");                              /* stop first; the start line follows 150 ms later
+                                                     * (each line is sent twice, see cmdlink_send) */
+    s_decim_start_ms = now;
+  } else {
+    cmdlink_send(s_decim_start); s_decim_start[0] = 0;
+  }
+  DIAG.printf("MENU: decimation -> R=%ld (%s)\n", (long)s_decim_pending, running ? "restart" : "start");
+  s_decim_pending = 0;
+}
+static void menu_decim_start_tick(uint32_t now)
+{
+  if (s_decim_start[0] && s_decim_start_ms && now - s_decim_start_ms >= 150u) {
+    cmdlink_send(s_decim_start); s_decim_start[0] = 0; s_decim_start_ms = 0;
   }
 }
 
@@ -2297,6 +2508,7 @@ void setup()
    * transaction is queued, they are lost FOR GOOD. Buffer + faster baud, and
    * the output becomes "free". */
   DIAG.setTxBufferSize(2048);
+  DIAG.setRxBufferSize(4096);   /* fg23_prog: 2 kB image chunks */
   DIAG.begin(115200);
 
   /* The native USB CDC TX buffer is a few hundred bytes by default, which
@@ -2309,7 +2521,14 @@ void setup()
    * the status line in MODE=0, add to the pioarduino custom_sdkconfig:
    *   CONFIG_TINYUSB_CDC_TX_BUFSIZE=4096
    * (same place as CONFIG_SPI_SLAVE_ISR_IN_IRAM=y). */
-  RAW.setTxBufferSize(AGG_BLK * BLK_BYTES + 4096);
+  /* 2026-11-03: 8256 bytes (~42 ms of the 50 ksps stream) was too little -
+   * a Windows host misses its read window that long about once a minute,
+   * the ring fills, flush_usb() drops a whole block (measured: every
+   * host-side sequence gap matched an ESP usb_drop +1 within one status
+   * period, ~1 block/min, 0.007 %). 24 blocks = ~128 ms of headroom. */
+#if !IONOS_USB_TINYUSB
+  RAW.setTxBufferSize(USB_TX_BUF_BLOCKS * BLK_BYTES);
+#endif   /* TinyUSB: tusb_cdc.cpp keeps its 256 kB PSRAM ring */
 #endif
   RAW.setTxTimeoutMs(USB_TX_TIMEOUT_MS);   /* see the explanation above flush_usb() */
 #if FG23_USB_TINYUSB
@@ -2333,7 +2552,11 @@ void setup()
   DIAG.println("\n=== FG23 -> ESP32-S3 -> USB + WiFi + rtl_tcp ===");
   /* Make it VISIBLE in the log which USB mode is running - the two behave
    * quite differently with the PC-side measurement tool. */
-#if FG23_USB_TINYUSB
+#if IONOS_USB_TINYUSB
+  DIAG.printf("USB: USB-OTG + TinyUSB CDC-ACM (esp_tinyusb), %lu kB PSRAM ring, "
+              "no reset on DTR/RTS, new COM number\n",
+              (unsigned long)(RAW.ring_size() / 1024u));
+#elif FG23_USB_TINYUSB
   DIAG.println("USB: TinyUSB CDC (MODE=0), DTR/RTS reset DISABLED "
                "- recommended for measurement");
 #else
@@ -2535,12 +2758,22 @@ void setup()
 
   /* WS2812 load indicator. The LED cycles colours faster the more loaded the
    * CPU is. Some clones use pin 38, not 48. */
+#ifdef BRD_RGB_BRIGHTNESS
+  { char b[24]; snprintf(b, sizeof b, "Lset fenyero=%d", BRD_RGB_BRIGHTNESS); rgb_load_cmd(b); }
+#endif
   rgb_load_init(RGB_LED_PIN);
   DIAG.println("RGB: 'L' = status, 'Ltest' = colour cycle, 'Lset fenyero=20' etc.");
 
   /* ILI9341 status display. SPI2 (IO_MUX 9-14) - the FG23 slave is on SPI3,
    * so there is no bus conflict. TE is not connected (47 belongs to the RGB LED). */
   tft_init();
+
+  /* On-screen menu: settings from NVS, applied to the LED/FFT now and to
+   * the FG23 (decimation, tuning) once the stream state is known. */
+  menu_init();
+  menu_apply_boot();
+  usbhost_init();
+  DIAG.println("MENU: OK button opens it; console 'M' toggles it");
 
   /* Put the IP on the display immediately, no 1.5 s wait for it. */
   oled_tick(millis() + OLED_REFRESH_MS);
@@ -2711,6 +2944,12 @@ void loop()
   SECT(S_RTL, { rtl_poll_commands(); rtl_agc_tick(now); });
   SECT(S_WIFI, wifi_tick(now));
   SECT(S_UI, ui_tick(now));
+  menu_tick(now);
+  menu_decim_tick(now);
+  menu_decim_start_tick(now);
+  cmdlink_tick(now);
+  usbhost_tick(now);
+  usbhost_flush();          /* MSG1 blocks, only when a whole block fits (after flush_usb) */
 #if APRS_RX_ENABLE
   /* CONNECTION HANDLING (async DNS, connect, drain, backoff) ALWAYS runs -
    * regardless of the mode. If it only ran in APRS mode, after a long button
@@ -2739,7 +2978,10 @@ void loop()
   /* On a page change draw IMMEDIATELY, do not wait for the next period -
    * otherwise nothing happens for a second and a half after the button
    * press, and it would seem broken. */
-  if (ui_dirty()) { ui_clear_dirty(); oled_force(); }
+  if (ui_dirty()) {
+    ui_clear_dirty(); oled_force();
+    tft_set_page(ui_page_name(ui_page()), usbhost_usb_mode() ? "USB" : ui_page_name(ui_mode()));
+  }
   SECT(S_OLED, oled_tick(now));
 
 #if FLASHLOG_ENABLE
@@ -2854,6 +3096,8 @@ void loop()
      * the CONSEQUENCE. qmax = how close the backlog came to NQUEUE (reaching
      * it means loss); dt_max = the longest blind period; then the list of
      * culprits in descending order. --- */
+    DIAG.printf("  SPI-LEN: long=%lu short=%lu last_odd=%lu bits\n",
+                (unsigned long)rx_len_long, (unsigned long)rx_len_short, (unsigned long)rx_len_last);
     DIAG.printf("  TIMING: qmax=%lu/%d  RXRING=%lu/%d ovf=%lu  dt_max=%lu us |",
                 (unsigned long)st_qmax, NQUEUE,
                 (unsigned long)rx_ring_max, RXRING_BLOCKS,
@@ -2912,6 +3156,7 @@ void loop()
       tft_ip = wifi_up ? WiFi.localIP().toString() : String("-");
       tft_stat_t ts;
       ts.blokk_s      = st_blocks / dt;
+      s_last_blk_s    = ts.blokk_s;             /* INFO page + decimation state */
       ts.sps          = (uint32_t)(st_samples / dt);
       if (ts.sps > 100) st_sps_out = ts.sps;   /* for the panel's scale */
       ts.csucs_dbfs   = lvl_db(st_peak);

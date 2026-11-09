@@ -56,6 +56,7 @@ typedef enum {
 } ui_page_t;
 
 void ui_init(void);
+void ui_ladder_diag(void);   /* console U: button ladder mV (ionos-sdr-mini) */
 
 /* From the main loop, every iteration. Handles the button and the idle
  * return. Non-blocking. */

@@ -273,6 +273,24 @@ bool rgb_load_cmd(const char *line)
 
     if (*p == 0) { rgb_print_cfg(); return true; }
     if (!strncmp(p, "set",  3)) { rgb_set_kv(p + 3); return true; }
+    if (!strncmp(p, "rmt", 3)) {
+        /* bring-up probe: does the RMT path behind rgbLedWrite work at all?
+         * 'Lrmt' = all off, 'Lrmt1' = dim red (3,0,0), 'Lrmt2' = white (40,40,40) */
+        int pin = s_cfg.pin;
+        bool ok = rmtInit(pin, RMT_TX_MODE, RMT_MEM_NUM_BLOCKS_1, 10000000);
+        uint8_t r = 0, g = 0, b = 0;
+        if (p[3] == '1') r = 3; else if (p[3] == '2') r = g = b = 40;
+        uint8_t bytes[3] = { g, r, b };
+        rmt_data_t sym[24];
+        for (int i = 0; i < 24; i++) {
+            bool one = (bytes[i / 8] >> (7 - i % 8)) & 1;
+            sym[i].level0 = 1; sym[i].duration0 = one ? 8 : 4;
+            sym[i].level1 = 0; sym[i].duration1 = one ? 4 : 8;
+        }
+        bool wr = ok && rmtWrite(pin, sym, 24, RMT_WAIT_FOR_EVER);
+        RGB_OUT.printf("RGB-RMT: pin %d init=%d write=%d (%u,%u,%u)\n", pin, (int)ok, (int)wr, r, g, b);
+        return true;
+    }
     if (!strncmp(p, "test", 4)) { s_test = 3000; RGB_OUT.println("RGB: colour-wheel test 3 s"); return true; }
     if (p[0] == '0') { rgb_load_stop(); RGB_OUT.println("RGB: off"); return true; }
     if (p[0] == '1') { rgb_load_init(-1); return true; }

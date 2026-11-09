@@ -1,0 +1,33 @@
+2026-11-08 18:20:29 SoapyIonos: {'board': 'BRD4265B', 'chip': 'EFR32FG23', 'decim_list': '2,4,8,16,24,32,48,64', 'freq_max_hz': '440025000', 'freq_min_hz': '430000000', 'fs_in_hz': '400000', 'fw_esp': '623697e-dirty', 'fw_fg23': 'n/a', 'gain_shift_max': '0', 'hw': 'rev-b3-2l', 'ionos': '1', 'mode': 'STANDALONE', 'port': 'COM9', 'product': 'ionos-sdr-mini', 'protocol': 'v2', 'rssi': '1', 'spectrum': '1', 'tx': '0'}
+2026-11-08 18:20:29 WIDEBAND start; pad 30.5 dB
+2026-11-08 18:20:30 R OK fs=200000; sensors {'lost_blocks': '0', 'gap_events': '0', 'truncated_blocks': '0', 'resyncs': '0', 'stream_restarts': '0', 'host_overflows': '0', 'blocks': '246'}
+2026-11-08 18:20:57 map 150 MHz; resets 0; sensors {'lost_blocks': '0', 'gap_events': '0', 'truncated_blocks': '0', 'resyncs': '0', 'stream_restarts': '6', 'host_overflows': '0', 'blocks': '21307'}
+2026-11-08 18:24:40 map 200 MHz; resets 0; sensors {'lost_blocks': '0', 'gap_events': '0', 'truncated_blocks': '0', 'resyncs': '0', 'stream_restarts': '56', 'host_overflows': '0', 'blocks': '193580'}
+2026-11-08 18:35:53 map 250 MHz; resets 47; sensors {'lost_blocks': '0', 'gap_events': '0', 'truncated_blocks': '0', 'resyncs': '0', 'stream_restarts': '153', 'host_overflows': '0', 'blocks': '304276'}
+2026-11-08 18:47:34 map 300 MHz; resets 97; sensors {'lost_blocks': '0', 'gap_events': '0', 'truncated_blocks': '0', 'resyncs': '0', 'stream_restarts': '253', 'host_overflows': '0', 'blocks': '411276'}
+2026-11-08 18:59:15 map 350 MHz; resets 147; sensors {'lost_blocks': '0', 'gap_events': '0', 'truncated_blocks': '0', 'resyncs': '0', 'stream_restarts': '353', 'host_overflows': '0', 'blocks': '518016'}
+2026-11-08 19:10:56 map 400 MHz; resets 197; sensors {'lost_blocks': '0', 'gap_events': '0', 'truncated_blocks': '0', 'resyncs': '0', 'stream_restarts': '453', 'host_overflows': '0', 'blocks': '625046'}
+2026-11-08 19:22:37 map 450 MHz; resets 247; sensors {'lost_blocks': '0', 'gap_events': '0', 'truncated_blocks': '0', 'resyncs': '0', 'stream_restarts': '553', 'host_overflows': '0', 'blocks': '731878'}
+2026-11-08 19:34:18 map 500 MHz; resets 297; sensors {'lost_blocks': '0', 'gap_events': '0', 'truncated_blocks': '0', 'resyncs': '0', 'stream_restarts': '653', 'host_overflows': '0', 'blocks': '838772'}
+2026-11-08 19:45:59 map 550 MHz; resets 347; sensors {'lost_blocks': '0', 'gap_events': '0', 'truncated_blocks': '0', 'resyncs': '0', 'stream_restarts': '753', 'host_overflows': '0', 'blocks': '945756'}
+2026-11-08 19:57:41 map 600 MHz; resets 397; sensors {'lost_blocks': '1', 'gap_events': '1', 'truncated_blocks': '0', 'resyncs': '1', 'stream_restarts': '853', 'host_overflows': '0', 'blocks': '1052844'}
+2026-11-08 20:09:22 map 650 MHz; resets 447; sensors {'lost_blocks': '1', 'gap_events': '1', 'truncated_blocks': '0', 'resyncs': '1', 'stream_restarts': '953', 'host_overflows': '0', 'blocks': '1159808'}
+2026-11-08 20:21:03 map 700 MHz; resets 497; sensors {'lost_blocks': '1', 'gap_events': '1', 'truncated_blocks': '0', 'resyncs': '1', 'stream_restarts': '1053', 'host_overflows': '0', 'blocks': '1266604'}
+2026-11-08 20:32:47 map 750 MHz; resets 547; sensors {'lost_blocks': '1', 'gap_events': '1', 'truncated_blocks': '0', 'resyncs': '1', 'stream_restarts': '1153', 'host_overflows': '0', 'blocks': '1375234'}
+2026-11-08 20:44:38 map 800 MHz; resets 597; sensors {'lost_blocks': '1', 'gap_events': '1', 'truncated_blocks': '0', 'resyncs': '1', 'stream_restarts': '1253', 'host_overflows': '0', 'blocks': '1482083'}
+2026-11-08 20:56:20 map 850 MHz; resets 647; sensors {'lost_blocks': '2', 'gap_events': '2', 'truncated_blocks': '0', 'resyncs': '2', 'stream_restarts': '1353', 'host_overflows': '0', 'blocks': '1589111'}
+2026-11-08 21:08:01 map 900 MHz; resets 697; sensors {'lost_blocks': '2', 'gap_events': '2', 'truncated_blocks': '0', 'resyncs': '2', 'stream_restarts': '1453', 'host_overflows': '0', 'blocks': '1695974'}
+2026-11-08 21:19:42 map 950 MHz; resets 747; sensors {'lost_blocks': '2', 'gap_events': '2', 'truncated_blocks': '0', 'resyncs': '2', 'stream_restarts': '1553', 'host_overflows': '0', 'blocks': '1802759'}
+2026-11-08 21:31:23 map 1000 MHz; resets 797; sensors {'lost_blocks': '2', 'gap_events': '2', 'truncated_blocks': '0', 'resyncs': '2', 'stream_restarts': '1653', 'host_overflows': '0', 'blocks': '1909606'}
+2026-11-08 21:43:04 map 1050 MHz; resets 847; sensors {'lost_blocks': '4', 'gap_events': '4', 'truncated_blocks': '1', 'resyncs': '3', 'stream_restarts': '1753', 'host_overflows': '0', 'blocks': '2016810'}
+2026-11-08 21:54:45 map 1100 MHz; resets 897; sensors {'lost_blocks': '4', 'gap_events': '4', 'truncated_blocks': '1', 'resyncs': '3', 'stream_restarts': '1853', 'host_overflows': '0', 'blocks': '2123746'}
+2026-11-08 22:02:05 map 100 MHz; resets 922; sensors {'lost_blocks': '4', 'gap_events': '4', 'truncated_blocks': '1', 'resyncs': '3', 'stream_restarts': '1923', 'host_overflows': '0', 'blocks': '2246032'}
+2026-11-08 22:13:46 map 50 MHz; resets 972; sensors {'lost_blocks': '4', 'gap_events': '4', 'truncated_blocks': '1', 'resyncs': '3', 'stream_restarts': '2023', 'host_overflows': '0', 'blocks': '2353027'}
+2026-11-08 22:13:47 phase 1: 70 of 1051 MHz points receive
+2026-11-08 22:14:13 edge lower at 128.328..128.344 MHz
+2026-11-08 22:14:40 edge upper at 198.062..198.078 MHz
+2026-11-08 22:14:40 working ranges (1 MHz map): 129-198 MHz
+2026-11-08 22:37:59 phase 2 done; sensors {'lost_blocks': '4', 'gap_events': '4', 'truncated_blocks': '1', 'resyncs': '3', 'stream_restarts': '2313', 'host_overflows': '0', 'blocks': '2658786'}
+2026-11-08 22:38:06 arb load: True 408800 minta @ 100000 Hz
+2026-11-08 23:05:54 phase 3 done; sensors {'lost_blocks': '4', 'gap_events': '4', 'truncated_blocks': '1', 'resyncs': '3', 'stream_restarts': '2383', 'host_overflows': '0', 'blocks': '2983744'}
+2026-11-08 23:05:57 WIDEBAND end; sensors {'lost_blocks': '4', 'gap_events': '4', 'truncated_blocks': '1', 'resyncs': '3', 'stream_restarts': '2385', 'host_overflows': '0', 'blocks': '2984195'}

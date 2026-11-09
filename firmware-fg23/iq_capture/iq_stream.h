@@ -69,6 +69,8 @@ bool iq_stream_pump(void);
  * is defined in ONE place — otherwise the printed and the actual value
  * drift apart. */
 uint32_t iq_stream_out_sps(uint16_t decim);
+/* Nearest supported total decimation: 2, 4, or a multiple of 8 (8..4096). */
+uint16_t iq_stream_norm_decim(uint32_t d);
 
 /* Pin test ('g'): toggles the three lines as plain GPIO at separate
  * frequencies (CS 1 kHz, SCLK 2 kHz, MOSI 4 kHz).

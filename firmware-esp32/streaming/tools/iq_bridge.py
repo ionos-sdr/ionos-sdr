@@ -124,7 +124,9 @@ def main():
                     help="meaningless for native USB CDC, but harmless")
     args = ap.parse_args()
 
-    ser = serial.Serial(args.device, args.baud, timeout=1)
+    # RTS must stay low: asserting it resets the ESP32-S3 (USB-Serial/JTAG), see usb_host_test.py
+    ser = serial.Serial(); ser.port = args.device; ser.baudrate = args.baud; ser.timeout = 1
+    ser.rts = False; ser.dtr = True; ser.open()
     srv = TcpServer(args.host, args.port)
     st = Stats()
 

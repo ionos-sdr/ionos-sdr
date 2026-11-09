@@ -37,7 +37,7 @@
 
 // <q SL_DEBUG_SWO_ENABLE> Enable Debug SWO
 // <i> Default: 1
-#define SL_DEBUG_SWO_ENABLE                     1
+#define SL_DEBUG_SWO_ENABLE                     0  /* PA03 = SWO is the WS2812 DIN of the DevKit on the ionos-sdr-mini cradle (GPIO48); 2026-11-03 */
 
 // <o SL_DEBUG_SWO_FREQ> SWO Frequency
 // <i> Must be 875 kHz for communication with Silicon Labs debuggers

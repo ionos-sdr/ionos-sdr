@@ -1,0 +1,8 @@
+# FG23 SDR / ionos-sdr-mini — ESP32-S3-N16R8, 16 MB flash, one app (4 MB) + LittleFS (~11.9 MB), no OTA.
+# The LittleFS partition keeps the "spiffs" name/subtype: LittleFS.begin() in flashlog.cpp mounts that label by default.
+# Used by [env:ionos_mini]: board_build.partitions (PlatformIO) and CONFIG_PARTITION_TABLE_CUSTOM_FILENAME (ESP-IDF).
+# Name,     Type, SubType,  Offset,    Size
+nvs,        data, nvs,      0x9000,    0x5000
+factory,    app,  factory,  0x10000,   0x400000
+spiffs,     data, spiffs,   0x410000,  0xBE0000
+coredump,   data, coredump, 0xFF0000,  0x10000

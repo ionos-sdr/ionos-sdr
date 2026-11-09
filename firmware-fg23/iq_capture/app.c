@@ -149,7 +149,7 @@ typedef struct {
  * including 'i<R>' to restart.
  *
  *   IQ_AUTOSTART        1 = start automatically, 0 = keep the old behaviour
- *   IQ_AUTOSTART_DECIM  the TOTAL decimation (multiple of 8, 8..4096)
+ *   IQ_AUTOSTART_DECIM  the TOTAL decimation (2, 4, or a multiple of 8 up to 4096)
  *                         8 ->  50 000 sps  (+-25 kHz)
  *                        16 ->  25 000 sps
  *                        32 ->  12 500 sps  <- this is "i32"
@@ -428,9 +428,7 @@ static void cmdlink_yield(void) { cmdlink_poll(); }
 
 static void stream_start_R(uint32_t R, uint8_t shift, const char *honnan)
 {
-  if (R < 8u)    R = 8u;
-  if (R > 4096u) R = 4096u;
-  R = (R / 8u) * 8u;
+  R = iq_stream_norm_decim(R);   /* 2, 4, or a multiple of 8 (2026-11-04) */
   s_stream_R = R;
   armed = false;
 
@@ -502,6 +500,82 @@ static void tune_khz(uint32_t khz)
          "(offset %ld ticks)\r\n",
          (unsigned long)khz, (unsigned long)TUNE_BASE_KHZ, (long)ch,
          (unsigned)TUNE_SPACING_KHZ, (long)res_hz, (long)tick);
+}
+
+/* ---------------- 'B<kHz>' : arbitrary base frequency (2026-11-06) ----------------
+ * Wideband characterisation: the generated PHY covers one channel grid
+ * (Radio Configurator), but the synthesizer can go further. 'B<kHz>' builds a
+ * RAM copy of the PHY's first channel entry with a new base frequency (one
+ * channel, fresh IR-cal attributes) and points RAIL at it; 'B0' returns to the
+ * generated channel config. Whether RX really works there (synth range of the
+ * PHY's VCO divider, front-end) is for the measurement to find out - this only
+ * reports what RAIL says. No crystal correction is applied in this mode. */
+#include "rail_config.h"
+static RAIL_ChannelConfigEntryAttr_t s_b_attr;
+static RAIL_ChannelConfigEntry_t     s_b_entry;
+static RAIL_ChannelConfig_t          s_b_cfg;
+static uint32_t                      s_b_khz = 0;     /* 0 = generated PHY */
+volatile uint32_t g_b_dbg[6];      /* breadcrumbs for SWD (FGRD): step, first ch, valid, startrx st */
+
+/* RAIL_ConfigChannels() applies the PHY's register set again, and with it the
+ * PHY's own data configuration (packet mode): the I/Q source has to be set
+ * again, or RX runs but delivers nothing (measured 2026-11-08: B ran to the
+ * end, RAIL_STATUS_NO_ERROR everywhere, 0 blocks/s). */
+static void reapply_iq_data_config(void)
+{
+  RAIL_DataConfig_t dc = {
+    .txSource = TX_PACKET_DATA,
+    .rxSource = RX_IQDATA_FILTLSB,
+    .txMethod = PACKET_MODE,
+    .rxMethod = FIFO_MODE,
+  };
+  RAIL_ConfigData(s_rail, &dc);
+  RAIL_SetRxFifoThreshold(s_rail, THRESHOLD_BYTES);
+  RAIL_ResetFifo(s_rail, false, true);
+}
+
+static void base_override(uint32_t khz)
+{
+  g_b_dbg[0] = 1;
+  RAIL_Idle(s_rail, RAIL_IDLE_ABORT, true);
+  g_b_dbg[0] = 2;
+  if (khz == 0) {
+    (void)RAIL_ConfigChannels(s_rail, channelConfigs[0], NULL);
+    reapply_iq_data_config();
+    s_b_khz = 0;
+    s_channel = (uint16_t)IQ_CHANNEL;
+    s_freq_tick = corr_tick_for_khz(current_khz());
+    printf("# B0: back to the generated PHY (base %lu kHz)\r\n", (unsigned long)TUNE_BASE_KHZ);
+    return;
+  }
+  const RAIL_ChannelConfig_t *g = channelConfigs[0];
+  s_b_entry = g->configs[0];
+  memset(&s_b_attr, 0xFF, sizeof s_b_attr);          /* RAIL_CAL_INVALID_VALUE: redo IR cal */
+  s_b_entry.attr = &s_b_attr;
+  s_b_entry.baseFrequency = khz * 1000u;
+  s_b_entry.physicalChannelOffset = 0;
+  s_b_entry.channelNumberStart = 0;
+  s_b_entry.channelNumberEnd = 0;
+  s_b_cfg = *g;
+  s_b_cfg.configs = &s_b_entry;
+  s_b_cfg.length = 1;
+  s_b_cfg.signature = 0;
+  g_b_dbg[0] = 3;
+  uint16_t first = RAIL_ConfigChannels(s_rail, &s_b_cfg, NULL);
+  g_b_dbg[0] = 4; g_b_dbg[1] = first;
+  reapply_iq_data_config();
+  RAIL_Status_t v = RAIL_IsValidChannel(s_rail, 0);
+  g_b_dbg[2] = (uint32_t)v;
+  s_b_khz = khz;
+  s_channel = 0;
+  s_freq_tick = 0;
+  g_b_dbg[0] = 5;
+  RAIL_Status_t st = RAIL_StartRx(s_rail, 0, NULL);
+  g_b_dbg[3] = (uint32_t)st; g_b_dbg[0] = 6;
+  RAIL_Idle(s_rail, RAIL_IDLE_ABORT, true);
+  g_b_dbg[0] = 7;
+  printf("# B%lu: base override, first ch %u, valid %d, StartRx st %d\r\n",
+         (unsigned long)khz, (unsigned)first, (int)v, (int)st);
 }
 
 void app_init(void)
@@ -1047,6 +1121,7 @@ static void handle_line(const char *line)
        * it with the same R. A pause of a few milliseconds. */
       uint32_t R = s_stream_R;
       bool was_stream = stream_suspend();
+      if (s_b_khz) base_override(0);    /* F works on the generated channel grid */
       tune_khz(khz);
       if (s_tx_active) {
         tx_stream_start(s_tx_mode);   /* the carrier must follow the tuning */
@@ -1060,6 +1135,14 @@ static void handle_line(const char *line)
         stream_start_R(R, (uint8_t)IQ_AUTOSTART_SHIFT, "after tuning");
       }
     }
+  } else if (c == 'B') {              /* arbitrary base frequency, see base_override() */
+    uint32_t khz = (uint32_t)atoi(line + 1);
+    uint32_t R = s_stream_R;
+    (void)stream_suspend();
+    base_override(khz);
+    g_b_dbg[0] = 8;
+    if (!capturing) stream_start_R(R, (uint8_t)IQ_AUTOSTART_SHIFT, khz ? "after B" : "after B0");
+    g_b_dbg[0] = 9; g_b_dbg[4]++;
   } else if (c == 'f') {
     /* Raw channel change. The same FIFO hazard as with 'F': restart_rx()
      * calls RAIL_ResetFifo, which the zero-copy stream's own read pointer

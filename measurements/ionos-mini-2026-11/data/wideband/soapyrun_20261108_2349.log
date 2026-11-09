@@ -1,0 +1,3 @@
+2026-11-08 23:49:42 SoapyIonos: {'board': 'BRD4265B', 'chip': 'EFR32FG23', 'decim_list': '2,4,8,16,24,32,48,64', 'freq_max_hz': '440025000', 'freq_min_hz': '430000000', 'fs_in_hz': '400000', 'fw_esp': '623697e-dirty', 'fw_fg23': 'n/a', 'gain_shift_max': '0', 'hw': 'rev-b3-2l', 'ionos': '1', 'mode': 'USB', 'port': 'COM9', 'product': 'ionos-sdr-mini', 'protocol': 'v2', 'rssi': '1', 'spectrum': '1', 'tx': '0'}
+2026-11-08 23:49:43 RECHECK start
+2026-11-08 23:51:06 B done (noise spectra, VSG off)

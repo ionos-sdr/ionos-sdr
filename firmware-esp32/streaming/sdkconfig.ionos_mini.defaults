@@ -1,0 +1,247 @@
+# SPDX-License-Identifier: MIT
+#
+# FG23 SDR / ionos-sdr-mini — ESP-IDF project configuration for [env:ionos_mini]
+#
+# This file is the SINGLE SOURCE OF TRUTH for the sdkconfig of the hybrid
+# (framework = arduino, espidf) build. It is passed to CMake as
+# SDKCONFIG_DEFAULTS from platformio.ini; every symbol not listed here takes
+# the ESP-IDF Kconfig default for the esp32s3 target.
+#
+# The generated sdkconfig lands in .pio/build/ionos_mini/sdkconfig. Read THAT
+# file to see what really took effect: Kconfig dependencies can silently veto
+# a line written here (a choice symbol whose "depends on" is false simply
+# stays unset — see the WiFi TX buffer note below).
+#
+# tools/pio_sdkconfig_refresh.py deletes the generated sdkconfig whenever this
+# file is newer, so an edit here is re-applied on the next "pio run" without a
+# manual clean (ESP-IDF itself lets an existing sdkconfig win over defaults).
+#
+# ============================================================================
+#  Arduino core as an ESP-IDF component — the mandatory part
+# ============================================================================
+CONFIG_ARDUINO_VARIANT="esp32s3"
+CONFIG_AUTOSTART_ARDUINO=y
+# setup()/loop() on core 1, the network event task on core 1 (same as the
+# -DARDUINO_RUNNING_CORE=1 / -DARDUINO_EVENT_RUNNING_CORE=1 of the plain
+# Arduino build).
+CONFIG_ARDUINO_RUN_CORE1=y
+CONFIG_ARDUINO_EVENT_RUN_CORE1=y
+CONFIG_ARDUINO_LOOP_STACK_SIZE=8192
+CONFIG_ARDUHAL_ESP_LOG=y
+# The core is written for a 1 kHz tick (delay(), millis()).
+CONFIG_FREERTOS_HZ=1000
+CONFIG_FREERTOS_ENABLE_BACKWARD_COMPATIBILITY=y
+# Compile ONLY the Arduino libraries this firmware uses (SPI/Wire are needed
+# by LovyanGFX, FS+LittleFS by flashlog.cpp, Network+WiFi by main.cpp).
+# Everything not listed below is left out of the core: no BLE, no RainMaker,
+# no Zigbee, no ESP_SR, no WebServer. That is a big part of why this build is
+# shorter than the custom_sdkconfig rebuild of the whole lib-builder tree.
+CONFIG_ARDUINO_SELECTIVE_COMPILATION=y
+CONFIG_ARDUINO_SELECTIVE_SPI=y
+CONFIG_ARDUINO_SELECTIVE_Wire=y
+CONFIG_ARDUINO_SELECTIVE_FS=y
+CONFIG_ARDUINO_SELECTIVE_LittleFS=y
+CONFIG_ARDUINO_SELECTIVE_Network=y
+CONFIG_ARDUINO_SELECTIVE_WiFi=y
+# CONFIG_ARDUINO_SELECTIVE_ESP_SR is not set
+# CONFIG_ARDUINO_SELECTIVE_EEPROM is not set
+# CONFIG_ARDUINO_SELECTIVE_Preferences is not set
+# CONFIG_ARDUINO_SELECTIVE_Ticker is not set
+# CONFIG_ARDUINO_SELECTIVE_Update is not set
+# CONFIG_ARDUINO_SELECTIVE_Zigbee is not set
+# CONFIG_ARDUINO_SELECTIVE_SD is not set
+# CONFIG_ARDUINO_SELECTIVE_SD_MMC is not set
+# CONFIG_ARDUINO_SELECTIVE_SPIFFS is not set
+# CONFIG_ARDUINO_SELECTIVE_FFat is not set
+# CONFIG_ARDUINO_SELECTIVE_Ethernet is not set
+# CONFIG_ARDUINO_SELECTIVE_PPP is not set
+# CONFIG_ARDUINO_SELECTIVE_Hash is not set
+# CONFIG_ARDUINO_SELECTIVE_ArduinoOTA is not set
+# CONFIG_ARDUINO_SELECTIVE_AsyncUDP is not set
+# CONFIG_ARDUINO_SELECTIVE_DNSServer is not set
+# CONFIG_ARDUINO_SELECTIVE_ESPmDNS is not set
+# CONFIG_ARDUINO_SELECTIVE_HTTPClient is not set
+# CONFIG_ARDUINO_SELECTIVE_Matter is not set
+# CONFIG_ARDUINO_SELECTIVE_NetBIOS is not set
+# CONFIG_ARDUINO_SELECTIVE_WebServer is not set
+# CONFIG_ARDUINO_SELECTIVE_NetworkClientSecure is not set
+# CONFIG_ARDUINO_SELECTIVE_WiFiProv is not set
+# CONFIG_ARDUINO_SELECTIVE_BLE is not set
+# CONFIG_ARDUINO_SELECTIVE_BluetoothSerial is not set
+# CONFIG_ARDUINO_SELECTIVE_SimpleBLE is not set
+# CONFIG_ARDUINO_SELECTIVE_RainMaker is not set
+# CONFIG_ARDUINO_SELECTIVE_OpenThread is not set
+# CONFIG_ARDUINO_SELECTIVE_Insights is not set
+# Bluetooth is not used; leave the controller out of the image.
+# CONFIG_BT_ENABLED is not set
+
+# ============================================================================
+#  Flash: 16 MB, QIO, 80 MHz (S3-N16R8) and the partition table
+# ============================================================================
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+# 4 MB factory app + ~11.9 MB LittleFS ("spiffs" label, LittleFS.begin()
+# default) + coredump. Same file is given to PlatformIO as board_build.partitions.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_16mb_fs.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions_16mb_fs.csv"
+CONFIG_PARTITION_TABLE_OFFSET=0x8000
+
+# ============================================================================
+#  PSRAM: 8 MB OCTAL at 80 MHz, initialised by the IDF at boot
+# ============================================================================
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+# THE 2026-11-02 FINDING. The pioarduino custom_sdkconfig layer left this
+# unset, so the IDF never brought up the octal PSRAM and "SPIRAM free" was 0.
+# With it set, esp_psram_init() runs in the start-up code; Arduino's
+# psramInit() then only verifies and enables malloc() into it.
+CONFIG_SPIRAM_BOOT_HW_INIT=y
+CONFIG_SPIRAM_BOOT_INIT=y
+# mallocs LARGER than 16 kB go to PSRAM automatically (the 64 kB spyserver
+# ring moves there without code changes); smaller ones stay internal, which
+# is what the SPI-slave DMA path needs.
+CONFIG_SPIRAM_USE_MALLOC=y
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16384
+# WiFi/lwIP buffers are tried in PSRAM first (the 2026-08-18 heap exhaustion).
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+# Needed for the DYNAMIC WiFi TX buffers below — see that section.
+CONFIG_SPIRAM_IGNORE_NOTFOUND=y
+
+# ============================================================================
+#  SPI slave ISR in IRAM (the FG23 I/Q link)
+# ============================================================================
+# Without it spi_slave_initialize() rejects ESP_INTR_FLAG_IRAM with 258
+# (ESP_ERR_INVALID_ARG) and main.cpp falls back to LEVEL3, where a flash
+# operation (LittleFS write, WiFi calibration) can suspend the ISR.
+CONFIG_SPI_SLAVE_ISR_IN_IRAM=y
+
+# ============================================================================
+#  esp-modbus: a necessity, not a feature
+# ============================================================================
+# esp-modbus is a dependency of the Arduino core's idf_component.yml and is
+# built with -Werror; its _Static_assert needs
+# MAX_API_BLOCKING_TIME_MS >= TIMEOUT_MS_RESPOND (10000). Modbus is not used.
+CONFIG_FMB_MASTER_MAX_API_BLOCKING_TIME_MS=10000
+
+# ============================================================================
+#  lwIP / WiFi buffers (2026-11-02): the throughput knobs
+# ============================================================================
+# TCP is capped at SND_BUF / RTT; with the 3-14 ms RTT of a busy 2.4 GHz
+# evening the lib-builder defaults (5744 / 5760, 4 MSS) gave ~400 kB/s with
+# eagain on every send. Now that the PSRAM really is on, the buffers can be
+# large.
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT=32768
+CONFIG_LWIP_TCP_WND_DEFAULT=16384
+CONFIG_LWIP_TCP_RECVMBOX_SIZE=64
+CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=64
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=16
+CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=48
+# WiFi TX buffers: DYNAMIC (type 1), 32 of them.
+#
+# WHY THIS WAS "SILENTLY IGNORED" BEFORE: it is not a pioarduino quirk but a
+# Kconfig dependency. In esp_wifi/Kconfig:
+#     config ESP_WIFI_DYNAMIC_TX_BUFFER
+#         depends on !(SPIRAM_TRY_ALLOCATE_WIFI_LWIP && !SPIRAM_IGNORE_NOTFOUND)
+# i.e. with TRY_ALLOCATE_WIFI_LWIP=y the IDF insists on STATIC TX buffers
+# (with the zero-copy esp_wifi_internal_tx_by_ref() path and the CACHE_TX
+# buffers) unless SPIRAM_IGNORE_NOTFOUND=y. That is the one Kconfig path that
+# lets both coexist, and it is also what Arduino's own precompiled qio_opi
+# libs use. Side effects of IGNORE_NOTFOUND=y, for the record:
+#   - a board without PSRAM boots instead of panicking (harmless here);
+#   - WiFi TX goes through esp_wifi_internal_tx() (copy) instead of
+#     tx_by_ref(); ESP_WIFI_CACHE_TX_BUFFER_NUM disappears;
+#   - LWIP_TCP_OOSEQ_MAX_PBUFS defaults to 4 instead of 0, LWIP_WND_SCALE is
+#     not available.
+# If the measurement says static was better after all: drop IGNORE_NOTFOUND,
+# flip to ESP_WIFI_STATIC_TX_BUFFER=y and set ESP_WIFI_STATIC_TX_BUFFER_NUM.
+CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER=y
+# CONFIG_ESP_WIFI_STATIC_TX_BUFFER is not set
+CONFIG_ESP_WIFI_TX_BUFFER_TYPE=1
+CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=32
+CONFIG_ESP_WIFI_TX_BA_WIN=32
+CONFIG_ESP_WIFI_RX_BA_WIN=16
+# Keep the lib-builder's choice (WiFi code not in IRAM) so that the IRAM
+# budget of the SPI-slave ISR build is unchanged. Enabling the two below is a
+# known throughput knob at ~30 kB of IRAM.
+# CONFIG_ESP_WIFI_IRAM_OPT is not set
+# CONFIG_ESP_WIFI_RX_IRAM_OPT is not set
+CONFIG_ESP_WIFI_ENABLE_WPA3_SAE=y
+CONFIG_LWIP_TCP_MSS=1436
+CONFIG_LWIP_TCP_SYNMAXRTX=6
+CONFIG_LWIP_TCP_RTO_TIME=3000
+CONFIG_LWIP_TCPIP_TASK_STACK_SIZE=4096
+CONFIG_LWIP_TCPIP_TASK_AFFINITY_CPU0=y
+CONFIG_LWIP_MAX_SOCKETS=16
+CONFIG_LWIP_SO_RCVBUF=y
+CONFIG_LWIP_DHCP_OPTIONS_LEN=128
+CONFIG_LWIP_ETHARP_TRUST_IP_MAC=y
+# CONFIG_LWIP_DHCP_DOES_ARP_CHECK is not set
+CONFIG_LWIP_IPV6_AUTOCONFIG=y
+CONFIG_LWIP_SNTP_MAX_SERVERS=3
+CONFIG_LWIP_DHCP_GET_NTP_SRV=y
+
+# ============================================================================
+#  System: the rest of the lib-builder baseline worth keeping
+# ============================================================================
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+CONFIG_COMPILER_CXX_EXCEPTIONS=y
+CONFIG_COMPILER_STACK_CHECK_MODE_NORM=y
+CONFIG_COMPILER_WARN_WRITE_STRINGS=y
+# Console = UART0 (the CH343 of the DevKit); the USB-Serial/JTAG peripheral
+# belongs to Arduino's HWCDC (Serial, the raw I/Q stream), not to the IDF
+# console.
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+# CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG is not set
+# Task watchdog: watch the idle task of core 0 only. loop() runs on core 1
+# and is allowed to hog it (the Arduino core does the same).
+CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0=y
+# CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1 is not set
+CONFIG_ESP_TASK_WDT_PANIC=y
+CONFIG_ESP_INT_WDT_TIMEOUT_MS=300
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=4096
+CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=2048
+CONFIG_ESP_IPC_TASK_STACK_SIZE=1024
+CONFIG_ESP_TIMER_TASK_STACK_SIZE=8192
+CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT=2048
+CONFIG_FREERTOS_IDLE_TASK_STACKSIZE=1024
+CONFIG_ESP_SYSTEM_PANIC_PRINT_REBOOT=y
+CONFIG_LOG_DEFAULT_LEVEL_ERROR=y
+CONFIG_LOG_MAXIMUM_EQUALS_DEFAULT=y
+# CONFIG_LOG_COLORS is not set
+CONFIG_HEAP_POISONING_LIGHT=y
+CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
+CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y
+CONFIG_ESP_COREDUMP_CHECKSUM_CRC32=y
+CONFIG_ESP_COREDUMP_MAX_TASKS_NUM=64
+CONFIG_ESP_COREDUMP_STACK_SIZE=1024
+# Flash writes (LittleFS log) must not block the other core for long.
+CONFIG_SPI_FLASH_YIELD_DURING_ERASE=y
+CONFIG_SPI_FLASH_ERASE_YIELD_DURATION_MS=10
+CONFIG_SPI_FLASH_ERASE_YIELD_TICKS=2
+CONFIG_SPI_FLASH_WRITE_CHUNK_SIZE=4096
+CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
+CONFIG_MBEDTLS_DYNAMIC_FREE_PEER_CERT=y
+CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA=y
+CONFIG_ESP_PHY_REDUCE_TX_POWER=y
+
+# ============================================================================
+#  Native USB: USB-OTG + TinyUSB CDC-ACM (esp_tinyusb), 2026-11-04
+# ============================================================================
+# The USB-Serial/JTAG (HWCDC) tops out at ~776 kB/s; 200 ksps int16 needs
+# 812 kB/s. The OTG peripheral with TinyUSB takes over the USB pins at
+# runtime (tusb_cdc.cpp). Side effects: the chip no longer resets on the
+# host's DTR/RTS, the COM port number changes (new PID), flashing stays on
+# the CH343 UART. The CDC TX FIFO is only the USB-side buffer; the 256 kB
+# PSRAM ring in tusb_cdc.cpp absorbs host stalls.
+CONFIG_IONOS_TUSB_CDC_ENABLED=y
+CONFIG_TINYUSB_CDC_COUNT=1
+CONFIG_TINYUSB_CDC_RX_BUFSIZE=512
+CONFIG_TINYUSB_CDC_TX_BUFSIZE=4096
+CONFIG_TINYUSB_DESC_MANUFACTURER_STRING="Ionos SDR"
+CONFIG_TINYUSB_DESC_PRODUCT_STRING="ionos-sdr-mini"
+CONFIG_TINYUSB_DESC_CDC_STRING="Ionos SDR I/Q"
