@@ -928,6 +928,7 @@ static int16_t  rtl_prev_i = 0, rtl_prev_q = 0;
 #define TUNE_RATE_MS   250u
 static bool     rtl_pending = false;
 static uint32_t rtl_pending_khz = 0;
+static uint16_t rtl_pending_frac = 0;     /* Hz below the kHz (FH), 0..999 */
 static uint32_t rtl_last_tune_ms = 0;
 
 /* Common entry point for tuning requests (rtl_tcp AND spyserver).
@@ -938,15 +939,18 @@ extern "C" bool rtl_pending_set(uint32_t khz)
   /* SDR++ sends 0 Hz on connect, before the user sets anything. Forwarding
    * that would send "F0" to the FG23 - a meaningless command and a needless
    * stream restart. Only sensible frequencies are passed through. */
-  if (khz < 100000u || khz > 1000000u) {
+  /* FG23 per-divider tuning (2026-11-10): ~97-1625 and 2000-3125 MHz. */
+  if (khz < 85000u || khz > 3300000u) {
     DIAG.printf("\ntuning ignored: %lu kHz (out of band)\n",
                 (unsigned long)khz);
     return false;
   }
   rtl_pending_khz = khz;
+  rtl_pending_frac = 0;
   rtl_pending = true;
   return true;
 }
+extern "C" void rtl_pending_set_frac(uint16_t hz) { rtl_pending_frac = hz % 1000u; }
 
 /* ===================================================================
  *                             OLED
@@ -3011,7 +3015,8 @@ void loop()
     rtl_pending = false;
     rtl_last_tune_ms = now;
     char cmd[16];
-    snprintf(cmd, sizeof cmd, "F%lu", (unsigned long)rtl_pending_khz);
+    if (rtl_pending_frac) snprintf(cmd, sizeof cmd, "F%lu.%03u", (unsigned long)rtl_pending_khz, (unsigned)rtl_pending_frac);
+    else snprintf(cmd, sizeof cmd, "F%lu", (unsigned long)rtl_pending_khz);
     DIAG.printf("\nrtl_tcp: tuning %lu kHz\n",
                 (unsigned long)rtl_pending_khz);
     cmdlink_send(cmd);

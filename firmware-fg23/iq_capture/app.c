@@ -142,6 +142,15 @@ typedef struct {
  * again. On the final PCB the GPS+VCTCXO automates the same. */
 #define FREQ_CORR_PPB     15476     /* 2026-08-04 BB60C: 144.8 MHz -> 482 ticks (-15.3 ppm) */
 
+/* Crystal correction for the per-divider tuning path ('F' and 'B', 2026-11-10),
+ * applied to the base frequency in Hz, so it is independent of the
+ * divider-dependent tick size. Measured on the ionos-sdr-mini rev-B3 BRD4265B
+ * 2026-11-08 (VSG60, 129-198 MHz, no correction): the receiver LO is 4.2 ppm
+ * LOW (+540 Hz @ 129 MHz ... +827 Hz @ 198 MHz), so the LO is raised by
+ * 4.2 ppm. (The 15476 ppb above is from another unit and over-corrected this
+ * one to -11 ppm.) Board-specific: measure again on another board. */
+#define FREQ_CORR_RX_PPB   4200
+
 /* ================== AUTOSTART ==================
  * After power-up the stream starts by itself, so the unit works standalone
  * (no terminal, no command needed). The terminal still works FULLY: any
@@ -393,8 +402,10 @@ static int32_t corr_tick_for_khz(uint32_t khz)
 }
 
 /* The currently tuned frequency in kHz, from the channel and the offset. */
+static uint32_t s_b_khz_peek(void);
 static uint32_t current_khz(void)
 {
+  if (s_b_khz_peek()) return s_b_khz_peek();
   return (uint32_t)((long)TUNE_BASE_KHZ + (long)s_channel * (long)TUNE_SPACING_KHZ);
 }
 
@@ -521,8 +532,15 @@ static RAIL_ChannelConfigEntryAttr_t s_b_attr;
 static RAIL_ChannelConfigEntry_t     s_b_entry;
 static RAIL_ChannelConfig_t          s_b_cfg;
 static uint32_t                      s_b_khz = 0;     /* 0 = generated PHY */
+static uint32_t                      s_b_hz = 0;      /* synth base actually set (Hz) */
 static uint8_t                       s_b_div = 0;     /* LO divider of the B entry, 0 = PHY's own */
 static const uint8_t k_lodiv[] = {1,2,3,4,5,6,7,8,9,10,12,14,15,16,18,20,21,24};
+/* VCO window per divider [MHz] where RAIL_ConfigChannels returns and data
+ * flows (measured 2026-11-10, 50 MHz steps), 50 MHz margin applied, upper end
+ * capped at 6250 MHz: on-board clock harmonics prove lock only up to ~6.24
+ * GHz. Outside every window RAIL_ConfigChannels would hang -> 'F' refuses. */
+static const uint16_t k_vco_lo[] = {4050,4050,4100,4050,4200,4100,4800,4650,4550,4500,4100,4750,4350,4650,4550,4500,4750,4650};
+static const uint16_t k_vco_hi[] = {6200,6250,6000,6250,5900,6000,6250,6250,6250,6250,6250,6250,6250,6250,6250,6250,6250,6250};
 volatile uint32_t g_b_dbg[6];      /* breadcrumbs for SWD (FGRD): step, first ch, valid, startrx st */
 
 /* RAIL_ConfigChannels() applies the PHY's register set again, and with it the
@@ -542,28 +560,35 @@ static void reapply_iq_data_config(void)
   RAIL_ResetFifo(s_rail, false, true);
 }
 
-static void base_override(uint32_t khz, uint8_t force_div)
+static uint32_t s_b_khz_peek(void) { return s_b_khz; }
+static bool base_override_hz(uint32_t hz, uint8_t force_div)
 {
+  uint32_t khz = (hz + 500u) / 1000u;
   g_b_dbg[0] = 1;
   RAIL_Idle(s_rail, RAIL_IDLE_ABORT, true);
   g_b_dbg[0] = 2;
-  if (khz == 0) {
+  if (hz == 0) {
     (void)RAIL_ConfigChannels(s_rail, channelConfigs[0], NULL);
     reapply_iq_data_config();
-    s_b_khz = 0; s_b_div = 0;
+    s_b_khz = 0; s_b_hz = 0; s_b_div = 0;
     s_channel = (uint16_t)IQ_CHANNEL;
     s_freq_tick = corr_tick_for_khz(current_khz());
     printf("# B0: back to the generated PHY (base %lu kHz)\r\n", (unsigned long)TUNE_BASE_KHZ);
-    return;
+    return true;
   }
   const RAIL_ChannelConfig_t *g = channelConfigs[0];
   uint8_t d = force_div;
-  if (d == 0) {                                      /* VCO closest to 5.2 GHz */
+  if (d == 0) {                    /* inside the measured window, VCO closest to 5.2 GHz */
     uint64_t best = UINT64_MAX;
     for (unsigned i = 0; i < sizeof k_lodiv; i++) {
       uint64_t vco = 2ull * k_lodiv[i] * khz;        /* kHz */
+      if (vco < 1000ull * k_vco_lo[i] || vco > 1000ull * k_vco_hi[i]) continue;
       uint64_t e = vco > 5200000ull ? vco - 5200000ull : 5200000ull - vco;
       if (e < best) { best = e; d = k_lodiv[i]; }
+    }
+    if (d == 0) {
+      printf("# %lu kHz: no LO divider reaches it (VCO window), not tuned\r\n", (unsigned long)khz);
+      return false;
     }
   }
   unsigned idx = 0;                                  /* fallback: the PHY's own entry */
@@ -573,7 +598,7 @@ static void base_override(uint32_t khz, uint8_t force_div)
   s_b_entry = g->configs[idx];
   memset(&s_b_attr, 0xFF, sizeof s_b_attr);          /* RAIL_CAL_INVALID_VALUE: redo IR cal */
   s_b_entry.attr = &s_b_attr;
-  s_b_entry.baseFrequency = khz * 1000u;
+  s_b_entry.baseFrequency = hz;
   s_b_entry.physicalChannelOffset = 0;
   s_b_entry.channelNumberStart = 0;
   s_b_entry.channelNumberEnd = 0;
@@ -587,7 +612,7 @@ static void base_override(uint32_t khz, uint8_t force_div)
   reapply_iq_data_config();
   RAIL_Status_t v = RAIL_IsValidChannel(s_rail, 0);
   g_b_dbg[2] = (uint32_t)v;
-  s_b_khz = khz;
+  s_b_khz = khz; s_b_hz = hz;
   s_channel = 0;
   s_freq_tick = 0;
   g_b_dbg[0] = 5;
@@ -598,6 +623,22 @@ static void base_override(uint32_t khz, uint8_t force_div)
   printf("# B%lu: base override, LO div %u (VCO %lu MHz), first ch %u, valid %d, StartRx st %d\r\n",
          (unsigned long)khz, (unsigned)s_b_div, (unsigned long)(2ull * s_b_div * khz / 1000u),
          (unsigned)first, (int)v, (int)st);
+  return true;
+}
+
+static void base_override(uint32_t khz, uint8_t force_div)
+{
+  (void)base_override_hz(khz * 1000u, force_div);   /* 'B': raw, no crystal correction */
+}
+
+/* 'F' on the per-divider path: the requested RF frequency in Hz, crystal-
+ * corrected, as the synth base; channel 0, no fine offset. */
+static void tune_hz_div(uint32_t hz)
+{
+  uint32_t base = (uint32_t)((double)hz * (1.0 + (double)FREQ_CORR_RX_PPB * 1e-9) + 0.5);
+  if (!base_override_hz(base, 0)) return;
+  printf("# tuning: %lu Hz (synth base %lu Hz, crystal corr %d ppb, LO div %u)\r\n",
+         (unsigned long)hz, (unsigned long)base, (int)FREQ_CORR_RX_PPB, (unsigned)s_b_div);
 }
 
 void app_init(void)
@@ -1132,10 +1173,23 @@ static void handle_line(const char *line)
     if (s_tx_active) {                /* takes effect on a live stream via restart */
       tx_stream_start(s_tx_mode);
     }
-  } else if (c == 'F') {              /* ABSOLUTE tuning in kHz */
-    uint32_t khz = (uint32_t)atoi(line + 1);
-    if (khz < 100000u || khz > 1000000u) {
-      printf("# usage: F<kHz>, e.g. F433775 (LoRa-APRS) or F434000\r\n");
+  } else if (c == 'F') {              /* ABSOLUTE tuning: F<kHz>[.<Hz, 3 digits>] */
+    uint32_t khz = (uint32_t)strtoul(line + 1, NULL, 10);
+    const char *dot = strchr(line, '.');
+    uint32_t frac = 0;
+    if (dot) {                                        /* ".5" = 500 Hz, ".123" = 123 Hz */
+      unsigned n = 0;
+      for (const char *q = dot + 1; *q >= '0' && *q <= '9' && n < 3; q++, n++) frac = frac * 10u + (uint32_t)(*q - '0');
+      while (n++ < 3) frac *= 10u;
+    }
+    if (khz < 85000u || khz > 3300000u) {
+      printf("# usage: F<kHz>[.Hz], 85000..3300000 kHz (no LO divider for 1626-1999 MHz)\r\n");
+    } else if (!s_tx_active) {
+      /* RX: per-divider path (2026-11-10) - any frequency the synth reaches. */
+      uint32_t R = s_stream_R;
+      (void)stream_suspend();
+      tune_hz_div(khz * 1000u + frac);
+      if (!capturing) stream_start_R(R, (uint8_t)IQ_AUTOSTART_SHIFT, "after tuning");
     } else {
       /* Tuning also means RAIL_ResetFifo. The stream reads ZERO-COPY, so
        * it has its own pointer into the FIFO — it would not survive a
@@ -1321,6 +1375,8 @@ static void handle_line(const char *line)
               + (long)s_channel * (long)TUNE_SPACING_KHZ * 1000
               + (long)((s_freq_tick - corr_tick_for_khz(current_khz()))
                        * 46492 / 10000);
+    if (s_b_hz) printf("# divider path: synth base %lu Hz, LO div %u (F/B)\r\n",
+                       (unsigned long)s_b_hz, (unsigned)s_b_div);
     printf("# events=%lu short=%lu ovf=%lu idx=%lu armed=%d\r\n",
            (unsigned long)stat_events, (unsigned long)stat_short_reads,
            (unsigned long)stat_overflows, (unsigned long)capture_idx,

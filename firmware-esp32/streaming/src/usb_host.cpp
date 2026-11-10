@@ -80,6 +80,7 @@ static uint32_t s_stat_period_ms = 2000;
 static bool     s_host_spoke = false;   /* status only once the host has sent a line (v1 hosts: hello only) */
 static uint32_t s_stat_last_ms = 0;
 static bool     s_conn_prev = false;
+extern "C" void rtl_pending_set_frac(uint16_t hz);   /* main.cpp */
 static int32_t  s_pending_o = 0;        /* fine offset to send after a pending F */
 static uint32_t s_pending_o_ms = 0;
 
@@ -100,7 +101,7 @@ static void send_hello(void)
   char b[512];
   snprintf(b, sizeof b,
            "ionos=1\nproduct=ionos-sdr-mini\nhw=rev-b3-2l\nboard=%s\nchip=EFR32FG23\n"
-           "fw_esp=%s\nfw_fg23=%s\nfreq_min_hz=430000000\nfreq_max_hz=440025000\n"
+           "fw_esp=%s\nfw_fg23=%s\nfreq_min_hz=97000000\nfreq_max_hz=3125000000\nfreq_ranges_hz=97000000-1625000000,2000000000-3125000000\n"
            "fs_in_hz=%lu\ndecim_list=2,4,8,16,24,32,48,64\ngain_shift_max=0\nrssi=1\nspectrum=1\ntx=0\n"
            "mode=%s\n",
            i.board, i.fw_esp, i.fw_fg23, (unsigned long)FG23_FS_IN, s_usb_mode ? "USB" : "STANDALONE");
@@ -153,15 +154,14 @@ static void handle_line(char *line)
     return;
   }
   if (!strncmp(line, "FH", 2)) {
-    long hz = atol(line + 2);
-    if (hz < 100000000L || hz > 1000000000L) { reply("ERR FH: 100000000..1000000000 Hz\n"); return; }
-    long khz = hz / 1000, rem = hz - khz * 1000;
-    if (rem > 500) { khz++; rem -= 1000; }
-    long ticks = lroundf((float)rem / TICK_HZ);
-    if (!menu_host_tune((uint32_t)khz)) { reply("ERR tune rejected\n"); return; }
-    s_pending_o = ticks; s_pending_o_ms = millis();       /* 'o' follows the (rate-limited) F */
-    long got = khz * 1000 + lroundf((float)ticks * TICK_HZ);
-    reply("OK\nf=%ld (F%ld + o%ld)\n", got, khz, ticks);
+    /* 2026-11-10: the FG23 'F' takes F<kHz>.<Hz> on the per-divider path,
+     * so no 'o' fine offset any more (its tick size depends on the divider). */
+    unsigned long long hz = strtoull(line + 2, NULL, 10);
+    if (hz < 85000000ULL || hz > 3300000000ULL) { reply("ERR FH: 85000000..3300000000 Hz\n"); return; }
+    uint32_t khz = (uint32_t)(hz / 1000ULL), rem = (uint32_t)(hz % 1000ULL);
+    if (!menu_host_tune(khz)) { reply("ERR tune rejected\n"); return; }
+    rtl_pending_set_frac((uint16_t)rem);
+    reply("OK\nf=%llu (F%lu.%03lu)\n", hz, (unsigned long)khz, (unsigned long)rem);
     return;
   }
   if (line[0] == 'R' && (line[1] == ' ' || (line[1] >= '0' && line[1] <= '9'))) {
