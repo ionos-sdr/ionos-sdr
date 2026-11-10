@@ -509,12 +509,20 @@ static void tune_khz(uint32_t khz)
  * channel, fresh IR-cal attributes) and points RAIL at it; 'B0' returns to the
  * generated channel config. Whether RX really works there (synth range of the
  * PHY's VCO divider, front-end) is for the measurement to find out - this only
- * reports what RAIL says. No crystal correction is applied in this mode. */
+ * reports what RAIL says. No crystal correction is applied in this mode.
+ *
+ * Full coverage (2026-11-10): the radio config carries one extra channel entry
+ * per LO divider (channels 2000+d, "LO div d", generated at VCO = 5.2 GHz).
+ * f_RF = f_VCO / (2*d), d in {1..10,12,14,15,16,18,20,21,24} (calc_synth.py).
+ * 'B<kHz>' picks the divider that puts the VCO closest to 5.2 GHz and uses that
+ * entry as template; 'B<kHz>,<d>' forces a divider (VCO range exploration). */
 #include "rail_config.h"
 static RAIL_ChannelConfigEntryAttr_t s_b_attr;
 static RAIL_ChannelConfigEntry_t     s_b_entry;
 static RAIL_ChannelConfig_t          s_b_cfg;
 static uint32_t                      s_b_khz = 0;     /* 0 = generated PHY */
+static uint8_t                       s_b_div = 0;     /* LO divider of the B entry, 0 = PHY's own */
+static const uint8_t k_lodiv[] = {1,2,3,4,5,6,7,8,9,10,12,14,15,16,18,20,21,24};
 volatile uint32_t g_b_dbg[6];      /* breadcrumbs for SWD (FGRD): step, first ch, valid, startrx st */
 
 /* RAIL_ConfigChannels() applies the PHY's register set again, and with it the
@@ -534,7 +542,7 @@ static void reapply_iq_data_config(void)
   RAIL_ResetFifo(s_rail, false, true);
 }
 
-static void base_override(uint32_t khz)
+static void base_override(uint32_t khz, uint8_t force_div)
 {
   g_b_dbg[0] = 1;
   RAIL_Idle(s_rail, RAIL_IDLE_ABORT, true);
@@ -542,14 +550,27 @@ static void base_override(uint32_t khz)
   if (khz == 0) {
     (void)RAIL_ConfigChannels(s_rail, channelConfigs[0], NULL);
     reapply_iq_data_config();
-    s_b_khz = 0;
+    s_b_khz = 0; s_b_div = 0;
     s_channel = (uint16_t)IQ_CHANNEL;
     s_freq_tick = corr_tick_for_khz(current_khz());
     printf("# B0: back to the generated PHY (base %lu kHz)\r\n", (unsigned long)TUNE_BASE_KHZ);
     return;
   }
   const RAIL_ChannelConfig_t *g = channelConfigs[0];
-  s_b_entry = g->configs[0];
+  uint8_t d = force_div;
+  if (d == 0) {                                      /* VCO closest to 5.2 GHz */
+    uint64_t best = UINT64_MAX;
+    for (unsigned i = 0; i < sizeof k_lodiv; i++) {
+      uint64_t vco = 2ull * k_lodiv[i] * khz;        /* kHz */
+      uint64_t e = vco > 5200000ull ? vco - 5200000ull : 5200000ull - vco;
+      if (e < best) { best = e; d = k_lodiv[i]; }
+    }
+  }
+  unsigned idx = 0;                                  /* fallback: the PHY's own entry */
+  for (unsigned i = 0; i < g->length; i++)
+    if (g->configs[i].channelNumberStart == 2000u + d) { idx = i; break; }
+  s_b_div = idx ? d : 0;
+  s_b_entry = g->configs[idx];
   memset(&s_b_attr, 0xFF, sizeof s_b_attr);          /* RAIL_CAL_INVALID_VALUE: redo IR cal */
   s_b_entry.attr = &s_b_attr;
   s_b_entry.baseFrequency = khz * 1000u;
@@ -574,8 +595,9 @@ static void base_override(uint32_t khz)
   g_b_dbg[3] = (uint32_t)st; g_b_dbg[0] = 6;
   RAIL_Idle(s_rail, RAIL_IDLE_ABORT, true);
   g_b_dbg[0] = 7;
-  printf("# B%lu: base override, first ch %u, valid %d, StartRx st %d\r\n",
-         (unsigned long)khz, (unsigned)first, (int)v, (int)st);
+  printf("# B%lu: base override, LO div %u (VCO %lu MHz), first ch %u, valid %d, StartRx st %d\r\n",
+         (unsigned long)khz, (unsigned)s_b_div, (unsigned long)(2ull * s_b_div * khz / 1000u),
+         (unsigned)first, (int)v, (int)st);
 }
 
 void app_init(void)
@@ -1121,7 +1143,7 @@ static void handle_line(const char *line)
        * it with the same R. A pause of a few milliseconds. */
       uint32_t R = s_stream_R;
       bool was_stream = stream_suspend();
-      if (s_b_khz) base_override(0);    /* F works on the generated channel grid */
+      if (s_b_khz) base_override(0, 0);    /* F works on the generated channel grid */
       tune_khz(khz);
       if (s_tx_active) {
         tx_stream_start(s_tx_mode);   /* the carrier must follow the tuning */
@@ -1137,9 +1159,11 @@ static void handle_line(const char *line)
     }
   } else if (c == 'B') {              /* arbitrary base frequency, see base_override() */
     uint32_t khz = (uint32_t)atoi(line + 1);
+    const char *comma = strchr(line, ',');
+    uint8_t fdiv = comma ? (uint8_t)atoi(comma + 1) : 0;
     uint32_t R = s_stream_R;
     (void)stream_suspend();
-    base_override(khz);
+    base_override(khz, fdiv);
     g_b_dbg[0] = 8;
     if (!capturing) stream_start_R(R, (uint8_t)IQ_AUTOSTART_SHIFT, khz ? "after B" : "after B0");
     g_b_dbg[0] = 9; g_b_dbg[4]++;
