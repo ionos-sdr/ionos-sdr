@@ -307,6 +307,7 @@
 #include "aprs_rx.h"
 #endif
 #include "cw_rx.h"          /* CW Morse decoder */
+#include "ais_mode.h"       /* AIS receiver, NMEA on TCP 10110 */
 
 /* ---- Menu and button. The Heltec V3 PRG button (GPIO0) pages through the
  * screens and switches the demodulators. Details: ui.h */
@@ -697,7 +698,36 @@ static void spi_rx_task(void *arg)
   }
 }
 
-#define DIAG  Serial0     /* CP2102: text diagnostics */
+/* DIAG = the UART console, mirrored to TCP port 2323 once WiFi is up (2026-11-19, field
+ * tests away from the bench: "nc <ip> 2323" sees the same text and can type commands).
+ * Input: the UART first, then the TCP client. One client; a new one replaces the old. */
+#include <WiFi.h>
+class DiagTee : public Stream {
+public:
+  void tick() {
+    if (!started_ && WiFi.status() == WL_CONNECTED) { srv_.begin(); srv_.setNoDelay(true); started_ = true; }
+    if (started_ && srv_.hasClient()) {
+      WiFiClient n = srv_.available();
+      if (cli_ && cli_.connected()) cli_.stop();
+      cli_ = n; cli_.setNoDelay(true);
+      cli_.printf("ionos-mini console (TCP mirror of the UART)\r\n");
+    }
+  }
+  size_t write(uint8_t c) override { Serial0.write(c); if (live()) cli_.write(c); return 1; }
+  size_t write(const uint8_t *b, size_t n) override { Serial0.write(b, n); if (live()) cli_.write(b, n); return n; }
+  int available() override { int a = Serial0.available(); return a ? a : (live() ? cli_.available() : 0); }
+  int read() override { if (Serial0.available()) return Serial0.read(); return (live() && cli_.available()) ? cli_.read() : -1; }
+  int peek() override { if (Serial0.available()) return Serial0.peek(); return (live() && cli_.available()) ? cli_.peek() : -1; }
+  void flush() override { Serial0.flush(); }
+private:
+  bool live() { return cli_ && cli_.connected(); }
+  WiFiServer srv_{2323};
+  WiFiClient cli_;
+  bool started_ = false;
+};
+static DiagTee g_diag;
+Stream &diag_stream(void) { return g_diag; }
+#define DIAG  g_diag      /* CP2102 text diagnostics, + TCP 2323 */
 #if IONOS_USB_TINYUSB
 #include "tusb_cdc.h"
 #define RAW   TusbSerial  /* native USB: USB-OTG + TinyUSB CDC-ACM (tusb_cdc.h) */
@@ -928,6 +958,7 @@ static int16_t  rtl_prev_i = 0, rtl_prev_q = 0;
 #define TUNE_RATE_MS   250u
 static bool     rtl_pending = false;
 static uint32_t rtl_pending_khz = 0;
+static uint16_t rtl_pending_frac = 0;     /* Hz below the kHz (FH), 0..999 */
 static uint32_t rtl_last_tune_ms = 0;
 
 /* Common entry point for tuning requests (rtl_tcp AND spyserver).
@@ -938,15 +969,18 @@ extern "C" bool rtl_pending_set(uint32_t khz)
   /* SDR++ sends 0 Hz on connect, before the user sets anything. Forwarding
    * that would send "F0" to the FG23 - a meaningless command and a needless
    * stream restart. Only sensible frequencies are passed through. */
-  if (khz < 100000u || khz > 1000000u) {
+  /* FG23 per-divider tuning (2026-11-10): ~97-1625 and 2000-3125 MHz. */
+  if (khz < 85000u || khz > 3300000u) {
     DIAG.printf("\ntuning ignored: %lu kHz (out of band)\n",
                 (unsigned long)khz);
     return false;
   }
   rtl_pending_khz = khz;
+  rtl_pending_frac = 0;
   rtl_pending = true;
   return true;
 }
+extern "C" void rtl_pending_set_frac(uint16_t hz) { rtl_pending_frac = hz % 1000u; }
 
 /* ===================================================================
  *                             OLED
@@ -1288,6 +1322,25 @@ static void oled_page_scan(void)
   }
 }
 
+/* ---- AIS: last message (type, MMSI, position), counters ---- */
+static void oled_page_ais(void)
+{
+  char buf[48];
+  oled_header("AIS 161.975");
+  const char *last = ais_mode_last();
+  char l1[22], l2[22];
+  snprintf(l1, sizeof l1, "%.21s", last[0] ? last : "-- waiting --");
+  snprintf(l2, sizeof l2, "%.21s", (strlen(last) > 21) ? last + 21 : "");
+  u8g2.setFont(u8g2_font_6x10_tr);
+  oled_fit(0, 24, l1);
+  oled_fit(0, 35, l2);
+  snprintf(buf, sizeof buf, "RX:%lu H:%lu ship:%lu",
+           (unsigned long)ais_mode_frames(), (unsigned long)ais_mode_bad(),
+           (unsigned long)ais_mode_ships());
+  oled_fit(0, 46, buf);
+  oled_fit(0, 57, "NMEA TCP 10110");
+}
+
 /* ---- Demodulators not yet implemented. No pretending: we state that it is
  * not ready, and what is missing. ---- */
 static void oled_page_todo(ui_page_t p)
@@ -1324,6 +1377,7 @@ static void oled_draw(void)
     case UI_PAGE_APRS: oled_page_aprs(); break;
 #endif
     case UI_PAGE_CW:   oled_page_cw();   break;
+    case UI_PAGE_AIS:  oled_page_ais();  break;
     case UI_PAGE_WSPR:
     case UI_PAGE_FT8:  oled_page_todo(ui_page()); break;
     default:           oled_page_status(); break;
@@ -2040,6 +2094,8 @@ static void deliver(const uint8_t *b)
 #endif
   /* CW: the same raw int16 I/Q, it only needs the envelope */
   if (demod_on && ui_mode() == UI_PAGE_CW) cw_rx_feed(iq, nsamp, cur_sps);
+  /* AIS: GMSK 9600, channel A, same raw int16 I/Q (ais_mode.cpp / ais_rx.c) */
+  if (demod_on && ui_mode() == UI_PAGE_AIS) ais_mode_feed(iq, nsamp, cur_sps);
 
   /* --- (a) USB: the WHOLE block goes, header included. The PC side strips
    * the header; in return it can resynchronise on the magic at any time,
@@ -2378,6 +2434,9 @@ static void console_dispatch(const char *cmd)
     wifi_last_try_ms = 0; wifi_scan_req = true; DIAG.println("WiFi back ON, reconnecting"); return;
   }
 #endif
+  /* Mode switch without the buttons (field tests over TCP 2323) */
+  if (!strcmp(cmd, "AISGO"))  { ui_set_mode(UI_PAGE_AIS);  return; }
+  if (!strcmp(cmd, "APRSGO")) { ui_set_mode(UI_PAGE_APRS); return; }
   if (!strcmp(cmd, "U")) ui_ladder_diag();
   else if (!strcmp(cmd, "M")) { if (menu_is_open()) menu_close(); else menu_open(); }
   else if (cmd[0] == 'O' && (cmd[1] == '0' || cmd[1] == '1') && !cmd[2]) { oled_paused = (cmd[1] == '0'); DIAG.printf("OLED refresh %s\n", oled_paused ? "PAUSED" : "on"); }
@@ -2385,7 +2444,7 @@ static void console_dispatch(const char *cmd)
 #if IONOS_USB_TINYUSB
   else if (tusb_cdc_cmd(cmd)) { }
 #endif
-  else if (!fg23_prog_cmd(cmd, DIAG) && !wifi_bench_cmd(cmd) && !rgb_load_cmd(cmd)) iq_fft_cmd(cmd);
+  else if (!fg23_prog_cmd(cmd, Serial0) && !wifi_bench_cmd(cmd) && !rgb_load_cmd(cmd)) iq_fft_cmd(cmd);
 }
 
 static void bench_console_tick(void)
@@ -2507,9 +2566,9 @@ void setup()
    * 115200 is ~16 ms - in that time three blocks arrive on i8, and if no SPI
    * transaction is queued, they are lost FOR GOOD. Buffer + faster baud, and
    * the output becomes "free". */
-  DIAG.setTxBufferSize(2048);
-  DIAG.setRxBufferSize(4096);   /* fg23_prog: 2 kB image chunks */
-  DIAG.begin(115200);
+  Serial0.setTxBufferSize(2048);
+  Serial0.setRxBufferSize(4096);   /* fg23_prog: 2 kB image chunks */
+  Serial0.begin(115200);
 
   /* The native USB CDC TX buffer is a few hundred bytes by default, which
    * cannot even hold one 1040-byte block - this is where the whole chain
@@ -2729,6 +2788,7 @@ void setup()
   aprs_rx_init();
 #endif
   cw_rx_init();
+  ais_mode_init();
 
   DIAG.println("Over USB (PC-side decoder + SPI loss measurement):");
   DIAG.println("   python usb_aprs_rx.py --period 1.131 --seconds 90");
@@ -2772,6 +2832,7 @@ void setup()
    * the FG23 (decimation, tuning) once the stream state is known. */
   menu_init();
   menu_apply_boot();
+  ui_apply_mode_tune();      /* APRS start mode -> 144.800, overrides the NVS freq */
   usbhost_init();
   DIAG.println("MENU: OK button opens it; console 'M' toggles it");
 
@@ -2864,6 +2925,7 @@ void loop()
 
   /* WiFi ceiling meter: 'B...' commands from the DIAG console. Non-blocking,
    * and only does anything when a character has arrived. */
+  g_diag.tick();
   bench_console_tick();
 
   /* --- loop time measurement. The longest gap between two iterations is
@@ -2975,6 +3037,13 @@ void loop()
       ui_flash(UI_PAGE_CW, 8000);   /* keep the CW page for 8 s */
     }
   }
+  /* AIS: NMEA TCP server + flash to the AIS page on a new message */
+  ais_mode_tick(now);
+  {
+    static uint32_t seen_ais = 0;
+    uint32_t lms = ais_mode_last_ms();
+    if (lms && lms != seen_ais) { seen_ais = lms; ui_flash(UI_PAGE_AIS, 8000); }
+  }
   /* On a page change draw IMMEDIATELY, do not wait for the next period -
    * otherwise nothing happens for a second and a half after the button
    * press, and it would seem broken. */
@@ -3011,7 +3080,8 @@ void loop()
     rtl_pending = false;
     rtl_last_tune_ms = now;
     char cmd[16];
-    snprintf(cmd, sizeof cmd, "F%lu", (unsigned long)rtl_pending_khz);
+    if (rtl_pending_frac) snprintf(cmd, sizeof cmd, "F%lu.%03u", (unsigned long)rtl_pending_khz, (unsigned)rtl_pending_frac);
+    else snprintf(cmd, sizeof cmd, "F%lu", (unsigned long)rtl_pending_khz);
     DIAG.printf("\nrtl_tcp: tuning %lu kHz\n",
                 (unsigned long)rtl_pending_khz);
     cmdlink_send(cmd);
