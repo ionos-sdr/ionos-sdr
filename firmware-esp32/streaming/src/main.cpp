@@ -307,6 +307,7 @@
 #include "aprs_rx.h"
 #endif
 #include "cw_rx.h"          /* CW Morse decoder */
+#include "ais_mode.h"       /* AIS receiver, NMEA on TCP 10110 */
 
 /* ---- Menu and button. The Heltec V3 PRG button (GPIO0) pages through the
  * screens and switches the demodulators. Details: ui.h */
@@ -1321,6 +1322,25 @@ static void oled_page_scan(void)
   }
 }
 
+/* ---- AIS: last message (type, MMSI, position), counters ---- */
+static void oled_page_ais(void)
+{
+  char buf[48];
+  oled_header("AIS 161.975");
+  const char *last = ais_mode_last();
+  char l1[22], l2[22];
+  snprintf(l1, sizeof l1, "%.21s", last[0] ? last : "-- waiting --");
+  snprintf(l2, sizeof l2, "%.21s", (strlen(last) > 21) ? last + 21 : "");
+  u8g2.setFont(u8g2_font_6x10_tr);
+  oled_fit(0, 24, l1);
+  oled_fit(0, 35, l2);
+  snprintf(buf, sizeof buf, "RX:%lu H:%lu ship:%lu",
+           (unsigned long)ais_mode_frames(), (unsigned long)ais_mode_bad(),
+           (unsigned long)ais_mode_ships());
+  oled_fit(0, 46, buf);
+  oled_fit(0, 57, "NMEA TCP 10110");
+}
+
 /* ---- Demodulators not yet implemented. No pretending: we state that it is
  * not ready, and what is missing. ---- */
 static void oled_page_todo(ui_page_t p)
@@ -1357,6 +1377,7 @@ static void oled_draw(void)
     case UI_PAGE_APRS: oled_page_aprs(); break;
 #endif
     case UI_PAGE_CW:   oled_page_cw();   break;
+    case UI_PAGE_AIS:  oled_page_ais();  break;
     case UI_PAGE_WSPR:
     case UI_PAGE_FT8:  oled_page_todo(ui_page()); break;
     default:           oled_page_status(); break;
@@ -2073,6 +2094,8 @@ static void deliver(const uint8_t *b)
 #endif
   /* CW: the same raw int16 I/Q, it only needs the envelope */
   if (demod_on && ui_mode() == UI_PAGE_CW) cw_rx_feed(iq, nsamp, cur_sps);
+  /* AIS: GMSK 9600, channel A, same raw int16 I/Q (ais_mode.cpp / ais_rx.c) */
+  if (demod_on && ui_mode() == UI_PAGE_AIS) ais_mode_feed(iq, nsamp, cur_sps);
 
   /* --- (a) USB: the WHOLE block goes, header included. The PC side strips
    * the header; in return it can resynchronise on the magic at any time,
@@ -2411,6 +2434,9 @@ static void console_dispatch(const char *cmd)
     wifi_last_try_ms = 0; wifi_scan_req = true; DIAG.println("WiFi back ON, reconnecting"); return;
   }
 #endif
+  /* Mode switch without the buttons (field tests over TCP 2323) */
+  if (!strcmp(cmd, "AISGO"))  { ui_set_mode(UI_PAGE_AIS);  return; }
+  if (!strcmp(cmd, "APRSGO")) { ui_set_mode(UI_PAGE_APRS); return; }
   if (!strcmp(cmd, "U")) ui_ladder_diag();
   else if (!strcmp(cmd, "M")) { if (menu_is_open()) menu_close(); else menu_open(); }
   else if (cmd[0] == 'O' && (cmd[1] == '0' || cmd[1] == '1') && !cmd[2]) { oled_paused = (cmd[1] == '0'); DIAG.printf("OLED refresh %s\n", oled_paused ? "PAUSED" : "on"); }
@@ -2762,6 +2788,7 @@ void setup()
   aprs_rx_init();
 #endif
   cw_rx_init();
+  ais_mode_init();
 
   DIAG.println("Over USB (PC-side decoder + SPI loss measurement):");
   DIAG.println("   python usb_aprs_rx.py --period 1.131 --seconds 90");
@@ -3009,6 +3036,13 @@ void loop()
       seen_cw = lms;
       ui_flash(UI_PAGE_CW, 8000);   /* keep the CW page for 8 s */
     }
+  }
+  /* AIS: NMEA TCP server + flash to the AIS page on a new message */
+  ais_mode_tick(now);
+  {
+    static uint32_t seen_ais = 0;
+    uint32_t lms = ais_mode_last_ms();
+    if (lms && lms != seen_ais) { seen_ais = lms; ui_flash(UI_PAGE_AIS, 8000); }
   }
   /* On a page change draw IMMEDIATELY, do not wait for the next period -
    * otherwise nothing happens for a second and a half after the button

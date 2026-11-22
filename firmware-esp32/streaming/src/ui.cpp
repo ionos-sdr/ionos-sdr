@@ -8,6 +8,7 @@
  */
 
 #include "ui.h"
+#include "ais_mode.h"      /* AIS_TUNE_KHZ */
 #include <Arduino.h>
 #include "driver/gpio.h"
 #include "esp_adc/adc_oneshot.h"
@@ -47,6 +48,7 @@ static const ui_entry_t UI_TABLE[UI_PAGE_COUNT] = {
   { "SCAN",       false,  true,  0             },   /* dithered waterfall — view */
   { "APRS",       true,   true,  UI_APRS_KHZ   },   /* AFSK1200 iGate, 2 m APRS (Region 1) */
   { "CW",         true,   true,  0             },
+  { "AIS",        true,   true,  AIS_TUNE_KHZ  },   /* ch A 161.975 at -10 kHz (ais_mode.h) */
   { "WSPR",       true,   false, 0             },
   { "FT8",        true,   false, 0             },
 };
@@ -312,7 +314,7 @@ void ui_tick(uint32_t now)
    * The SCAN page also stays while being viewed (it must not jump away
    * after 20 s while the waterfall is being watched). */
   const bool locked = (s_demod_pinned &&
-                       (s_page == UI_PAGE_APRS || s_page == UI_PAGE_CW))
+                       (s_page == UI_PAGE_APRS || s_page == UI_PAGE_CW || s_page == UI_PAGE_AIS))
                    || (s_page == UI_PAGE_SCAN);
 
   if (s_hold_until_ms && (int32_t)(now - s_hold_until_ms) >= 0) {
@@ -331,6 +333,22 @@ void ui_flash(ui_page_t p, uint32_t hold_ms)
   uint32_t now = millis();
   ui_set_page(p, now);
   s_hold_until_ms = now + hold_ms;
+}
+
+/* Switch the running demodulator from code (console AISGO/APRSGO): same
+ * effect as paging to it by hand — mode, page, pin, tuning. */
+void ui_set_mode(ui_page_t p)
+{
+  if (p >= UI_PAGE_COUNT || !UI_TABLE[p].is_demod || !UI_TABLE[p].ready) return;
+  uint32_t now = millis();
+  ui_set_page(p, now);
+  s_hold_until_ms = 0;
+  if (s_mode != p) {
+    s_mode = p;
+    Serial0.printf("\nUI: mode -> %s\n", UI_TABLE[p].name);
+  }
+  s_demod_pinned = true;
+  ui_mode_tune();
 }
 
 ui_page_t   ui_page(void)                 { return s_page; }

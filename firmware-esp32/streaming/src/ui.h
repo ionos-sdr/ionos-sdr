@@ -50,6 +50,7 @@ typedef enum {
   UI_PAGE_SCAN,         /* dithered spectrum + waterfall (SPECLINE) */
   UI_PAGE_APRS,         /* AFSK1200 iGate */
   UI_PAGE_CW,           /* CW Morse decoder */
+  UI_PAGE_AIS,          /* AIS ship tracking, channel A (161.975) */
   UI_PAGE_WSPR,         /* future */
   UI_PAGE_FT8,          /* future */
   UI_PAGE_COUNT
@@ -64,6 +65,8 @@ void ui_init(void);
 /* Tune to the running mode's own channel (APRS: UI_APRS_KHZ). Call once at
  * boot AFTER menu_apply_boot(), so it overrides the NVS frequency. */
 void ui_apply_mode_tune(void);
+/* Switch the running demodulator from code (console AISGO / APRSGO). */
+void ui_set_mode(ui_page_t p);
 void ui_ladder_diag(void);   /* console U: button ladder mV (ionos-sdr-mini) */
 
 /* From the main loop, every iteration. Handles the button and the idle
