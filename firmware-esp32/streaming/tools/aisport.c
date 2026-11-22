@@ -1,5 +1,6 @@
 /* aisport.c — PC harness for ais_rx.c (the SAME file the firmware compiles).
- *   build: gcc -O2 -o aisport aisport.c ais_rx.c -lm
+ *   build (from firmware-esp32/streaming/tools):
+ *     gcc -O2 -I../src -o aisport aisport.c ../src/ais_rx.c -lm
  *   run:   ./aisport file.iq16 sps tune_khz [-swap] [-q]
  *   file.iq16 = raw interleaved int16 I,Q (iq2raw.py makes it from .npy/.wav)
  */
@@ -16,7 +17,9 @@ static void on_frame(const uint8_t *fr, int len, char chan, uint32_t t, void *ct
   char d[160], n[400];
   ais_describe(fr, len, d, sizeof d);
   ais_nmea(fr, len, chan, n, sizeof n);
-  printf("  t=%7.2f s  %c  %s\n              %s\n", t / 48000.0, chan, d, n);
+  const ais_rx_t *r = (const ais_rx_t *)ctx;
+  printf("  t=%7.2f s  %c  %s\n              %s\n              lvl %.1f dBFS  snr %.1f dB  foff %+.0f Hz\n",
+         t / 48000.0, chan, d, n, r->last_lvl_dbfs, r->last_snr_db, r->last_foff_hz);
 }
 
 int main(int argc, char **argv)
@@ -34,8 +37,8 @@ int main(int argc, char **argv)
   int32_t offA = (int32_t)llround((161975.0 - tune) * 1000.0), offB = (int32_t)llround((162025.0 - tune) * 1000.0);
   int useA = abs(offA) + 8000 <= (int)sps / 2, useB = abs(offB) + 8000 <= (int)sps / 2;
   A.fc_hz = fc; A.mm_n = mm; B.fc_hz = fc; B.mm_n = mm;
-  ais_rx_init(&A, sps, offA, 'A', on_frame, NULL); A.swap_iq = (uint8_t)swap;
-  ais_rx_init(&B, sps, offB, 'B', on_frame, NULL); B.swap_iq = (uint8_t)swap;
+  ais_rx_init(&A, sps, offA, 'A', on_frame, &A); A.swap_iq = (uint8_t)swap;
+  ais_rx_init(&B, sps, offB, 'B', on_frame, &B); B.swap_iq = (uint8_t)swap;
   fprintf(stderr, "# sps %u tune %.3f MHz  A %+d Hz %s  B %+d Hz %s  FIR %d taps fc %d  mm %d bits\n", sps, tune / 1000,
           offA, useA ? "on" : "off", offB, useB ? "on" : "off", A.ch_n, (int)A.fc_hz, A.mm_n / 5);
   FILE *f = fopen(argv[1], "rb"); if (!f) { perror(argv[1]); return 1; }

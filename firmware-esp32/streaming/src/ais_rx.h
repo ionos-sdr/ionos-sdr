@@ -38,6 +38,11 @@ typedef struct {
   ais_lane_t lane[5]; int lane_k;
   uint32_t nout, last_out; uint16_t last_fcs;
   uint32_t frames, crc_bad;
+  /* per-packet RF parameters (valid inside the frame callback):
+   * level = channel power over the last ~5 ms of the frame, noise = slow
+   * floor tracked outside bursts, foff = carrier offset from the slicer mean */
+  int64_t  p_fast, p_noise;
+  float    last_lvl_dbfs, last_snr_db, last_foff_hz;
 } ais_rx_t;
 
 /* off_hz = channel frequency - tuned centre frequency */

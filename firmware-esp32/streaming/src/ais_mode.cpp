@@ -45,9 +45,18 @@ static void on_frame(const uint8_t *fr, int len, char chan, uint32_t t48k, void 
   snprintf(s_last, sizeof s_last, "%.47s", d);
   s_last_ms = millis();
   note_mmsi(fr, len);
-  diag_stream().printf("AIS RX: %s\n%s\n", d, n);
+  /* per-packet RF parameters as a proprietary sentence right after the
+   * !AIVDM it belongs to: $PIONS,AIS,<chan>,<level dBFS>,<SNR dB>,<foff Hz>
+   * (OpenCPN ignores unknown $P sentences; ais_web.py shows them) */
+  char p[80];
+  int pl = snprintf(p, sizeof p, "PIONS,AIS,%c,%.1f,%.1f,%.0f", chan,
+                    (double)s_a.last_lvl_dbfs, (double)s_a.last_snr_db, (double)s_a.last_foff_hz);
+  uint8_t cs = 0; for (int k = 0; k < pl; k++) cs ^= (uint8_t)p[k];
+  char ps[96]; snprintf(ps, sizeof ps, "$%s*%02X", p, cs);
+  diag_stream().printf("AIS RX: %s | %.1f dBFS SNR %.1f dB df %+.0f Hz\n%s\n", d,
+                       (double)s_a.last_lvl_dbfs, (double)s_a.last_snr_db, (double)s_a.last_foff_hz, n);
   for (int i = 0; i < AIS_MAX_CLI; i++)
-    if (s_cli[i] && s_cli[i].connected()) { s_cli[i].print(n); s_cli[i].print("\r\n"); }
+    if (s_cli[i] && s_cli[i].connected()) { s_cli[i].print(n); s_cli[i].print("\r\n"); s_cli[i].print(ps); s_cli[i].print("\r\n"); }
 }
 
 void ais_mode_init(void)
