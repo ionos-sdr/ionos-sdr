@@ -51,6 +51,8 @@ The I/Q stream is the mode that has had the most measurement time: block‑bound
 | NBFM voice TX, CW TX (ramped envelope) | validated |
 | WSPR encoder | bit‑exact vs. independent reference; on‑air WSPR TX (VCTCXO pulling) in progress |
 | Wideband RSSI fast scan → SDR++ (fg23 source module) | working, ~5–7 lines/s at 10 MHz span |
+| APRS receive / iGate (on‑device AFSK demod, channel FIR) | validated: 20 of 20 bursts on a 20‑min 144.800 capture (old demod: 0), ~25 packets/h live |
+| AIS receive, channel A, NMEA on TCP 10110 | validated on Danube traffic: 89 % of bursts decoded on battery supply — see *AIS receive* |
 | On‑device FFT waterfall, 2.8" TFT | working |
 | Multi‑point frequency calibration | validated |
 | GPS time + locator | working |
@@ -69,6 +71,35 @@ The I/Q stream is the mode that has had the most measurement time: block‑bound
 | I²S sample rate | 39 MHz / N; 1000 ksps @ 270 kHz BW, 400 @ 100, 70 @ 50 |
 | FIFO read | `RAIL_ReadRxFifo(rail, NULL, n)` (zero‑copy): 75 % → 11 % CPU at 1 Msps |
 | Front‑end | DC block between bias‑tee and FG23 match is mandatory; firmware TX interlock protects the LNA |
+
+## AIS receive (161.975 MHz)
+
+The ESP32‑S3 decodes AIS channel A (87B, 161.975 MHz, GMSK 9600 bd) on the device and serves raw `!AIVDM` sentences on **TCP 10110** — OpenCPN connects to it directly (Network → TCP → `<ESP IP>:10110`). The **AIS** UI page tunes 161.985 MHz, which puts channel A at −10 kHz, away from DC, the 1/f noise and the display's DC patch. The console commands `AISGO` / `APRSGO` switch modes without the buttons (also over the TCP 2323 console mirror).
+
+**Chain** (`src/ais_rx.c`, one file for the firmware and the PC harness `tools/aisport.c`): NCO mix → complex FIR 6 kHz (Q15) → `fm_angle_q13` discriminator → linear resample to 48 kHz (5 samples/bit) → 64‑bit moving‑mean slicer → **5 parallel sample‑phase lanes**, each with its own NRZI + HDLC + CRC‑16/X.25 → de‑duplication. Five fixed lanes instead of a PLL: an AIS burst is ~26 ms with 24 training bits, too short for a PLL to lock cleanly.
+
+### Measurements (2026‑11‑22, Budapest, Danube; mag‑mount 2 m whip)
+
+| Condition | Duration | Bursts | With a gain dip | Decoded |
+|---|---|---|---|---|
+| USB from a mains‑charged laptop, antenna on a radiator | 12 min | 398 | 386 (97 %) | **13 (3 %)** |
+| same, on‑device FFT off | 90 s | 45 | 44 | 1 |
+| **Powerbank**, antenna on the radiator | 90 s | 63 | 1 | **56 (89 %)** |
+| Powerbank, live (guest map, 70 min) | 70 min | – | – | **788 messages, 82 stations** (64 river AtoN, 14 vessels, 1 shore station) |
+| USB from the laptop, antenna off the radiator (no counterpoise) | 90 s | 0 | – | 0 |
+
+<p align="center"><img src="docs/img/ais_groundloop_bars.png" width="70%" alt="AIS bursts: 97 % with a gain dip and 3 % decoded on mains-charged USB, vs 2 % and 89 % on a powerbank"></p>
+
+<p align="center"><img src="docs/img/ais_burst_envelope.png" width="90%" alt="AIS burst envelope: a ~4 ms, -15 dB dip on mains-charged USB; flat on a powerbank"></p>
+
+- **Ground loop, not the demodulator.** On the mains‑charged laptop's USB, with the antenna clamped to a radiator in a house with no protective earth, the receiver gain drops 12–17 dB for 2–4 ms **every 20 ms**. The noise floor is modulated at 50/100/150 Hz (100 Hz line +45 dB; +13 dB on the powerbank). Inside a dip the carrier keeps its phase (no sample loss) and the dips are not aligned to the 256‑sample SPI blocks, so the data path is clean — it is a front‑end/AGC effect. It also blanks on‑channel APRS and a CW test carrier. **Power the receiver from a battery, or isolate the USB**, when the antenna touches a building ground.
+- **Reference = port.** On the 12‑min capture the float reference (`tools/ais_ref.py`) and the fixed‑point port decode exactly the same 13 frames.
+- **Sensitivity (synthetic GMSK, 20 bursts per point, SNR in 14 kHz):** 20 / 17 / 9 decoded at 15 / 12 / 10 dB with the 6 kHz channel filter. 5 kHz: 19 / 11 / 2, 8 kHz: 14 / 0 / 0. A Gaussian post‑detection filter made it worse (ISI); a 16‑bit slicer window instead of 64 bits gave only 8 / 20 at 20 dB.
+- **Bit order, measured on real traffic:** the HDLC bytes, assembled first‑bit‑to‑LSB, are already the message bytes MSB‑first. The per‑byte‑reversed variant also passes the CRC but decodes nonsense (type 42, latitude 101°). Only real traffic ("KISFALUDY", virtual AtoN "1645.3_G") told the two apart; a synthetic test written with the same assumption cannot.
+
+**Limitations / next:** channel B (162.025) is outside the ±25 kHz band at 50 ksps — single channel for now. About one CRC‑passing junk frame per hour (types 40/48) needs a type‑vs‑length check. No type 5 (two‑slot static data, vessel names) was decoded in the live hour yet. Per‑packet RSSI and frequency offset are not exported yet.
+
+Details, scripts and the decoded NMEA sample: [`measurements/2026-11-22_ais_rx/`](measurements/2026-11-22_ais_rx/).
 
 ## Repository
 
