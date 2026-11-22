@@ -32,18 +32,23 @@ typedef struct {
   const char *name;
   bool        is_demod;   /* switches a mode, or is only a view */
   bool        ready;      /* implemented yet */
+  uint32_t    tune_khz;   /* the mode's own channel, tuned on entry; 0 = keep */
 } ui_entry_t;
 
+/* tune_khz: a demodulator bound to ONE channel owns its frequency. Without
+ * this the APRS decoder ran on whatever the menu NVS held (default 433.775,
+ * LoRa-APRS) — 2026-11-22, a board with empty NVS sat at 433.775 in APRS mode
+ * although the FG23 itself boots to 144.800. */
 static const ui_entry_t UI_TABLE[UI_PAGE_COUNT] = {
-  /* name         demod   ready */
-  { "STATUS",     false,  true  },
-  { "RF",         false,  true  },
-  { "SDR",        false,  true  },   /* stream statistics (short: fits the TFT header) */
-  { "SCAN",       false,  true  },   /* dithered waterfall — view */
-  { "APRS",       true,   true  },   /* AFSK1200 iGate */
-  { "CW",         true,   true  },
-  { "WSPR",       true,   false },
-  { "FT8",        true,   false },
+  /* name         demod   ready  tune_khz */
+  { "STATUS",     false,  true,  0             },
+  { "RF",         false,  true,  0             },
+  { "SDR",        false,  true,  0             },   /* stream statistics (short: fits the TFT header) */
+  { "SCAN",       false,  true,  0             },   /* dithered waterfall — view */
+  { "APRS",       true,   true,  UI_APRS_KHZ   },   /* AFSK1200 iGate, 2 m APRS (Region 1) */
+  { "CW",         true,   true,  0             },
+  { "WSPR",       true,   false, 0             },
+  { "FT8",        true,   false, 0             },
 };
 
 /* ==================== STATE ==================== */
@@ -51,6 +56,16 @@ static const ui_entry_t UI_TABLE[UI_PAGE_COUNT] = {
 static ui_page_t s_page = UI_PAGE_STATUS;
 static ui_page_t s_mode = UI_PAGE_STATUS;
 static bool      s_dirty = true;
+
+/* Tune to the running mode's channel, if it has one. */
+static void ui_mode_tune(void)
+{
+  uint32_t k = UI_TABLE[s_mode].tune_khz;
+  if (k && menu_host_tune(k))
+    Serial0.printf("UI: %s -> tuning %lu.%03lu MHz\n", UI_TABLE[s_mode].name,
+                   (unsigned long)(k / 1000), (unsigned long)(k % 1000));
+}
+void ui_apply_mode_tune(void) { ui_mode_tune(); }
 
 static bool      s_btn_stable = false;   /* true = pressed */
 static bool      s_btn_raw = false;
@@ -89,6 +104,7 @@ static void ui_next(uint32_t now)
     if (s_mode != p) {
       s_mode = p;
       Serial0.printf("\nUI: mode -> %s\n", UI_TABLE[p].name);
+      ui_mode_tune();
     }
   }
   s_hold_until_ms = 0;
@@ -105,6 +121,7 @@ static void ui_prev(uint32_t now)
   if (UI_TABLE[p].is_demod && UI_TABLE[p].ready && s_mode != p) {
     s_mode = p;
     Serial0.printf("\nUI: mode -> %s\n", UI_TABLE[p].name);
+    ui_mode_tune();
   }
   s_hold_until_ms = 0;
   s_demod_pinned = (UI_TABLE[p].is_demod && UI_TABLE[p].ready);

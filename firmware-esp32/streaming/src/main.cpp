@@ -697,7 +697,36 @@ static void spi_rx_task(void *arg)
   }
 }
 
-#define DIAG  Serial0     /* CP2102: text diagnostics */
+/* DIAG = the UART console, mirrored to TCP port 2323 once WiFi is up (2026-11-19, field
+ * tests away from the bench: "nc <ip> 2323" sees the same text and can type commands).
+ * Input: the UART first, then the TCP client. One client; a new one replaces the old. */
+#include <WiFi.h>
+class DiagTee : public Stream {
+public:
+  void tick() {
+    if (!started_ && WiFi.status() == WL_CONNECTED) { srv_.begin(); srv_.setNoDelay(true); started_ = true; }
+    if (started_ && srv_.hasClient()) {
+      WiFiClient n = srv_.available();
+      if (cli_ && cli_.connected()) cli_.stop();
+      cli_ = n; cli_.setNoDelay(true);
+      cli_.printf("ionos-mini console (TCP mirror of the UART)\r\n");
+    }
+  }
+  size_t write(uint8_t c) override { Serial0.write(c); if (live()) cli_.write(c); return 1; }
+  size_t write(const uint8_t *b, size_t n) override { Serial0.write(b, n); if (live()) cli_.write(b, n); return n; }
+  int available() override { int a = Serial0.available(); return a ? a : (live() ? cli_.available() : 0); }
+  int read() override { if (Serial0.available()) return Serial0.read(); return (live() && cli_.available()) ? cli_.read() : -1; }
+  int peek() override { if (Serial0.available()) return Serial0.peek(); return (live() && cli_.available()) ? cli_.peek() : -1; }
+  void flush() override { Serial0.flush(); }
+private:
+  bool live() { return cli_ && cli_.connected(); }
+  WiFiServer srv_{2323};
+  WiFiClient cli_;
+  bool started_ = false;
+};
+static DiagTee g_diag;
+Stream &diag_stream(void) { return g_diag; }
+#define DIAG  g_diag      /* CP2102 text diagnostics, + TCP 2323 */
 #if IONOS_USB_TINYUSB
 #include "tusb_cdc.h"
 #define RAW   TusbSerial  /* native USB: USB-OTG + TinyUSB CDC-ACM (tusb_cdc.h) */
@@ -2389,7 +2418,7 @@ static void console_dispatch(const char *cmd)
 #if IONOS_USB_TINYUSB
   else if (tusb_cdc_cmd(cmd)) { }
 #endif
-  else if (!fg23_prog_cmd(cmd, DIAG) && !wifi_bench_cmd(cmd) && !rgb_load_cmd(cmd)) iq_fft_cmd(cmd);
+  else if (!fg23_prog_cmd(cmd, Serial0) && !wifi_bench_cmd(cmd) && !rgb_load_cmd(cmd)) iq_fft_cmd(cmd);
 }
 
 static void bench_console_tick(void)
@@ -2511,9 +2540,9 @@ void setup()
    * 115200 is ~16 ms - in that time three blocks arrive on i8, and if no SPI
    * transaction is queued, they are lost FOR GOOD. Buffer + faster baud, and
    * the output becomes "free". */
-  DIAG.setTxBufferSize(2048);
-  DIAG.setRxBufferSize(4096);   /* fg23_prog: 2 kB image chunks */
-  DIAG.begin(115200);
+  Serial0.setTxBufferSize(2048);
+  Serial0.setRxBufferSize(4096);   /* fg23_prog: 2 kB image chunks */
+  Serial0.begin(115200);
 
   /* The native USB CDC TX buffer is a few hundred bytes by default, which
    * cannot even hold one 1040-byte block - this is where the whole chain
@@ -2776,6 +2805,7 @@ void setup()
    * the FG23 (decimation, tuning) once the stream state is known. */
   menu_init();
   menu_apply_boot();
+  ui_apply_mode_tune();      /* APRS start mode -> 144.800, overrides the NVS freq */
   usbhost_init();
   DIAG.println("MENU: OK button opens it; console 'M' toggles it");
 
@@ -2868,6 +2898,7 @@ void loop()
 
   /* WiFi ceiling meter: 'B...' commands from the DIAG console. Non-blocking,
    * and only does anything when a character has arrived. */
+  g_diag.tick();
   bench_console_tick();
 
   /* --- loop time measurement. The longest gap between two iterations is

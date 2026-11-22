@@ -34,6 +34,7 @@
 
 #include "aprs_rx.h"
 #include <Arduino.h>
+Stream &diag_stream(void);   /* main.cpp: UART console + TCP 2323 mirror */
 #include <WiFi.h>
 #include <string.h>
 #include <math.h>
@@ -200,8 +201,22 @@ static uint32_t s_audio_hz = 0;      /* rate after audio decimation */
 static uint32_t s_iq_dec = 1;
 static uint32_t s_decim = 1;
 
-/* I/Q channel filter (boxcar) */
-static int32_t  s_iq_si = 0, s_iq_sq = 0;
+/* I/Q channel filter: decimating complex FIR, Q15, Blackman-windowed sinc.
+ *
+ * 2026-11-20, measured on a real 20-min 144.800 capture (ID2, 14 bursts,
+ * 11..15 dB over the 50 kHz floor), with the bit-exact PC port fwport.c:
+ *   old 2-sample boxcar          :  0 packets
+ *   FIR 23 taps @50k, fc 4.5 kHz : 20 packets  (every burst decoded)
+ *   (refdemod.py reference       : 12 packets)
+ * The boxcar let the whole +-12.5 kHz band into the discriminator; that
+ * noise, not the bit timing (PHASE_NUDGE 1..4 changed nothing), was what
+ * broke the delay-multiply demod. Plateau: 23..47 taps, fc 4..5 kHz. */
+#define CH_FC_HZ     4500
+#define CH_TAPS_50K  23                       /* scaled with sps, odd    */
+#define CH_MAX       96
+static int16_t  s_ch_h[CH_MAX];
+static int16_t  s_ch_xi[2 * CH_MAX], s_ch_xq[2 * CH_MAX];   /* mirrored ring */
+static int      s_ch_n = CH_TAPS_50K, s_ch_pos = 0;
 static uint32_t s_iq_n = 0;
 
 /* FM discriminator */
@@ -394,7 +409,26 @@ static void aprs_rx_configure(uint32_t sps)
   memset(s_hist, 0, sizeof s_hist);
   s_hist_idx = 0;
   s_box1 = s_box2 = 0; s_box_n = 0;
-  s_iq_si = s_iq_sq = 0; s_iq_n = 0;
+  /* channel FIR: same cutoff in Hz at any input rate */
+  {
+    int n = (int)(((uint64_t)CH_TAPS_50K * sps + 25000u) / 50000u) | 1;
+    if (n < 15) n = 15;
+    if (n > CH_MAX - 1) n = CH_MAX - 1;
+    s_ch_n = n;
+    const int M = n - 1;
+    const double x = 2.0 * CH_FC_HZ / (double)sps;
+    double h[CH_MAX], sum = 0.0;
+    for (int k = 0; k < n; k++) {
+      double t = k - M / 2.0;
+      double sn = (fabs(t) < 1e-9) ? x : sin(M_PI * x * t) / (M_PI * t);
+      double w = 0.42 - 0.5 * cos(2 * M_PI * k / M) + 0.08 * cos(4 * M_PI * k / M);
+      h[k] = sn * w; sum += h[k];
+    }
+    for (int k = 0; k < n; k++) s_ch_h[k] = (int16_t)lrint(32767.0 * h[k] / sum);
+    memset(s_ch_xi, 0, sizeof s_ch_xi); memset(s_ch_xq, 0, sizeof s_ch_xq);
+    s_ch_pos = 0;
+  }
+  s_iq_n = 0;
   s_audio_dc = 0; s_soft = 0; s_soft_dc = 0;
   s_pll = 0;
   /* delay line: ~ half bit @ 9600 -> 4 samples */
@@ -406,12 +440,11 @@ static void aprs_rx_configure(uint32_t sps)
   s_lpf_y = 0;
   fir_design((int)AUDIO_TARGET_HZ, 1200); /* twin FIR_LPF_N @ 9600 */
 
-  Serial0.printf("APRS RX: %lu sps --/%lu--> %lu Hz IF (+-%lu.%lu kHz) "
+  diag_stream().printf("APRS RX: %lu sps --FIR %d tap, +-%d.%d kHz /%lu--> %lu Hz IF "
                  "--/%lu--> %lu Hz audio, delay-mult N=%d taps=%lu\n",
-                 (unsigned long)sps, (unsigned long)s_iq_dec,
+                 (unsigned long)sps, s_ch_n, CH_FC_HZ / 1000, (CH_FC_HZ / 100) % 10,
+                 (unsigned long)s_iq_dec,
                  (unsigned long)s_if_hz,
-                 (unsigned long)(s_if_hz / 2000),
-                 (unsigned long)((s_if_hz / 200) % 10),
                  (unsigned long)s_decim,
                  (unsigned long)s_audio_hz, s_delayed_n, (unsigned long)s_taps);
 }
@@ -573,7 +606,7 @@ static void aprsis_close(void)
 
 static void aprsis_fail(const char *why)
 {
-  if (why) Serial0.printf("APRS-IS: %s -> retry in %lu s\n",
+  if (why) diag_stream().printf("APRS-IS: %s -> retry in %lu s\n",
                           why, (unsigned long)(s_backoff / 1000));
   aprsis_close();
   s_is_last_try = millis();              /* the backoff counts from the ERROR */
@@ -610,7 +643,7 @@ static void aprsis_send(const char *tnc2)
   if (!s_is_online || s_is_fd < 0) return;
   if (APRSIS_PASSCODE < 0) return;           /* read-only mode: no sending */
   if (!gate_allowed(tnc2)) {
-    Serial0.println("APRS-IS: not gateable (TCPIP/NOGATE/RFONLY/3rd party)");
+    diag_stream().println("APRS-IS: not gateable (TCPIP/NOGATE/RFONLY/3rd party)");
     return;
   }
 
@@ -635,7 +668,7 @@ static void aprsis_send(const char *tnc2)
   if (w == n) {
     s_gated++;
   } else if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-    Serial0.println("APRS-IS: send buffer full, packet dropped");
+    diag_stream().println("APRS-IS: send buffer full, packet dropped");
   } else {
     aprsis_fail("partial/failed gate send");
   }
@@ -739,7 +772,7 @@ static void aprsis_service(uint32_t now)
     s_is_online = true;
     s_backoff   = APRSIS_BACKOFF_MIN;           /* success -> reset backoff */
     s_ais       = AIS_ONLINE;
-    Serial0.printf("APRS-IS: connected to %s:%d as %s-%d (passcode %d%s)\n",
+    diag_stream().printf("APRS-IS: connected to %s:%d as %s-%d (passcode %d%s)\n",
                    APRSIS_HOST, APRSIS_PORT, APRS_MYCALL, APRS_MYSSID,
                    APRSIS_PASSCODE, (APRSIS_PASSCODE < 0) ? ", READ-ONLY" : "");
     return;
@@ -793,13 +826,13 @@ static void frame_complete(void)
     strncpy(s_last_info, cn ? cn + 1 : "", sizeof s_last_info - 1);
     s_last_info[sizeof s_last_info - 1] = '\0';
     s_last_ms = millis();
-    Serial0.printf("\nAPRS RX: %s\n", tnc2);
+    diag_stream().printf("\nAPRS RX: %s\n", tnc2);
 #if FLASHLOG_ENABLE
     flashlog_printf("RX %s", tnc2);
 #endif
     aprsis_send(tnc2);
   } else {
-    Serial0.println("\nAPRS RX: valid frame, but not APRS UI — skipped");
+    diag_stream().println("\nAPRS RX: valid frame, but not APRS UI — skipped");
   }
   s_frame_len = 0;
 }
@@ -1026,10 +1059,10 @@ void aprs_rx_init(void)
   s_is_last_try = 0;
   s_backoff     = APRSIS_BACKOFF_MIN;
   s_dns_state   = DNS_IDLE;
-  Serial0.printf("APRS RX: %s-%d, APRS-IS %s:%d\n",
+  diag_stream().printf("APRS RX: %s-%d, APRS-IS %s:%d\n",
                  APRS_MYCALL, APRS_MYSSID, APRSIS_HOST, APRSIS_PORT);
   if (APRSIS_PASSCODE < 0) {
-    Serial0.println("APRS RX: passcode -1 -> READ-ONLY, nothing is "
+    diag_stream().println("APRS RX: passcode -1 -> READ-ONLY, nothing is "
                     "uploaded. Enter your own passcode to gate.");
   }
 }
@@ -1040,14 +1073,30 @@ void aprs_rx_feed(const int16_t *iq, int nsamp, uint32_t sps)
   if (sps != s_sps) aprs_rx_configure(sps);
 
   for (int n = 0; n < nsamp; n++) {
-    /* --- channel filter: I/Q averaging and decimation to ~25 ksps --- */
-    s_iq_si += iq[2 * n];
-    s_iq_sq += iq[2 * n + 1];
+    /* --- channel filter: decimating complex FIR to ~25 ksps ---
+     * Mirrored ring: x[pos] == x[pos+N], so the window x[pos..pos+N-1] is
+     * contiguous (oldest..newest) without a modulo in the MAC loop. Only
+     * every s_iq_dec-th output is computed. */
+    s_ch_xi[s_ch_pos] = s_ch_xi[s_ch_pos + s_ch_n] = iq[2 * n];
+    s_ch_xq[s_ch_pos] = s_ch_xq[s_ch_pos + s_ch_n] = iq[2 * n + 1];
+    if (++s_ch_pos >= s_ch_n) s_ch_pos = 0;
     if (++s_iq_n < s_iq_dec) continue;
-    int16_t i = (int16_t)(s_iq_si / (int32_t)s_iq_dec);
-    int16_t q = (int16_t)(s_iq_sq / (int32_t)s_iq_dec);
-    s_iq_si = s_iq_sq = 0;
     s_iq_n = 0;
+    int16_t i, q;
+    {
+      const int16_t *xi = &s_ch_xi[s_ch_pos], *xq = &s_ch_xq[s_ch_pos];
+      int32_t ai = 0, aq = 0;
+      for (int k = 0; k < s_ch_n; k++) {
+        ai += (int32_t)s_ch_h[k] * xi[k];
+        aq += (int32_t)s_ch_h[k] * xq[k];
+      }
+      ai = (ai + 16384) >> 15; aq = (aq + 16384) >> 15;
+      if (ai > 32767) ai = 32767;
+      if (ai < -32768) ai = -32768;
+      if (aq > 32767) aq = 32767;
+      if (aq < -32768) aq = -32768;
+      i = (int16_t)ai; q = (int16_t)aq;
+    }
 
     /* FM discriminator: the angle difference between the current and the
      * previous sample.
