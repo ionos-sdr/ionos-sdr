@@ -316,6 +316,7 @@
 #include "usb_host.h"         /* host command channel on the CDC port (docs/ionos-usb-protocol.md) */
 #include "flashlog.h"
 #include "specline.h"      /* SPECLINE (scan line) block format, shared with the FG23 */
+#include "aispkt.h"        /* EXPERIMENTAL: AIS1 block (AIS decoded on the FG23) */
 #include "oled_spectrum.h"  /* 128x64 mini spectrum + 1-bit waterfall */
 
 /* ==================== RDY LINE: ELIMINATING LOSS BY DESIGN ====
@@ -857,6 +858,7 @@ static uint32_t st_specline = 0;        /* received scan lines (SPECLINE) */
 static uint32_t st_specline_ms = 0;     /* arrival of the last one */
 static uint32_t st_specline_cf_hz = 0;  /* centre frequency of the last line */
 static uint32_t st_specline_span_hz = 0;
+static uint32_t st_aispkt = 0;          /* EXPERIMENTAL: AIS1 blocks (FG23 on-chip AIS) */
 #if OLED_ENABLE
 static OledSpectrum oled_spec;          /* 128x64 mini spectrum + waterfall */
 #endif
@@ -2279,6 +2281,14 @@ static void process(const uint8_t *b, size_t nbytes)
     return;
   }
 
+  /* EXPERIMENTAL (exp/fg23-ais-onchip): AIS frames decoded on the FG23
+   * ('A1'). Same block size, magic AIS1; no I/Q, no sequence bookkeeping. */
+  if (h->magic == AISPKT_MAGIC) {
+    st_aispkt++;
+    ais_mode_hwblk(b);
+    return;
+  }
+
   if (h->magic != IQ_BLK_MAGIC) { st_badmagic++; return; }
 
   /* --- diagnostics: what happened to the order (unchanged metrics) --- */
@@ -2436,6 +2446,19 @@ static void console_dispatch(const char *cmd)
 #endif
   /* Mode switch without the buttons (field tests over TCP 2323) */
   if (!strcmp(cmd, "AISGO"))  { ui_set_mode(UI_PAGE_AIS);  return; }
+  /* EXPERIMENTAL on-chip AIS: AISHW1 / AISHW2 / AISHW0 = FG23 A1 / A2 / A0
+   * by hand; AISBENCH <min> = alternate I/Q and on-chip, AISBENCH 0 = stop */
+  if (!strncmp(cmd, "AISHW", 5)) {
+    char l[4] = { 'A', cmd[5] ? cmd[5] : '1', 0, 0 };
+    if (l[1] != '0' && ui_mode() != UI_PAGE_AIS) ui_set_mode(UI_PAGE_AIS);
+    cmdlink_send(l);
+    return;
+  }
+  if (!strncmp(cmd, "AISBENCH", 8)) {
+    if (atol(cmd + 8) > 0 && ui_mode() != UI_PAGE_AIS) ui_set_mode(UI_PAGE_AIS);
+    ais_bench_cmd(cmd + 8, cmdlink_send);
+    return;
+  }
   if (!strcmp(cmd, "APRSGO")) { ui_set_mode(UI_PAGE_APRS); return; }
   if (!strcmp(cmd, "U")) ui_ladder_diag();
   else if (!strcmp(cmd, "M")) { if (menu_is_open()) menu_close(); else menu_open(); }
@@ -3039,6 +3062,7 @@ void loop()
   }
   /* AIS: NMEA TCP server + flash to the AIS page on a new message */
   ais_mode_tick(now);
+  ais_bench_tick(now);              /* EXPERIMENTAL: IQ <-> on-chip alternation */
   {
     static uint32_t seen_ais = 0;
     uint32_t lms = ais_mode_last_ms();

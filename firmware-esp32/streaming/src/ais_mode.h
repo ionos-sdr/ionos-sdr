@@ -18,4 +18,17 @@ uint32_t    ais_mode_last_ms(void);
 const char *ais_mode_last(void);     /* short description of the last message */
 uint32_t    ais_mode_ships(void);    /* distinct MMSIs seen */
 
+/* ---- EXPERIMENTAL (branch exp/fg23-ais-onchip): AIS decoded on the FG23 ----
+ * The FG23 sends AIS1 blocks (aispkt.h) instead of I/Q while 'A1' runs. The
+ * frames go out exactly like the I/Q path's (console, NMEA 10110), the
+ * $PIONS sentence gets two more fields: <src IQ|HW>,<level dBm>. */
+#define AIS_DBM_K   (-52.5f)         /* dBFS -> dBm, rough (ais_web.py DBM_K) */
+void        ais_mode_hwblk(const void *blk1040);
+/* AISBENCH <min>: alternate I/Q demod (ESP) and on-chip demod (FG23) every
+ * <min> minutes; AISBENCH 0 = stop (back to I/Q); AISBENCH = report.
+ * send = the cmdlink line sender of main.cpp. */
+void        ais_bench_cmd(const char *arg, void (*send)(const char *));
+void        ais_bench_tick(uint32_t now_ms);
+bool        ais_bench_hw_slot(void); /* true while the FG23 should be in A1 */
+
 #endif

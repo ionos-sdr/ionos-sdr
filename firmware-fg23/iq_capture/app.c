@@ -81,6 +81,7 @@
 #include "cmdlink.h"
 #endif
 #include "scan.h"       /* wideband RSSI scan (SPECLINE over SPI) */
+#include "ais_hw.h"     /* EXPERIMENTAL: AIS decoded on the FG23 (AIS1 over SPI) */
 
 #include <string.h>
 #include <stdlib.h>
@@ -291,6 +292,9 @@ void sl_rail_util_on_event(RAIL_Handle_t rail_handle, RAIL_Events_t events)
   /* Benchmark mode ('k'): during measurement the module's own drain and
    * counters run, the capture branch here is skipped entirely. */
   if (iq_bench_on_event(rail_handle, events)) return;
+
+  /* EXPERIMENTAL on-chip AIS ('A1'): packet RX with its own FIFO decoder. */
+  if (ais_hw_on_event(rail_handle, events)) return;
 
   /* Continuous stream mode ('i'): has its own in-place processing branch. */
   if (iq_stream_on_event(rail_handle, events)) return;
@@ -684,6 +688,7 @@ void app_init(void)
     scan_set_yield(cmdlink_yield);
 #endif
   }
+  ais_hw_init(s_rail, TUNE_TICK_MHZ);   /* EXPERIMENTAL on-chip AIS (A1/A2/A0) */
 
   pb0_init();
   sl_iostream_set_default(sl_iostream_vcom_handle);
@@ -1075,6 +1080,22 @@ static bool stream_suspend(void)
   return true;
 }
 
+/* End on-chip AIS and put the radio back the way the I/Q stream wants it:
+ * the channel entry of the stream's PHY, the I/Q data source (switching the
+ * PHY re-applies the PHY's packet data config), the stream's events. The
+ * stream itself is (re)started by the caller (resume_after). */
+static void ais_off_restore(void)
+{
+  ais_hw_stop();
+  RAIL_Idle(s_rail, RAIL_IDLE_ABORT, true);
+  RAIL_PrepareChannel(s_rail, s_channel);
+  reapply_iq_data_config();
+  RAIL_ConfigEvents(s_rail, RAIL_EVENTS_ALL,
+                    RAIL_EVENT_RX_FIFO_ALMOST_FULL | RAIL_EVENT_RX_FIFO_OVERFLOW);
+  restart_rx();
+  set_freq_tick(s_freq_tick);
+}
+
 /* Process one command line (terminated by newline/Enter).
  *
  * IT HAS TWO CALLERS: the terminal (app_process_action) and — if wired —
@@ -1097,8 +1118,16 @@ static void handle_line(const char *line)
    * byte even a non-existent command would force the stream through a
    * stop-tune-start cycle — a visible gap in the waterfall, for nothing.
    * ('F' is not on the list: it handles the stop and restart itself.) */
-  static const char NEEDS_STOP[] = "cwpxbzydfkngMW";
+  static const char NEEDS_STOP[] = "cwpxbzydfkngMWA";
   bool resume_after = false;
+
+  /* On-chip AIS owns the radio and the SPI like the stream does: any other
+   * radio command ends it first, then the stream comes back (F/B/W start
+   * what they need themselves). 's' only reports. */
+  if (ais_hw_active() && c != 'A' && c != 's' && c != '\0') {
+    ais_off_restore();
+    if (strchr("FBW", c) == NULL) resume_after = true;
+  }
   if (strchr(NEEDS_STOP, c) != NULL && c != '\0' && iq_stream_active()) {
     printf("# stopping the stream for the '%c' command...\r\n", c);
     resume_after = stream_suspend();
@@ -1354,6 +1383,30 @@ static void handle_line(const char *line)
         printf("# usage: W<center_kHz>,<span_kHz>,<nbin>[,floor,range] | W0\r\n");
       }
     }
+  } else if (c == 'A') {
+    /* EXPERIMENTAL on-chip AIS: A1 = channel A (161.975), A2 = channel B
+     * (162.025), A0 = back to the I/Q stream; AL / AY / AS<n> = bring-up
+     * options (ais_hw.c). NEEDS_STOP has already stopped the stream. */
+    char sub = line[1];
+    if (sub == '1' || sub == '2') {
+      if (s_tx_active || capturing || scan_active()) {
+        printf("# AIS HW: TX, capture or scan running - stop it first\r\n");
+      } else {
+        if (s_b_khz_peek()) base_override(0, 0);
+        uint32_t khz = (sub == '2') ? 162025u : 161975u;
+        if (ais_hw_start(sub == '2' ? 'B' : 'A', corr_tick_for_khz(khz))) {
+          resume_after = false;          /* the stream stays off while AIS HW runs */
+        } else {
+          ais_off_restore();             /* no AIS PHY: straight back to the stream */
+          resume_after = true;
+        }
+      }
+    } else if (sub == '0') {
+      if (ais_hw_active()) ais_off_restore();
+      if (!s_tx_active && !capturing) resume_after = true;
+    } else {
+      ais_hw_option(line + 1);           /* the stream (if it ran) resumes as usual */
+    }
   } else if (c == 'T') {
     /* Scan timing at run time: T<avg_us>,<wait_us>  (e.g. T300,3000).
      * 's' and the line diagnostics show how many bins remain invalid. */
@@ -1391,6 +1444,7 @@ static void handle_line(const char *line)
            (int)s_tx_active,
            (s_tx_mode == RAIL_STREAM_CARRIER_WAVE) ? "CW" : "PN9");
     scan_print_stats();
+    if (ais_hw_active()) ais_hw_print_stats();
 #if CMDLINK_ENABLE
     uint32_t cl_lines = 0, cl_err = 0;
     cmdlink_stats(&cl_lines, &cl_err);
@@ -1442,6 +1496,21 @@ void app_process_action(void)
       if (ch != '\r' && ch != '\n') {
         handle_line("W0");
         printf("# scan stopped. 'W<kHz>,<span>,<nbin>' = again\r\n");
+      }
+      have_ch = true;
+    } else {
+      return;
+    }
+  }
+
+  /* EXPERIMENTAL on-chip AIS: re-arm, send AIS1 blocks. Like the scan, a
+   * terminal key (not CR/LF) ends it and goes into the command buffer. */
+  if (!have_ch && ais_hw_active()) {
+    ais_hw_process();
+    if (sl_iostream_getchar(sl_iostream_vcom_handle, &ch) == SL_STATUS_OK) {
+      if (ch != '\r' && ch != '\n') {
+        handle_line("A0");
+        printf("# AIS HW stopped. 'A1' = again\r\n");
       }
       have_ch = true;
     } else {

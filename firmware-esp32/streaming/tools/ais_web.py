@@ -102,16 +102,20 @@ def nmea_ok(line):
 DBM_K = -52.5   # dBFS -> dBm, rough: status line RF -99 dBm <-> -46.5 dBFS (2026-11-22), uncalibrated
 
 def handle_pions(line):
-    # $PIONS,AIS,<chan>,<lvl dBFS>,<snr dB>,<foff Hz> -> attach to the last packet
+    # $PIONS,AIS,<chan>,<lvl dBFS>,<snr dB>,<foff Hz>[,<src IQ|HW>,<dBm>] -> attach to the last packet
     f = line.split('*')[0].split(',')
     try: lvl, snr, foff = float(f[3]), float(f[4]), float(f[5])
     except (IndexError, ValueError): return
+    src = f[6] if len(f) > 6 else 'IQ'
+    try: dbm = float(f[7])
+    except (IndexError, ValueError): dbm = round(lvl + DBM_K, 1)
+    upd = {'lvl': lvl, 'dbm': dbm, 'snr': snr, 'foff': foff, 'src': src}
     with LOCK:
         if not LOG: return
         p = LOG[-1]
-        p.update({'lvl': lvl, 'dbm': round(lvl + DBM_K, 1), 'snr': snr, 'foff': foff})
+        p.update(upd)
         v = VESSELS.get(p['mmsi'])
-        if v: v.update({'lvl': lvl, 'dbm': round(lvl + DBM_K, 1), 'snr': snr, 'foff': foff})
+        if v: v.update(upd)
 
 def handle(line):
     now = time.time()
