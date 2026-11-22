@@ -52,9 +52,22 @@ static uint8_t  s_cnt   = 0;
 static uint32_t s_cf_hz = 0, s_sps = 50000;
 
 static float    s_floor_db = -60.0f;
-static float    s_lift_db  = -2.0f;
-static float    s_range_db = 40.0f;
-static float    s_alpha    = 0.40f;
+/* 2026-11-22, chosen on the TFT emulator (tools/tftemu.py) with real AIS +
+ * APRS captures: range 40 -> 24, lift -2 -> +4, gamma 0.7 = black noise,
+ * bursts in green/yellow instead of a blue "mush". */
+static float    s_lift_db  = 4.0f;
+static float    s_range_db = 24.0f;
+static float    s_gamma    = 0.7f;
+static float    s_alpha    = 0.60f;
+/* ROW = PEAK OF THE s_decim FFTs. Before: only the LAST FFT of each group was
+ * drawn, so a burst shorter than 3 FFTs (AIS: 26 ms vs 61 ms) showed up faint
+ * or not at all (only the EMA residue). */
+static uint8_t  s_rowmax   = 1;
+static float    s_rowacc[NMAX];
+/* DC interpolation half-width in bins; -1 = old n/128 (+-8 = +-390 Hz at 1024,
+ * which erased the centre of every on-channel APRS signal). The FG23 DC block
+ * already removes the DC, +-1 bin is enough. */
+static int8_t   s_dcw      = 1;
 static bool     s_invert   = true;
 static uint8_t  s_window   = 1;       /* 0 = Hann, 1 = Nuttall             */
 static uint8_t  s_dump     = 0;       /* 1 = print the next row             */
@@ -169,9 +182,9 @@ static void process(void)
 
     /* DC spike: the centre bins are the receiver's residual DC offset. The
      * width scales with the LENGTH: +-2 bins at 256, +-8 at 1024. */
-    {
-        int c = n / 2, w = (int)(n / 128);
-        if (w < 2) w = 2;
+    if (s_dcw != 0) {
+        int c = n / 2, w = (s_dcw > 0) ? s_dcw : (int)(n / 128);
+        if (s_dcw < 0 && w < 2) w = 2;
         float l = s_pwr[c - w - 1], r = s_pwr[c + w + 1];
         for (int d = -w; d <= w; d++) {
             float t = (float)(d + w) / (float)(2 * w);
@@ -203,9 +216,16 @@ static void process(void)
 
     s_floor_db = s_floor_db * 0.97f + (sum / n) * 0.03f;
 
+    /* row = peak of the FFTs since the last drawn row (s_rowmax), or the last one */
+    if (s_rowmax) {
+        if (s_cnt == 0) memcpy(s_rowacc, s_db, n * sizeof(float));
+        else for (int k = 0; k < n; k++) if (s_db[k] > s_rowacc[k]) s_rowacc[k] = s_db[k];
+    }
+
     /* draw a row only from every s_decim-th batch */
     if (++s_cnt < s_decim) return;
     s_cnt = 0;
+    const float *row = s_rowmax ? s_rowacc : s_db;
 
     static uint8_t bins[NBINS];
 
@@ -232,11 +252,15 @@ static void process(void)
         if (hi_k <= lo_k) hi_k = lo_k + 1;
         float best = -200.0f;
         for (int k = lo_k; k < hi_k && k < n; k++)
-            if (s_db[k] > best) best = s_db[k];
+            if (row[k] > best) best = row[k];
         int cnt = hi_k - lo_k;
         if (cnt > 16) cnt = 16;
         best -= bias_db[cnt];
-        float t = (best - s_floor_db - s_lift_db) * 255.0f / s_range_db;
+        float u = (best - s_floor_db - s_lift_db) / s_range_db;
+        if (u < 0.0f) u = 0.0f;
+        if (u > 1.0f) u = 1.0f;
+        if (s_gamma != 1.0f && u > 0.0f) u = powf(u, s_gamma);
+        float t = u * 255.0f;
         if (t < 1.0f)   t = 1.0f;
         if (t > 255.0f) t = 255.0f;
         bins[s_invert ? (NBINS - 1 - x) : x] = (uint8_t)t;
@@ -324,6 +348,9 @@ bool iq_fft_cmd(const char *line)
             else if (!strcmp(t, "alpha")) s_alpha    = (float)(v / 100.0);
             else if (!strcmp(t, "dec"))   iq_fft_set_decim((uint8_t)v);
             else if (!strcmp(t, "inv"))   s_invert   = (v != 0);
+            else if (!strcmp(t, "rowmax")) s_rowmax  = (v != 0);
+            else if (!strcmp(t, "gamma")) s_gamma    = (float)(v < 0.2 ? 0.2 : (v > 3 ? 3 : v));
+            else if (!strcmp(t, "dcw"))   s_dcw      = (int8_t)(v < -1 ? -1 : (v > 16 ? 16 : v));
             else if (!strcmp(t, "win"))   { s_window = (v != 0); s_n_tab = 0; }
             else if (!strcmp(t, "base"))  { s_base_on = (v != 0); s_base_ok = false; }
             else if (!strcmp(t, "tau"))   { s_base_tau = (float)(v < 1 ? 1 : v);

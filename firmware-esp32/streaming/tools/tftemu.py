@@ -56,6 +56,7 @@ def run(z, fs, a):
     cnt = np.minimum(hi_k - lo_k, 16)
 
     pwr = None; base = None; floor = -60.0; c = 0
+    acc = None
     rows = []; row_t = []
     nb = len(z) // n                       # contiguous collections (see header note)
     for bi in range(nb):
@@ -81,11 +82,23 @@ def run(z, fs, a):
                 ba = min(0.5, 1.0 / (49.0 * a.tau)); base += (db - base) * ba
             db = db - base
         floor = floor * 0.97 + db.mean() * 0.03
+        # row combine across the dec FFTs: 'last' = firmware (only the latest EMA),
+        # 'max' = peak-hold of the dec FFTs, 'mean' = power mean of them
+        if a.rowmode == 'last': acc = db
+        elif acc is None: acc = db.copy() if a.rowmode == 'max' else 10 ** (db / 10)
+        elif a.rowmode == 'max': acc = np.maximum(acc, db)
+        else: acc = acc + 10 ** (db / 10)
         c += 1
         if c < a.dec: continue
         c = 0
-        best = np.array([db[lo_k[i]:hi_k[i]].max() for i in range(240)]) - bias[cnt]
-        tt = np.clip((best - floor - a.lift) * 255.0 / a.range, 1, 255).astype(np.uint8)
+        rowdb = acc if a.rowmode != 'mean' else 10 * np.log10(acc / a.dec)
+        acc = None
+        if a.pix == 'max':
+            best = np.array([rowdb[lo_k[i]:hi_k[i]].max() for i in range(240)]) - bias[cnt]
+        else:   # power mean of the bins in the pixel
+            best = np.array([10 * np.log10(np.mean(10 ** (rowdb[lo_k[i]:hi_k[i]] / 10))) for i in range(240)])
+        tt = np.clip((best - floor - a.lift) / a.range, 0, 1) ** a.gamma
+        tt = np.clip(tt * 255.0, 1, 255).astype(np.uint8)
         if a.invert: tt = tt[::-1]
         rows.append(tt)                   # tft autoscale OFF -> 1:1, push_specline 240->240
         row_t.append((bi + 1) * n / fs)
@@ -134,6 +147,9 @@ if __name__ == '__main__':
     ap.add_argument('--at', type=float, default=None)
     ap.add_argument('--strip', action='store_true')
     ap.add_argument('--zoom', type=int, default=2)
+    ap.add_argument('--rowmode', default='last', choices=['last', 'max', 'mean'])
+    ap.add_argument('--pix', default='max', choices=['max', 'mean'])
+    ap.add_argument('--gamma', type=float, default=1.0)
     a = ap.parse_args()
     z, fs = load(a.iq)
     rows, rt = run(z, fs, a)
