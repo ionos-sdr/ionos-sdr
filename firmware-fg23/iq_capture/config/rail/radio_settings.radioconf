@@ -303,6 +303,40 @@
             </override>
           </profile_input_overrides>
         </channel_config_entry>
+        <channel_config_entry name="AIS A/B 161.975/162.025 MHz (ch3000-3001)">
+          <channel_number_start>3000</channel_number_start>
+          <channel_number_end>3001</channel_number_end>
+          <physical_channel_offset>SAME_AS_FIRST_CHANNEL</physical_channel_offset>
+          <max_power>RAIL_TX_POWER_MAX</max_power>
+          <metadata>{"selectedPhy":"PHY_Studio_434M_2GFSK_100Kbps_50K"}</metadata>
+          <base_frequency>161975000</base_frequency>
+          <channel_spacing>50000</channel_spacing>
+          <profile_input_overrides>
+            <override><key>xtal_frequency_hz</key><value>39000000</value></override>
+            <override><key>bitrate</key><value>9600</value></override>
+            <override><key>deviation</key><value>2400</value></override>
+            <override><key>modulation_type</key><value>FSK2</value></override>
+            <override><key>shaping_filter</key><value>Gaussian</value></override>
+            <override><key>shaping_filter_param</key><value>0.5</value></override>
+            <override><key>rx_xtal_error_ppm</key><value>10</value></override>
+            <override><key>tx_xtal_error_ppm</key><value>10</value></override>
+            <override><key>baudrate_tol_ppm</key><value>1000</value></override>
+            <override><key>preamble_pattern</key><value>3</value></override>
+            <override><key>preamble_pattern_len</key><value>4</value></override>
+            <override><key>preamble_length</key><value>16</value></override>
+            <override><key>syncword_0</key><value>32972</value></override>
+            <override><key>syncword_1</key><value>32563</value></override>
+            <override><key>syncword_length</key><value>16</value></override>
+            <override><key>frame_bitendian</key><value>LSB_FIRST</value></override>
+            <override><key>frame_length_type</key><value>FIXED_LENGTH</value></override>
+            <override><key>fixed_length_size</key><value>200</value></override>
+            <override><key>header_en</key><value>False</value></override>
+            <override><key>payload_crc_en</key><value>False</value></override>
+            <override><key>payload_white_en</key><value>False</value></override>
+            <override><key>bandwidth_hz</key><value>16000</value></override>
+          </profile_input_overrides>
+        </channel_config_entry>
+
       </channel_config_entries>
       <metadata>{"selectedPhy":"PHY_Studio_434M_2GFSK_100Kbps_50K"}</metadata>
       <profile_inputs>

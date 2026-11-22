@@ -58,11 +58,20 @@ is what the on-air benchmark measures. `ais_hw.c` sets the words at run time
 (`RAIL_ConfigSyncWords`), so `AS<n>` / `AY` (bit order) / `AL` (FIFO data bit
 order) can be tried on air without regenerating the PHY.
 
-## What needs Simplicity Studio: the AIS PHY
+## The AIS PHY (generated headless)
 
-The radio configurator has to generate it (no slc/pyradioconfig on this PC).
-In `rail_soc_empty_FG23_iq_capture.slcp` → Radio Configurator, **add a channel
-config entry** to the existing protocol (keep all existing entries):
+The channel entry is in `config/rail/radio_settings.radioconf` (ch 3000–3001)
+and was generated **without the Studio GUI** by `tools/rc_gen.py`: it runs the
+SDK's own Multi-PHY configurator (2502.6.4, the project's version) with
+Studio's bundled Python — on the unchanged radioconf its output is
+byte-identical to Studio's `autogen/rail_config.c/.h`. The existing entries'
+register values are unchanged (only the generated array names got suffixes).
+
+Configurator's choices for the AIS entry: demod **TRECS_VITERBI**, acquisition
+bandwidth 16 kHz, IF 80 kHz, dual sync ON (TRECS hard-sliced sync search),
+frequency offset tolerance 3.24 kHz, frequency compensation always on.
+
+The same parameters, for doing it in the GUI instead:
 
 | field | value |
 |---|---|
@@ -78,10 +87,10 @@ config entry** to the existing protocol (keep all existing entries):
 | frame | **fixed length 200 bytes**, no header, **no CRC, no whitening, no FEC**, LSB first |
 | symbol encoding | NRZ (the NRZI is done in software — leave diff. encoding off) |
 
-Then **Generate**, build, flash the FG23 (`fg23_flash.py` over COM6, as before).
-If the configurator rejects the `0011` preamble, use `01` with length 8 and
-rely on the sync word; the benchmark will show whether timing acquisition
-suffers.
+(In the radioconf: `preamble_pattern` 3 / length 4 / total 16, `syncword_0`
+32972, `syncword_1` 32563, `bandwidth_hz` 16000, `baudrate_tol_ppm` 1000.)
+New source `ais_hw.c` must be in the build: Studio picks it up by itself; the
+headless `make` needs it added to the generated `subdir.mk` and link line.
 
 The crystal correction for 162 MHz is applied with `RAIL_SetFreqOffset` like
 for the I/Q channels; `RAIL_GetRxFreqOffset` minus it gives the per-frame Δf
@@ -121,6 +130,7 @@ but not necessarily equally.
 | decoder logic + sync word, bit-level model on a real capture | ✅ 58/58 (16-bit sync) |
 | FG23 code (`ais_hw.c`, `app.c` hooks) | ✅ compiles against the workspace SDK (`-fsyntax-only`, no warnings) |
 | ESP32 code (AIS1 → emit, AISBENCH) | ✅ builds (`pio run -e ionos_mini`); I/Q path unchanged when AIS1 never arrives |
-| AIS PHY generated in Studio | ⏳ needs the configurator |
+| AIS PHY generated (`tools/rc_gen.py`), FG23 built (Studio toolchain, `make`) | ✅ hex 2026-11-22 |
+| flashed | ⏳ needs USB (ESP + FG23 over COM6) |
 | on-air bring-up, bit orders | ⏳ |
 | benchmark | ⏳ |
