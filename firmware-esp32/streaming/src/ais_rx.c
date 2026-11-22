@@ -112,6 +112,13 @@ static void lane_bit(ais_rx_t *r, ais_lane_t *L, int bit)
         uint16_t fcs = (uint16_t)(L->fr[L->len - 2] | (L->fr[L->len - 1] << 8));
         if (!(fcs == r->last_fcs && r->nout - r->last_out < 2000u)) {
           r->last_fcs = fcs; r->last_out = r->nout; r->frames++;
+          {
+            double pf = (double)r->p_fast / 256.0 + 1e-3, pn = (double)r->p_noise / 256.0 + 1e-3;
+            r->last_lvl_dbfs = (float)(10.0 * log10(pf / (32767.0 * 32767.0)));
+            r->last_snr_db   = (float)(10.0 * log10(pf / pn));
+            /* slicer mean = carrier offset; angle units: PI_Q13 = pi rad/sample */
+            r->last_foff_hz  = (float)((double)r->mm_sum / r->mm_n / PI_Q13 * r->sps / 2.0);
+          }
           if (r->cb) r->cb(L->fr, L->len, r->chan, r->nout, r->ctx);
         }
       } else if (L->len >= 23) r->crc_bad++;
@@ -168,6 +175,18 @@ void ais_rx_feed(ais_rx_t *r, const int16_t *iq, int nsamp)
     int32_t ai = 0, aq = 0;
     for (int k = 0; k < r->ch_n; k++) { ai += (int32_t)r->ch_h[k] * xi[k]; aq += (int32_t)r->ch_h[k] * xq[k]; }
     int16_t fi = (int16_t)((ai + 16384) >> 15), fq = (int16_t)((aq + 16384) >> 15);
+
+    /* channel power: fast EMA (~256 samples = 5 ms at 50 ksps) for the packet
+     * level, slow floor (~0.3 s) updated only outside bursts */
+    {
+      int64_t p = ((int64_t)fi * fi + (int64_t)fq * fq) << 8;      /* Q8 */
+      r->p_fast += (p - r->p_fast) >> 8;
+      /* floor: follows DOWN fast, UP slowly, bursts (>4x) almost not at all */
+      if (r->p_noise <= 0) r->p_noise = r->p_fast;
+      else if (r->p_fast < r->p_noise) r->p_noise += (r->p_fast - r->p_noise) >> 6;
+      else if (r->p_fast < 4 * r->p_noise) r->p_noise += (r->p_fast - r->p_noise) >> 14;
+      else r->p_noise += (r->p_fast - r->p_noise) >> 20;
+    }
 
     int32_t dr = (int32_t)fi * r->pi + (int32_t)fq * r->pq;
     int32_t di = (int32_t)fq * r->pi - (int32_t)fi * r->pq;
@@ -245,6 +264,12 @@ int ais_describe(const uint8_t *fr, int len, char *out, int outsz)
     for (int k = 0; k < 20; k++) { unsigned v = getbits(m, 112 + 6 * k, 6); char c = (char)(v < 32 ? v + 64 : v); if (c != '@') nm[j++] = c; }
     while (j && nm[j - 1] == ' ') j--; nm[j] = 0;
     return snprintf(out, outsz, "type 5 MMSI %09u \"%s\"", mmsi, nm);
+  }
+  if (t == 21 && nbits >= 272) {                       /* AtoN (river km buoys) */
+    char nm[21]; int j = 0;
+    for (int k = 0; k < 20; k++) { unsigned v = getbits(m, 43 + 6 * k, 6); char c = (char)(v < 32 ? v + 64 : v); if (c != '@') nm[j++] = c; }
+    while (j && nm[j - 1] == ' ') j--; nm[j] = 0;
+    return snprintf(out, outsz, "type 21 AtoN %09u \"%s\"", mmsi, nm);
   }
   return snprintf(out, outsz, "type %u MMSI %09u (%d bits)", t, mmsi, nbits);
 }
