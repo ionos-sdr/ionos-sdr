@@ -267,6 +267,14 @@ static void bench_enter(bool hw, uint32_t now)
   s_b_hw = hw; s_b_t0 = now; s_b_msgs_slot = 0; s_b_slot++;
   memset(s_b_slot_st_mask, 0, sizeof s_b_slot_st_mask);
   if (s_b_send) s_b_send(hw ? "A1" : "A0");
+  /* 'A0' leaves the I/Q stream mistuned (FG23 ais_off_restore): retune like
+   * AISGO does. Measured 2026-11-23 on ID1: without it the IQ slots got
+   * 0.41 msgs/min against ~2.6/min before the bench. */
+  if (!hw && s_b_send) {
+    char f[16];
+    snprintf(f, sizeof f, "F%lu", (unsigned long)AIS_TUNE_KHZ);
+    s_b_send(f);
+  }
   diag_stream().printf("AISBENCH slot %lu: %s for %lu s\n", (unsigned long)s_b_slot,
                        hw ? "HW (FG23 on-chip)" : "IQ (ESP demod)", (unsigned long)(s_b_slot_ms / 1000u));
 }
