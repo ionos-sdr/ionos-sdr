@@ -15,6 +15,7 @@
 #include <string.h>
 #include <stdio.h>
 #include "nvs_flash.h"
+#include "devid.h"
 #include "nvs.h"
 
 #ifndef MENU_OUT
@@ -136,8 +137,16 @@ static const char *const OPT_DECIM[] = { "2", "4", "8", "16", "32" };
 static const char *const OPT_FFT[]   = { "1024", "2048" };
 
 /* ---- the tree ---- */
+static const char *g_serial(char *b, int n)  { snprintf(b, n, "%s", devid_serial()); return b; }
+static const char *g_build(char *b, int n)   { snprintf(b, n, "%.16s", devid_build()); return b; }
+static const char *g_mfg(char *b, int n)     { snprintf(b, n, "%s", devid_mfg()); return b; }
+static const char *g_prog(char *b, int n)    { snprintf(b, n, "%s", devid_prog()); return b; }
 static const mi_t M_INFO[] = {
+  { "Serial",    MI_VALUE, NULL, 0, g_serial },
   { "ESP fw",    MI_VALUE, NULL, 0, g_fw_esp },
+  { "Built",     MI_VALUE, NULL, 0, g_build },
+  { "Mfg date",  MI_VALUE, NULL, 0, g_mfg },
+  { "Prog date", MI_VALUE, NULL, 0, g_prog },
   { "FG23 fw",   MI_VALUE, NULL, 0, g_fw_fg23 },
   { "Board",     MI_VALUE, NULL, 0, g_board },
   { "Mode",      MI_VALUE, NULL, 0, g_mode },

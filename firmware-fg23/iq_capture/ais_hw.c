@@ -244,7 +244,8 @@ static void rx_arm(void)
   RAIL_Idle(s_rail, RAIL_IDLE_ABORT, true);
   RAIL_ResetFifo(s_rail, false, true);
   RAIL_SetFreqOffset(s_rail, (RAIL_FrequencyOffset_t)s_ftick);
-  RAIL_StartRx(s_rail, s_ch, NULL);
+  g_ais_bc[3] = (uint32_t)RAIL_StartRx(s_rail, s_ch, NULL);
+  g_ais_bc[6]++;
 }
 
 void ais_hw_init(RAIL_Handle_t rail, double tick_hz)
@@ -376,6 +377,9 @@ void ais_hw_process(void)
   uint32_t now = now_ms();
   if (!iq_stream_ext_busy()) send_block(now);
   g_ais_bc[2] = 130;
+  g_ais_bc[5] = (uint32_t)RAIL_GetRadioState(s_rail);
+  /* bring-up watchdog: RX must not stay off - re-arm if the radio went idle */
+  if (!(g_ais_bc[5] & RAIL_RF_STATE_RX) && !s_restart) { g_ais_bc[7]++; s_restart = true; }
   if (now - s_last_stats_ms >= AIS_STATS_MS) { s_last_stats_ms = now; ais_hw_print_stats(); }
 }
 

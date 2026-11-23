@@ -317,6 +317,7 @@
 #include "flashlog.h"
 #include "specline.h"      /* SPECLINE (scan line) block format, shared with the FG23 */
 #include "aispkt.h"        /* EXPERIMENTAL: AIS1 block (AIS decoded on the FG23) */
+#include "devid.h"         /* serial number, fw version, build/mfg/programming date */
 #include "oled_spectrum.h"  /* 128x64 mini spectrum + 1-bit waterfall */
 
 /* ==================== RDY LINE: ELIMINATING LOSS BY DESIGN ====
@@ -2446,6 +2447,7 @@ static void console_dispatch(const char *cmd)
 #endif
   /* Mode switch without the buttons (field tests over TCP 2323) */
   if (!strcmp(cmd, "AISGO"))  { ui_set_mode(UI_PAGE_AIS);  return; }
+  if (devid_cmd(cmd)) return;   /* SERIAL <id> / MFG <date> / ID */
   /* EXPERIMENTAL on-chip AIS: AISHW1 / AISHW2 / AISHW0 = FG23 A1 / A2 / A0
    * by hand; AISBENCH <min> = alternate I/Q and on-chip, AISBENCH 0 = stop */
   if (!strncmp(cmd, "AISHW", 5)) {
@@ -2856,6 +2858,20 @@ void setup()
   /* On-screen menu: settings from NVS, applied to the LED/FFT now and to
    * the FG23 (decimation, tuning) once the stream state is known. */
   menu_init();
+  /* Unit identity (serial, fw, build, mfg/programming date) - needs NVS,
+   * which menu_init brought up. Splash on the TFT for the first seconds. */
+  devid_init();
+  if (tft_ok()) {
+    char l[64];
+    tft_fill(0, 0, 240, 320, 0x0000);
+    tft_text(8, 40, 3, 0xFD20, 0x0000, "ionos-mini");
+    snprintf(l, sizeof l, "S/N  %s", devid_serial());        tft_text(8, 100, 2, 0xFFFF, 0x0000, l);
+    snprintf(l, sizeof l, "fw   %.18s", devid_fw());         tft_text(8, 130, 2, 0xFFFF, 0x0000, l);
+    snprintf(l, sizeof l, "built %s", devid_build());        tft_text(8, 160, 1, 0xC618, 0x0000, l);
+    snprintf(l, sizeof l, "mfg   %s", devid_mfg());          tft_text(8, 176, 1, 0xC618, 0x0000, l);
+    snprintf(l, sizeof l, "prog  %s", devid_prog());         tft_text(8, 192, 1, 0xC618, 0x0000, l);
+    delay(2500);
+  }
   menu_apply_boot();
   ui_apply_mode_tune();      /* APRS start mode -> 144.800, overrides the NVS freq */
   usbhost_init();
@@ -3065,6 +3081,7 @@ void loop()
   /* AIS: NMEA TCP server + flash to the AIS page on a new message */
   ais_mode_tick(now);
   ais_bench_tick(now);              /* EXPERIMENTAL: IQ <-> on-chip alternation */
+  devid_tick(wifi_up);              /* NTP + programming-date stamp of a new build */
   {
     static uint32_t seen_ais = 0;
     uint32_t lms = ais_mode_last_ms();
