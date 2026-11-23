@@ -465,7 +465,7 @@ void ais_hw_process(void)
   g_ais_bc[0]++; g_ais_bc[2] = 100;
   /* bring-up: let the raw capture of this sync fill (56 B = 47 ms) first */
   raw_t *r = s_raw;
-  bool raw_busy = r && ((uint32_t)RAIL_GetTime() - r->t_us) < 60000u;
+  bool raw_busy = r && s_rd_state == 1 && ((uint32_t)RAIL_GetTime() - r->t_us) < 60000u;
   if (s_restart && !raw_busy) {
     s_restart = false;
     s_raw = NULL;
