@@ -334,6 +334,7 @@
             <override><key>payload_crc_en</key><value>False</value></override>
             <override><key>payload_white_en</key><value>False</value></override>
             <override><key>bandwidth_hz</key><value>16000</value></override>
+          <override><key>demod_select</key><value>LEGACY</value></override>
           </profile_input_overrides>
         </channel_config_entry>
 

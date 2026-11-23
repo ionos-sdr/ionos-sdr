@@ -24,6 +24,7 @@ uint32_t    ais_mode_ships(void);    /* distinct MMSIs seen */
  * $PIONS sentence gets two more fields: <src IQ|HW>,<level dBm>. */
 #define AIS_DBM_K   (-52.5f)         /* dBFS -> dBm, rough (ais_web.py DBM_K) */
 void        ais_mode_hwblk(const void *blk1040);
+void        ais_hw_dbg_toggle(void);   /* AISDBG: telemetry line per AIS1 block */
 /* AISBENCH <min>: alternate I/Q demod (ESP) and on-chip demod (FG23) every
  * <min> minutes; AISBENCH 0 = stop (back to I/Q); AISBENCH = report.
  * send = the cmdlink line sender of main.cpp. */

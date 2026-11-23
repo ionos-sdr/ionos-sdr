@@ -14,6 +14,14 @@
  * sync word 1 = 0x80CC (line ends in 1), sync word 2 = 0x7F33 (ends in 0);
  * 24 bits: 0x80CCCC / 0x7F3333.
  *
+ * DEMODULATOR (measured 2026-11-23, ID2 + VSG60, 10 bursts/s at -100 dBm):
+ * the configurator's default for this PHY is TRECS_VITERBI - it gave timing
+ * detects on every burst but no preamble detect and (almost) no sync, even
+ * with an 8-bit sync word. demod_select = LEGACY in the radioconf: every
+ * burst syncs, CRC-correct frames from the first test. The TRECS timing
+ * search evidently does not lock on the AIS training sequence (24 bits of
+ * 0011 line pattern after NRZI).
+ *
  * WHY NOT LET THE PACKET HANDLER DO IT: HDLC bit stuffing makes the length
  * unknowable in advance and the CRC covers destuffed bits. So the PHY runs
  * with a long fixed length, no CRC, no whitening; this file decodes the raw
@@ -31,7 +39,7 @@
 #define AIS_FIXED_LEN     200u     /* raw bytes after sync: > 5-slot msg with stuffing */
 #define AIS_FIFO_THRESH   4u       /* bytes -> an event every ~3.3 ms */
 #define AIS_QUEUE         8u
-#define AIS_HEARTBEAT_MS  10000u
+#define AIS_HEARTBEAT_MS  2000u    /* bring-up: telemetry every 2 s */
 #define AIS_STATS_MS      60000u
 
 static RAIL_Handle_t s_rail;
@@ -49,6 +57,24 @@ static bool    s_sync_lsb_first = true;   /* RAIL: LSB first (rail_types.h) - co
  * 54 - the start of the training sequence is often damaged. Noise false-sync
  * rate at 16 bits: 9600 * 2^-16 * 2 words ~ 0.3/s, each costing a few ms. */
 static uint8_t s_sync_bits = 16;
+
+/* Receive data source. RX_PACKET_DATA = the frame controller's sync word
+ * detector starts the capture (gave no syncs at all on 23 Nov on two
+ * boards). The others stream the demodulator's output continuously and
+ * this file hunts the HDLC flag itself - NRZI makes that polarity-free and
+ * the hardware sync detector is out of the loop:
+ *   RX_DEMOD_DATA (1)                    "8-bit data output from the demodulator"
+ *   RX_DIRECT_SYNCHRONOUS_MODE_DATA (5)  bits at the bit clock (xG23 only)
+ * AD<n> selects; AR = dump the next 960 stream bytes to the ESP (AISRAW). */
+/* Measured 2026-11-23 (ID2, VSG): sources 1 and 5 both deliver 16-bit I/Q
+ * words with this PHY, not bits - no use here. Packet mode it is. */
+static RAIL_RxDataSource_t s_src = RX_PACKET_DATA;
+static bool s_stream = false;              /* s_src != RX_PACKET_DATA */
+static uint8_t  s_rd_buf[960];
+static uint16_t s_rd_n = 0;
+static volatile uint8_t s_rd_state = 0;    /* 0 idle, 1 filling, 2 ready to send */
+static volatile uint32_t s_bytes_rx = 0;
+static volatile uint16_t s_n_pre = 0, s_n_tim = 0;   /* preamble / timing detect events */
 
 /* ---- decoder state (ISR) ---- */
 typedef struct {
@@ -133,7 +159,7 @@ static void dec_end(bool good)
     }
   }
   s_d.in = false;
-  s_restart = true;                           /* re-arm: the next slot may follow at once */
+  if (!s_stream) s_restart = true;            /* re-arm: the next slot may follow at once */
 }
 
 /* one line bit */
@@ -170,6 +196,39 @@ static void dec_bytes(const uint8_t *p, uint16_t n)
   }
 }
 
+/* stream modes: hunt the flag in the continuous demod output */
+static uint8_t s_h_prev = 0, s_h_win = 0;
+static inline void stream_bit(uint8_t L)
+{
+  if (s_d.in) {
+    dec_bit(L);
+    if (s_d.in) return;
+    s_h_prev = L;
+    s_h_win = s_d.win;
+    if (s_h_win == 0x7E) { dec_begin(0); s_d.prev = L; }   /* closing flag = next opening one */
+    return;
+  }
+  uint8_t b = (L == s_h_prev) ? 1u : 0u;
+  s_h_prev = L;
+  s_h_win = (uint8_t)((s_h_win << 1) | b);
+  if (s_h_win == 0x7E) { dec_begin(0); s_d.prev = L; }
+}
+
+static void stream_bytes(const uint8_t *p, uint16_t n)
+{
+  s_bytes_rx += n;
+  if (s_rd_state == 1) {
+    for (uint16_t i = 0; i < n && s_rd_n < sizeof s_rd_buf; i++) s_rd_buf[s_rd_n++] = p[i];
+    if (s_rd_n >= sizeof s_rd_buf) s_rd_state = 2;
+  }
+  if (s_src == RX_DEMOD_DATA) return;        /* MB/s of samples: dump only, no bit decode */
+  for (uint16_t i = 0; i < n; i++) {
+    uint8_t v = p[i];
+    for (int k = 0; k < 8; k++)
+      stream_bit(s_data_lsb_first ? ((v >> k) & 1u) : ((v >> (7 - k)) & 1u));
+  }
+}
+
 /* bring-up: the raw FIFO bytes after the last syncs, read over SWD (FGRD)
  * and decoded offline (bit orders, polarity) - g_ais_raw in the .map */
 #define RAW_N 8u
@@ -186,10 +245,22 @@ static void drain_fifo(void)
 {
   uint8_t tmp[32];
   uint16_t n;
-  while ((n = RAIL_GetRxFifoBytesAvailable(s_rail)) > 0) {
+  /* Bounded: RX_DEMOD_DATA measured 2026-11-23 at ~3.4 MB/s (not 1200 B/s)
+   * - an unbounded drain never left the interrupt (process() starved, no
+   * blocks to the ESP). Bit-rate sources stay far below the bound. */
+  uint32_t budget = 1024u;
+  while (budget && (n = RAIL_GetRxFifoBytesAvailable(s_rail)) > 0) {
+    if (n > budget) n = (uint16_t)budget;
     if (n > sizeof tmp) n = sizeof tmp;
     n = RAIL_ReadRxFifo(s_rail, tmp, n);
     if (n == 0) break;
+    budget -= n;
+    if (s_stream) { stream_bytes(tmp, n); continue; }
+    s_bytes_rx += n;
+    if (s_rd_state == 1 && s_d.in) {         /* AR in packet mode: the bytes after each sync */
+      for (uint16_t i = 0; i < n && s_rd_n < sizeof s_rd_buf; i++) s_rd_buf[s_rd_n++] = tmp[i];
+      if (s_rd_n >= sizeof s_rd_buf) s_rd_state = 2;
+    }
     if (s_raw) {
       for (uint16_t i = 0; i < n && s_raw->n < sizeof s_raw->b; i++) s_raw->b[s_raw->n++] = tmp[i];
       if (s_raw->n >= sizeof s_raw->b) s_raw = NULL;
@@ -203,7 +274,13 @@ bool ais_hw_on_event(RAIL_Handle_t rail, RAIL_Events_t ev)
   (void)rail;
   if (!s_active) return false;
   g_ais_bc[1]++;
+  if (ev & RAIL_EVENT_RX_PREAMBLE_DETECT) s_n_pre++;
+  if (ev & RAIL_EVENT_RX_TIMING_DETECT) s_n_tim++;
   if (ev & RAIL_EVENT_RX_FIFO_OVERFLOW) { s_st.n_ovf++; s_d.in = false; s_restart = true; }
+  if (s_stream) {
+    if (ev & RAIL_EVENT_RX_FIFO_ALMOST_FULL) drain_fifo();
+    return true;
+  }
   if (ev & (RAIL_EVENT_RX_SYNC1_DETECT | RAIL_EVENT_RX_SYNC2_DETECT)) {
     /* the FIFO is empty here: rx_arm() resets it, and a frame that ran to the
      * fixed length was drained on RX_PACKET_RECEIVED before this sync */
@@ -243,8 +320,10 @@ static void rx_arm(void)
   s_d.in = false;
   RAIL_Idle(s_rail, RAIL_IDLE_ABORT, true);
   RAIL_ResetFifo(s_rail, false, true);
-  RAIL_SetFreqOffset(s_rail, (RAIL_FrequencyOffset_t)s_ftick);
+  s_h_prev = 0; s_h_win = 0;
+  /* iq_stream.c: StartRx does NOT preserve the synth offset - set it after */
   g_ais_bc[3] = (uint32_t)RAIL_StartRx(s_rail, s_ch, NULL);
+  RAIL_SetFreqOffset(s_rail, (RAIL_FrequencyOffset_t)s_ftick);
   g_ais_bc[6]++;
 }
 
@@ -282,25 +361,27 @@ bool ais_hw_start(char chan, int32_t freq_tick)
   }
   RAIL_DataConfig_t dc = {
     .txSource = TX_PACKET_DATA,
-    .rxSource = RX_PACKET_DATA,
+    .rxSource = s_src,
     .txMethod = PACKET_MODE,
     .rxMethod = FIFO_MODE,
   };
-  RAIL_ConfigData(s_rail, &dc);
-  RAIL_SetFixedLength(s_rail, AIS_FIXED_LEN);
+  s_stream = (s_src != RX_PACKET_DATA);
+  g_ais_bc[4] = (uint32_t)RAIL_ConfigData(s_rail, &dc);
+  if (!s_stream) RAIL_SetFixedLength(s_rail, AIS_FIXED_LEN);
   apply_sync();
   RAIL_StateTransitions_t tr = { RAIL_RF_STATE_RX, RAIL_RF_STATE_RX };
   RAIL_SetRxTransitions(s_rail, &tr);
   RAIL_SetRxFifoThreshold(s_rail, AIS_FIFO_THRESH);
   RAIL_ConfigEvents(s_rail, RAIL_EVENTS_ALL,
                     RAIL_EVENT_RX_SYNC1_DETECT | RAIL_EVENT_RX_SYNC2_DETECT
+                    | RAIL_EVENT_RX_PREAMBLE_DETECT | RAIL_EVENT_RX_TIMING_DETECT
                     | RAIL_EVENT_RX_FIFO_ALMOST_FULL | RAIL_EVENT_RX_FIFO_OVERFLOW
                     | RAIL_EVENT_RX_PACKET_RECEIVED | RAIL_EVENT_RX_PACKET_ABORTED
                     | RAIL_EVENT_RX_FRAME_ERROR);
 
   memset(&s_st, 0, sizeof s_st);
   s_qw = s_qr = 0; s_restart = false;
-  s_rx_restarts = 0; s_send_fail = 0; s_blocks = 0;
+  s_rx_restarts = 0; s_send_fail = 0; s_blocks = 0; s_n_pre = 0; s_n_tim = 0;
   s_t0_ms = s_last_blk_ms = s_last_stats_ms = now_ms();
 
   g_ais_bc[2] = 3;
@@ -311,9 +392,13 @@ bool ais_hw_start(char chan, int32_t freq_tick)
   g_ais_bc[2] = 5;
   /* The first StartRx on the AIS channel re-applies the PHY's own sync words
    * over the ones set above (measured: the frames then start 7 bits late).
-   * Set them again now that the PHY is loaded, and re-arm. */
+   * Set them again now that the PHY is loaded, and re-arm. The data config
+   * too: whatever reloads the sync words may reload the packet source. */
+  g_ais_bc[4] |= (uint32_t)RAIL_ConfigData(s_rail, &dc) << 8;
+  if (!s_stream) RAIL_SetFixedLength(s_rail, AIS_FIXED_LEN);
   apply_sync();
   rx_arm();
+  s_rd_state = 0; s_rd_n = 0; s_bytes_rx = 0;
   printf("# AIS HW: channel %c (radio ch %u), fixed %u B, data %s-first, offset %ld ticks\r\n",
          s_chan, (unsigned)s_ch, (unsigned)AIS_FIXED_LEN, s_data_lsb_first ? "LSB" : "MSB",
          (long)s_ftick);
@@ -338,11 +423,27 @@ static void send_block(uint32_t now)
 {
   uint32_t n = s_qw - s_qr;
   if (n > AISPKT_MAX_FRAMES) n = AISPKT_MAX_FRAMES;
-  if (n == 0 && now - s_last_blk_ms < AIS_HEARTBEAT_MS) return;
+  bool rawdump = (s_rd_state == 2);
+  if (rawdump) n = 0;
+  if (n == 0 && !rawdump && now - s_last_blk_ms < AIS_HEARTBEAT_MS) return;
   memset(&s_blk, 0, sizeof s_blk);
   s_blk.hdr.magic = AISPKT_MAGIC;
   s_blk.hdr.nfrm = (uint16_t)n;
-  s_blk.hdr.flags = AISPKT_FLAG_LAST;
+  s_blk.hdr.flags = AISPKT_FLAG_LAST | (rawdump ? AISPKT_FLAG_RAW : 0u);
+  if (rawdump) memcpy((uint8_t *)&s_blk.frm[0], s_rd_buf, sizeof s_rd_buf);   /* 960 B */
+  {
+    /* bring-up telemetry in the last 32 B of the pad (ESP: AISDBG) */
+    aispkt_dbg_t *D = (aispkt_dbg_t *)((uint8_t *)&s_blk + AISPKT_DBG_OFS);
+    D->loops = g_ais_bc[0]; D->isr = g_ais_bc[1]; D->bytes_rx = s_bytes_rx;
+    D->startrx_st = (uint16_t)g_ais_bc[3]; D->cfgdata_st = s_n_tim;   /* bring-up: timing detects */
+    D->radio_state = (uint16_t)RAIL_GetRadioState(s_rail); D->src = (uint8_t)s_src;
+    D->opts = (uint8_t)((s_data_lsb_first ? 1u : 0u) | (s_sync_lsb_first ? 2u : 0u));
+    D->rearm = (uint16_t)g_ais_bc[6]; D->wd = s_n_pre;               /* bring-up: preamble detects */
+    D->ftick = s_ftick;
+    RAIL_FrequencyOffset_t fo = RAIL_GetRxFreqOffset(s_rail);
+    D->foff_raw = (fo == RAIL_FREQUENCY_OFFSET_INVALID) ? INT16_MIN : (int16_t)fo;
+    D->rssi_qdbm = RAIL_GetRssi(s_rail, false);
+  }
   s_blk.hdr.f_center_hz = (s_chan == 'B') ? 162025000u : 161975000u;
   s_st.uptime_ms = now - s_t0_ms;
   s_st.noise_qdbm = s_d.in ? (int16_t)RAIL_RSSI_INVALID : RAIL_GetRssi(s_rail, false);
@@ -352,9 +453,9 @@ static void send_block(uint32_t now)
     s_qr += n;
     s_last_blk_ms = now;
     s_blocks++;
+    if (rawdump) { s_rd_n = 0; s_rd_state = 0; }
   } else {
     s_send_fail++;                           /* RDY timeout: same frames next time */
-    g_ais_bc[4]++;
   }
 }
 
@@ -399,6 +500,14 @@ void ais_hw_option(const char *a)
     while (*p >= '0' && *p <= '9') v = v * 10 + (*p++ - '0');
     s_ftick = (int32_t)(sg * v);
     if (s_active) rx_arm();
+  } else if (*a == 'D') {
+    /* AD<n>: RX data source (0 packet/HW sync, 1 demod, 5 direct sync);
+     * takes effect at the next A1/A2 */
+    int n = a[1] - '0';
+    if (n == 0 || n == 1 || n == 4 || n == 5) s_src = (RAIL_RxDataSource_t)n;
+    printf("# AIS HW: rx source %d (next A1/A2)\r\n", (int)s_src);
+  } else if (*a == 'R') {
+    s_rd_n = 0; s_rd_state = 1;              /* AR: dump 960 stream bytes (AISRAW) */
   } else if (*a == 'S') {
     int n = 0;
     for (const char *p = a + 1; *p >= '0' && *p <= '9'; p++) n = n * 10 + (*p - '0');

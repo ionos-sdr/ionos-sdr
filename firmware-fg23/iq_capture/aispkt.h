@@ -69,7 +69,32 @@ typedef struct {
   uint8_t        pad[1024 - sizeof(aispkt_stats_t) - AISPKT_MAX_FRAMES * sizeof(aispkt_frm_t)];
 } aispkt_blk_t;                                /* 1040 B */
 
+/* bring-up telemetry: the last 32 B of every block (inside pad, so it never
+ * overlaps a frame: 6 frames end at 16+32+864 = 912). With AISPKT_FLAG_RAW
+ * the 960 B from offset 48 (frm[0]...) are raw demod stream bytes instead
+ * of frames (nfrm = 0). */
+#define AISPKT_FLAG_RAW    0x0002u
+#define AISPKT_DBG_OFS     1008u
+#define AISPKT_RAW_OFS     48u
+#define AISPKT_RAW_LEN     960u
+typedef struct {
+  uint32_t loops;         /* ais_hw_process() calls */
+  uint32_t isr;           /* RAIL events handled */
+  uint32_t bytes_rx;      /* stream bytes read from the RX FIFO */
+  uint16_t startrx_st;    /* last RAIL_StartRx status */
+  uint16_t cfgdata_st;    /* RAIL_ConfigData status: low byte 1st, high byte 2nd call */
+  uint16_t radio_state;   /* RAIL_GetRadioState */
+  uint8_t  src;           /* RAIL_RxDataSource_t */
+  uint8_t  opts;          /* bit0 data LSB-first, bit1 sync LSB-first */
+  uint16_t rearm;
+  uint16_t wd;            /* watchdog re-arms */
+  int32_t  ftick;         /* synth offset ticks */
+  int16_t  foff_raw;      /* RAIL_GetRxFreqOffset, INT16_MIN = invalid */
+  int16_t  rssi_qdbm;     /* RAIL_GetRssi now */
+} aispkt_dbg_t;                                /* 32 B */
+
 #ifdef __cplusplus
+static_assert(sizeof(aispkt_dbg_t) == 32, "aispkt_dbg_t must be 32 B");
 static_assert(sizeof(aispkt_blk_t) == 1040, "aispkt_blk_t must be 1040 B");
 #else
 _Static_assert(sizeof(aispkt_blk_t) == 1040, "aispkt_blk_t must be 1040 B");

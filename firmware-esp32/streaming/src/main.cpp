@@ -2458,6 +2458,7 @@ static void console_dispatch(const char *cmd)
     cmdlink_send(l);
     return;
   }
+  if (!strcmp(cmd, "AISDBG")) { ais_hw_dbg_toggle(); return; }
   if (!strncmp(cmd, "AISBENCH", 8)) {
     if (atol(cmd + 8) > 0 && ui_mode() != UI_PAGE_AIS) ui_set_mode(UI_PAGE_AIS);
     ais_bench_cmd(cmd + 8, cmdlink_send);

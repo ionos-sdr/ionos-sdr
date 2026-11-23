@@ -28,6 +28,8 @@ static uint32_t   s_nmmsi = 0;
 static uint32_t   s_hw_frames = 0, s_hw_blocks = 0;
 static aispkt_stats_t s_hw_st;
 static int16_t    s_hw_noise_qdbm = INT16_MIN;
+static bool       s_hw_dbg = false;          /* AISDBG: telemetry line per AIS1 block */
+void ais_hw_dbg_toggle(void) { s_hw_dbg = !s_hw_dbg; diag_stream().printf("AISDBG %s\n", s_hw_dbg ? "on" : "off"); }
 
 static WiFiServer s_srv(AIS_NMEA_PORT);
 static WiFiClient s_cli[AIS_MAX_CLI];
@@ -109,6 +111,37 @@ void ais_mode_hwblk(const void *blk1040)
   const aispkt_blk_t *B = (const aispkt_blk_t *)blk1040;
   s_hw_blocks++;
   s_hw_st = B->st;
+  const uint8_t *raw8 = (const uint8_t *)blk1040;
+  if (s_hw_dbg) {
+    aispkt_dbg_t D;
+    memcpy(&D, raw8 + AISPKT_DBG_OFS, sizeof D);
+    diag_stream().printf("AISDBG t %lu sync %lu ok %lu crc %lu abort %lu ovf %lu | loops %lu isr %lu "
+                         "bytes %lu startrx %u cfg 0x%04x state 0x%x src %u opts %u rearm %u wd %u "
+                         "ftick %ld foff %d rssi %.1f\n",
+                         (unsigned long)B->st.uptime_ms, (unsigned long)B->st.n_sync,
+                         (unsigned long)B->st.n_ok, (unsigned long)B->st.n_crc_bad,
+                         (unsigned long)B->st.n_abort, (unsigned long)B->st.n_ovf,
+                         (unsigned long)D.loops, (unsigned long)D.isr, (unsigned long)D.bytes_rx,
+                         (unsigned)D.startrx_st, (unsigned)D.cfgdata_st, (unsigned)D.radio_state,
+                         (unsigned)D.src, (unsigned)D.opts, (unsigned)D.rearm, (unsigned)D.wd,
+                         (long)D.ftick, (int)D.foff_raw, D.rssi_qdbm / 4.0);
+  }
+  if (B->hdr.flags & AISPKT_FLAG_RAW) {
+    static const char hx[] = "0123456789abcdef";
+    char line[2 * 64 + 1];
+    Print &o = diag_stream();
+    o.printf("AISRAW begin %u\n", (unsigned)AISPKT_RAW_LEN);
+    for (unsigned i = 0; i < AISPKT_RAW_LEN; i += 64) {
+      for (unsigned k = 0; k < 64; k++) {
+        uint8_t v = raw8[AISPKT_RAW_OFS + i + k];
+        line[2 * k] = hx[v >> 4]; line[2 * k + 1] = hx[v & 15];
+      }
+      line[128] = 0;
+      o.printf("AISRAW %s\n", line);
+    }
+    o.printf("AISRAW end\n");
+    return;
+  }
   /* RAIL_RSSI_INVALID = -128 dBm * 4; a real FG23 noise floor is ~-120..-100 dBm */
   if (B->st.noise_qdbm > -127 * 4 && B->st.noise_qdbm < 0) s_hw_noise_qdbm = B->st.noise_qdbm;
   uint16_t n = B->hdr.nfrm;
