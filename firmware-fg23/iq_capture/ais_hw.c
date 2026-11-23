@@ -43,7 +43,7 @@ static int32_t       s_ftick = 0;
 
 /* options (runtime, for the bring-up: which bit order the FIFO really has) */
 static bool    s_data_lsb_first = true;   /* first air bit = byte bit 0 */
-static bool    s_sync_lsb_first = false;  /* measured on air 2026-11-23: the MSB-first value matches (rail_types.h says LSB) */
+static bool    s_sync_lsb_first = true;   /* RAIL: LSB first (rail_types.h) - confirmed on air once the tuning was right */
 /* 16 bits = 8 training bits + flag. The bit-level model (tools/ais_hw_model.py)
  * on the 22 Nov powerbank capture: 16 bits 58/58 frames, 24 bits 56, 32 bits
  * 54 - the start of the training sequence is often damaged. Noise false-sync
@@ -176,6 +176,9 @@ static void dec_bytes(const uint8_t *p, uint16_t n)
 #define RAW_LEN 56u
 typedef struct { uint32_t t_us; int16_t rssi; uint8_t pol, n; int16_t foff_raw; int16_t ftick; uint8_t b[RAW_LEN - 4]; } raw_t;   /* 64 B */
 volatile uint32_t g_ais_raw_w = 0;
+/* bring-up breadcrumbs (FGRD): [0] process() calls, [1] ISR calls,
+ * [2] last step in start/process, [3] last RAIL status, [4] ext_send fails */
+volatile uint32_t g_ais_bc[8];
 raw_t g_ais_raw[RAW_N];
 static raw_t *s_raw = NULL;
 
@@ -199,6 +202,7 @@ bool ais_hw_on_event(RAIL_Handle_t rail, RAIL_Events_t ev)
 {
   (void)rail;
   if (!s_active) return false;
+  g_ais_bc[1]++;
   if (ev & RAIL_EVENT_RX_FIFO_OVERFLOW) { s_st.n_ovf++; s_d.in = false; s_restart = true; }
   if (ev & (RAIL_EVENT_RX_SYNC1_DETECT | RAIL_EVENT_RX_SYNC2_DETECT)) {
     /* the FIFO is empty here: rx_arm() resets it, and a frame that ran to the
@@ -256,13 +260,20 @@ bool ais_hw_start(char chan, int32_t freq_tick)
   if (s_active) ais_hw_stop();
   s_chan  = (chan == 'B') ? 'B' : 'A';
   s_ch    = (s_chan == 'B') ? AIS_CH_B : AIS_CH_A;
-  s_ftick = freq_tick;
+  /* The crystal correction comes in the I/Q PHY's synth ticks (4.6492 Hz).
+   * The AIS PHY's tick is ~3.9x larger: measured 2026-11-23 with AF<n> -
+   * the demod output ran away to all ones at 539 (the I/Q value) and to all
+   * zeros at 0, RAIL_GetRxFreqOffset crossed zero at ~137, where whole
+   * frames came through. Until the tick size is read from the PHY, scale. */
+  s_ftick = (int32_t)((int64_t)freq_tick * 137 / 539);
 
   RAIL_Idle(s_rail, RAIL_IDLE_ABORT, true);
   /* Loads the AIS PHY of that channel entry (multi-PHY radio config). It
    * also re-applies the PHY's data config, so the packet source is set
    * after it, not before. */
+  g_ais_bc[2] = 1;
   RAIL_Status_t pst = RAIL_PrepareChannel(s_rail, s_ch);
+  g_ais_bc[2] = 2; g_ais_bc[3] = (uint32_t)pst;
   if (pst != RAIL_STATUS_NO_ERROR) {
     printf("# AIS HW: channel %u not in the radio config (st=%d) - generate the AIS PHY first, "
            "docs/fg23-ais-onchip.md\r\n", (unsigned)s_ch, (int)pst);
@@ -291,8 +302,16 @@ bool ais_hw_start(char chan, int32_t freq_tick)
   s_rx_restarts = 0; s_send_fail = 0; s_blocks = 0;
   s_t0_ms = s_last_blk_ms = s_last_stats_ms = now_ms();
 
+  g_ais_bc[2] = 3;
   iq_stream_ext_begin();
+  g_ais_bc[2] = 4;
   s_active = true;
+  rx_arm();
+  g_ais_bc[2] = 5;
+  /* The first StartRx on the AIS channel re-applies the PHY's own sync words
+   * over the ones set above (measured: the frames then start 7 bits late).
+   * Set them again now that the PHY is loaded, and re-arm. */
+  apply_sync();
   rx_arm();
   printf("# AIS HW: channel %c (radio ch %u), fixed %u B, data %s-first, offset %ld ticks\r\n",
          s_chan, (unsigned)s_ch, (unsigned)AIS_FIXED_LEN, s_data_lsb_first ? "LSB" : "MSB",
@@ -334,12 +353,14 @@ static void send_block(uint32_t now)
     s_blocks++;
   } else {
     s_send_fail++;                           /* RDY timeout: same frames next time */
+    g_ais_bc[4]++;
   }
 }
 
 void ais_hw_process(void)
 {
   if (!s_active) return;
+  g_ais_bc[0]++; g_ais_bc[2] = 100;
   /* bring-up: let the raw capture of this sync fill (56 B = 47 ms) first */
   raw_t *r = s_raw;
   bool raw_busy = r && ((uint32_t)RAIL_GetTime() - r->t_us) < 60000u;
@@ -349,9 +370,12 @@ void ais_hw_process(void)
     s_rx_restarts++;
     rx_arm();
   }
+  g_ais_bc[2] = 110;
   iq_stream_ext_pump();
+  g_ais_bc[2] = 120;
   uint32_t now = now_ms();
   if (!iq_stream_ext_busy()) send_block(now);
+  g_ais_bc[2] = 130;
   if (now - s_last_stats_ms >= AIS_STATS_MS) { s_last_stats_ms = now; ais_hw_print_stats(); }
 }
 
