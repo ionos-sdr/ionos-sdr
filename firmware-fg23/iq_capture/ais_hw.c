@@ -43,7 +43,7 @@ static int32_t       s_ftick = 0;
 
 /* options (runtime, for the bring-up: which bit order the FIFO really has) */
 static bool    s_data_lsb_first = true;   /* first air bit = byte bit 0 */
-static bool    s_sync_lsb_first = true;   /* RAIL: LSB first (rail_types.h) */
+static bool    s_sync_lsb_first = false;  /* measured on air 2026-11-23: the MSB-first value matches (rail_types.h says LSB) */
 /* 16 bits = 8 training bits + flag. The bit-level model (tools/ais_hw_model.py)
  * on the 22 Nov powerbank capture: 16 bits 58/58 frames, 24 bits 56, 32 bits
  * 54 - the start of the training sequence is often damaged. Noise false-sync
@@ -170,6 +170,15 @@ static void dec_bytes(const uint8_t *p, uint16_t n)
   }
 }
 
+/* bring-up: the raw FIFO bytes after the last syncs, read over SWD (FGRD)
+ * and decoded offline (bit orders, polarity) - g_ais_raw in the .map */
+#define RAW_N 8u
+#define RAW_LEN 56u
+typedef struct { uint32_t t_us; int16_t rssi; uint8_t pol, n; int16_t foff_raw; int16_t ftick; uint8_t b[RAW_LEN - 4]; } raw_t;   /* 64 B */
+volatile uint32_t g_ais_raw_w = 0;
+raw_t g_ais_raw[RAW_N];
+static raw_t *s_raw = NULL;
+
 static void drain_fifo(void)
 {
   uint8_t tmp[32];
@@ -178,6 +187,10 @@ static void drain_fifo(void)
     if (n > sizeof tmp) n = sizeof tmp;
     n = RAIL_ReadRxFifo(s_rail, tmp, n);
     if (n == 0) break;
+    if (s_raw) {
+      for (uint16_t i = 0; i < n && s_raw->n < sizeof s_raw->b; i++) s_raw->b[s_raw->n++] = tmp[i];
+      if (s_raw->n >= sizeof s_raw->b) s_raw = NULL;
+    }
     if (s_d.in) dec_bytes(tmp, n);           /* after an early end the rest is discarded */
   }
 }
@@ -190,7 +203,13 @@ bool ais_hw_on_event(RAIL_Handle_t rail, RAIL_Events_t ev)
   if (ev & (RAIL_EVENT_RX_SYNC1_DETECT | RAIL_EVENT_RX_SYNC2_DETECT)) {
     /* the FIFO is empty here: rx_arm() resets it, and a frame that ran to the
      * fixed length was drained on RX_PACKET_RECEIVED before this sync */
-    if (!s_d.in) dec_begin((ev & RAIL_EVENT_RX_SYNC1_DETECT) ? 1u : 2u);
+    if (!s_d.in) {
+      dec_begin((ev & RAIL_EVENT_RX_SYNC1_DETECT) ? 1u : 2u);
+      s_raw = &g_ais_raw[g_ais_raw_w % RAW_N];
+      s_raw->t_us = s_d.t_us; s_raw->rssi = s_d.rssi; s_raw->pol = s_d.pol; s_raw->n = 0;
+      s_raw->foff_raw = (int16_t)RAIL_GetRxFreqOffset(s_rail); s_raw->ftick = (int16_t)s_ftick;
+      g_ais_raw_w++;
+    }
   }
   if (ev & (RAIL_EVENT_RX_FIFO_ALMOST_FULL | RAIL_EVENT_RX_PACKET_RECEIVED
             | RAIL_EVENT_RX_PACKET_ABORTED | RAIL_EVENT_RX_FRAME_ERROR)) {
@@ -321,8 +340,12 @@ static void send_block(uint32_t now)
 void ais_hw_process(void)
 {
   if (!s_active) return;
-  if (s_restart) {
+  /* bring-up: let the raw capture of this sync fill (56 B = 47 ms) first */
+  raw_t *r = s_raw;
+  bool raw_busy = r && ((uint32_t)RAIL_GetTime() - r->t_us) < 60000u;
+  if (s_restart && !raw_busy) {
     s_restart = false;
+    s_raw = NULL;
     s_rx_restarts++;
     rx_arm();
   }
@@ -340,6 +363,14 @@ void ais_hw_option(const char *a)
   } else if (*a == 'Y') {
     s_sync_lsb_first = !s_sync_lsb_first;
     if (s_active) { apply_sync(); rx_arm(); }
+  } else if (*a == 'F') {
+    /* AF<ticks>: synth offset for the AIS PHY by hand (bring-up: is the
+     * IQ PHY's tick size right for this PHY?) */
+    const char *p = a + 1; int sg = 1; long v = 0;
+    if (*p == '-') { sg = -1; p++; }
+    while (*p >= '0' && *p <= '9') v = v * 10 + (*p++ - '0');
+    s_ftick = (int32_t)(sg * v);
+    if (s_active) rx_arm();
   } else if (*a == 'S') {
     int n = 0;
     for (const char *p = a + 1; *p >= '0' && *p <= '9'; p++) n = n * 10 + (*p - '0');

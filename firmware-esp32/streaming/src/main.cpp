@@ -2449,7 +2449,9 @@ static void console_dispatch(const char *cmd)
   /* EXPERIMENTAL on-chip AIS: AISHW1 / AISHW2 / AISHW0 = FG23 A1 / A2 / A0
    * by hand; AISBENCH <min> = alternate I/Q and on-chip, AISBENCH 0 = stop */
   if (!strncmp(cmd, "AISHW", 5)) {
-    char l[4] = { 'A', cmd[5] ? cmd[5] : '1', 0, 0 };
+    /* AISHW<rest> -> FG23 "A<rest>" (A1, A0, AY, AF-120, AS24, ...) */
+    char l[24];
+    snprintf(l, sizeof l, "A%s", cmd[5] ? cmd + 5 : "1");
     if (l[1] != '0' && ui_mode() != UI_PAGE_AIS) ui_set_mode(UI_PAGE_AIS);
     cmdlink_send(l);
     return;
