@@ -159,8 +159,14 @@ def reader(src):
                 buf += x
                 *lines, buf = buf.split(b'\n')
                 for ln in lines:
-                    handle(ln.decode('ascii', 'replace').strip())
-        except OSError:
+                    # one bad sentence must not kill the reader (2026-11-23: a
+                    # TypeError in a decode stopped it for 3 hours, silently)
+                    try:
+                        handle(ln.decode('ascii', 'replace').strip())
+                    except Exception as e:
+                        print('handle error:', repr(e), ln[:120], flush=True)
+        except Exception as e:
+            print('reader:', repr(e), flush=True)
             time.sleep(5)
 
 # ---------------- web ----------------
