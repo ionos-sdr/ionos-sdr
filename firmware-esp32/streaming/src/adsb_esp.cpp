@@ -21,6 +21,7 @@
 #include <sys/time.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "esp_timer.h"
 
 #define AC_MAX         256
 #define AC_SHOW_MS     300000u      /* aircraft.json lists those seen in the last 5 min */
@@ -35,11 +36,19 @@
 #define RANGE_MAX_M    600000.0     /* positions further than this are treated as CPR errors */
 #define RNG_N          72           /* 5 degree sectors for the range outline */
 #define HIST_N         1440         /* one record per minute, 24 h */
+#define FIX_KNOWN_MS   60000u       /* a corrected frame is accepted only for an ICAO heard clean this recently */
+#define BEAST_PORT     30005
+#define BEAST_MAX_CLI  3
 
 typedef struct {
   uint32_t icao, first_ms, last_ms, pos_ms, msgs;
   char     flight[9];
   char     cat[3];                    /* emitter category, e.g. "A3" (readsb "category") */
+  int32_t  geo_diff; bool geo_ok;     /* TC19: GNSS - baro, ft */
+  int8_t   nic, nacp, sil, ver;       /* -1 = unknown */
+  double   pos_ts;                    /* epoch s of the last position message (ms resolution) */
+  double   last_ts;                   /* epoch s of the last message */
+  uint32_t clean_ms;                  /* last CRC-clean (uncorrected) frame */
   int32_t  alt; bool alt_ok;
   float    gs, track; int32_t vrate; bool vel_ok;
   double   lat, lon; bool pos_ok;
@@ -54,6 +63,7 @@ typedef struct {
   uint64_t samples; uint32_t pre, trig, ovf;
   float    noise_sum; uint32_t noise_n;
   float    maxd;                      /* max distance from the reference, m */
+  uint32_t fix_rej;                   /* corrected frames dropped (unknown ICAO) */
 } st_t;
 
 #define ST_N 17
@@ -67,6 +77,16 @@ static bool              s_dbg_have = false;
 static uint32_t          p_bytes = 0, p_trig = 0;
 static uint16_t          p_pre = 0, p_ovf = 0;
 static WebServer        *s_srv = NULL;
+/* FG23 RAIL clock (us, 32 bit) -> ESP time: telemetry blocks carry the FG23 time at sending
+ * (D->loops); off = esp_us - fg_us with the smallest transfer latency over a 60 s window */
+static uint64_t          s_fg_hi = 0;
+static uint32_t          s_fg_last = 0;
+static int64_t           s_off = 0, s_off_win = INT64_MAX;
+static uint32_t          s_off_t0 = 0;
+static bool              s_off_ok = false;
+static WiFiServer       *s_beast = NULL;
+static WiFiClient        s_bcli[BEAST_MAX_CLI];
+static uint32_t          s_beast_sent = 0;
 static char             *s_buf = NULL;
 static size_t            s_cap = 0, s_len = 0;
 
@@ -109,6 +129,7 @@ static void st_add(st_t *a, const st_t *b)
   a->strong += b->strong; a->samples += b->samples; a->pre += b->pre; a->trig += b->trig; a->ovf += b->ovf;
   a->noise_sum += b->noise_sum; a->noise_n += b->noise_n;
   if (b->maxd > a->maxd) a->maxd = b->maxd;
+  a->fix_rej += b->fix_rej;
 }
 
 /* ---------------------------------------------------------------- Mode S helpers */
@@ -172,6 +193,24 @@ static void ac_range(const ac_t *a, st_t *st)
   if (d > s_tot.maxd) s_tot.maxd = (float)d;
 }
 
+static uint64_t fg_unwrap(uint32_t t)            /* FG23 32-bit us near the last telemetry -> 64 bit */
+{
+  uint64_t ref = s_fg_hi | s_fg_last;
+  return ref - (uint32_t)(s_fg_last - t);
+}
+static double fg_epoch(uint64_t t64)               /* FG23 us -> epoch s, using the ESP clock */
+{
+  int64_t esp_us = esp_timer_get_time();
+  double age = (double)(esp_us - ((int64_t)t64 + s_off)) / 1e6;
+  return now_epoch() - age;
+}
+
+static ac_t *ac_find(uint32_t icao)
+{
+  for (uint32_t i = 0; i < s_nac; i++) if (s_ac[i].icao == icao) return &s_ac[i];
+  return NULL;
+}
+
 static ac_t *ac_get(uint32_t icao, uint32_t now, st_t *st)
 {
   ac_t *old = NULL;
@@ -182,11 +221,12 @@ static ac_t *ac_get(uint32_t icao, uint32_t now, st_t *st)
   ac_t *a = (s_nac < AC_MAX) ? &s_ac[s_nac++] : old;      /* full: reuse the stalest */
   memset(a, 0, sizeof *a);
   a->icao = icao; a->first_ms = now;
+  a->nic = a->nacp = a->sil = a->ver = -1;
   st->newac++; s_tot.newac++;
   return a;
 }
 
-static void decode_df17(ac_t *a, const uint8_t *m, uint32_t now, st_t *st)
+static void decode_df17(ac_t *a, const uint8_t *m, uint32_t now, st_t *st, double ts)
 {
   static const char cs[] = "#ABCDEFGHIJKLMNOPQRSTUVWXYZ##### ###############0123456789######";
   uint32_t tc = bits(m, 32, 5);
@@ -196,15 +236,17 @@ static void decode_df17(ac_t *a, const uint8_t *m, uint32_t now, st_t *st)
     uint32_t ca = bits(m, 37, 3);                    /* TC 4/3/2/1 = set A/B/C/D */
     if (ca) { a->cat[0] = (char)('A' + (4 - (int)tc)); a->cat[1] = (char)('0' + ca); a->cat[2] = 0; }
   } else if (tc >= 9 && tc <= 18) {
+    static const int8_t nic_tc[19] = { 0,0,0,0,0,0,0,0,0, 11,10,8,7,6,5,4,2,1,0 };
+    a->nic = nic_tc[tc];
     uint32_t a12 = bits(m, 40, 12);
     if (a12 & 0x10u) { uint32_t n = ((a12 >> 5) << 4) | (a12 & 0xFu); a->alt = (int32_t)n * 25 - 1000; a->alt_ok = true; }
     int f = (int)bits(m, 53, 1);
     a->cpr_lat[f] = bits(m, 54, 17); a->cpr_lon[f] = bits(m, 71, 17); a->cpr_ms[f] = now; a->cpr_ok[f] = true;
     st->pos++; s_tot.pos++;
     if (a->cpr_ok[0] && a->cpr_ok[1] && (uint32_t)abs((int32_t)(a->cpr_ms[0] - a->cpr_ms[1])) < CPR_PAIR_MS) {
-      if (cpr_global(a, f == 1)) { a->pos_ok = true; a->pos_ms = now; st->gok++; s_tot.gok++; ac_range(a, st); return; }
+      if (cpr_global(a, f == 1)) { a->pos_ok = true; a->pos_ms = now; a->pos_ts = ts; st->gok++; s_tot.gok++; ac_range(a, st); return; }
     }
-    if (a->pos_ok && now - a->pos_ms < LOCAL_MAX_MS) { cpr_local(a, f); a->pos_ms = now; st->lok++; s_tot.lok++; ac_range(a, st); }
+    if (a->pos_ok && now - a->pos_ms < LOCAL_MAX_MS) { cpr_local(a, f); a->pos_ms = now; a->pos_ts = ts; st->lok++; s_tot.lok++; ac_range(a, st); }
   } else if (tc == 19) {
     uint32_t sub = bits(m, 37, 3);
     if (sub == 1 || sub == 2) {
@@ -219,7 +261,44 @@ static void decode_df17(ac_t *a, const uint8_t *m, uint32_t now, st_t *st)
       }
       if (vr) a->vrate = ((int32_t)vr - 1) * 64 * (bits(m, 68, 1) ? -1 : 1);
     }
+    uint32_t gd = bits(m, 81, 7);                    /* ME 50-56: GNSS - baro difference */
+    if (gd) { a->geo_diff = ((int32_t)gd - 1) * 25 * (bits(m, 80, 1) ? -1 : 1); a->geo_ok = true; }
+  } else if (tc == 31) {
+    uint32_t sub = bits(m, 37, 3);                   /* 0 airborne, 1 surface */
+    if (sub <= 1) {
+      a->ver = (int8_t)bits(m, 72, 3);               /* ME 41-43 */
+      if (a->ver >= 1) { a->nacp = (int8_t)bits(m, 76, 4); a->sil = (int8_t)bits(m, 82, 2); }   /* ME 45-48, 51-52 */
+    }
   }
+}
+
+/* ---------------------------------------------------------------- Beast TCP (readsb --net-connector <ip>,30005,beast_in) */
+static void beast_service(void)
+{
+  if (!s_beast) {
+    if (WiFi.status() != WL_CONNECTED || WiFi.getMode() == WIFI_AP) return;
+    s_beast = new WiFiServer(BEAST_PORT); s_beast->begin(); s_beast->setNoDelay(true);
+  }
+  if (s_beast->hasClient()) {
+    WiFiClient c = s_beast->available();
+    int slot = -1;
+    for (int i = 0; i < BEAST_MAX_CLI; i++) if (!(s_bcli[i] && s_bcli[i].connected())) { slot = i; break; }
+    if (slot < 0) c.stop(); else { s_bcli[slot] = c; s_bcli[slot].setNoDelay(true); }
+  }
+}
+static void beast_send(const uint8_t *m, uint32_t nb, uint64_t t64, int8_t lvl)
+{
+  uint8_t out[2 + 2 * (6 + 1 + 14)]; uint32_t n = 0;
+  uint8_t raw[6 + 1 + 14];
+  uint64_t ts = t64 * 12u;                          /* 12 MHz counter, as Beast expects */
+  for (int i = 0; i < 6; i++) raw[i] = (uint8_t)(ts >> (8 * (5 - i)));
+  float a = powf(10.f, LVL_TO_DBFS(lvl) / 20.f); if (a > 1.f) a = 1.f;
+  raw[6] = (uint8_t)lrintf(a * 255.f);
+  memcpy(raw + 7, m, nb);
+  out[n++] = 0x1A; out[n++] = (nb == 14) ? '3' : '2';
+  for (uint32_t i = 0; i < 7 + nb; i++) { out[n++] = raw[i]; if (raw[i] == 0x1A) out[n++] = 0x1A; }
+  for (int i = 0; i < BEAST_MAX_CLI; i++)
+    if (s_bcli[i] && s_bcli[i].connected()) { s_bcli[i].write(out, n); s_beast_sent++; }
 }
 
 /* ---------------------------------------------------------------- feeds */
@@ -228,6 +307,7 @@ void adsb_feed_ms1(const uint8_t *raw, uint32_t len)
   if (!s_ac || len < 4 || raw[0] != 'M' || raw[1] != 'S' || raw[2] != '1') return;
   uint32_t n = raw[3]; if (4 + 20 * n > len) n = (len - 4) / 20;
   uint32_t now = millis();
+  beast_service();
   xSemaphoreTake(s_mx, portMAX_DELAY);
   st_t *st = st_cur();
   for (uint32_t i = 0; i < n; i++) {
@@ -236,6 +316,13 @@ void adsb_feed_ms1(const uint8_t *raw, uint32_t len)
     const uint8_t *m = r + 6;
     if (nb != 7 && nb != 14) continue;
     uint32_t df = m[0] >> 3, icao = ((uint32_t)m[1] << 16) | ((uint32_t)m[2] << 8) | m[3];
+    if (fix) {                                       /* corrected: only for an aircraft heard clean recently */
+      ac_t *k = ac_find(icao);
+      if (!k || !k->clean_ms || now - k->clean_ms > FIX_KNOWN_MS) { st->fix_rej++; s_tot.fix_rej++; continue; }
+    }
+    uint32_t th; memcpy(&th, r, 4);
+    uint64_t t64 = fg_unwrap(th);
+    double ts = s_off_ok ? fg_epoch(t64) : now_epoch();
     st->msgs++; st->acc[fix > 2 ? 2 : fix]++; s_tot.msgs++; s_tot.acc[fix > 2 ? 2 : fix]++; s_msgs_total++;
     if (df == 11) { st->df11++; s_tot.df11++; } else { st->df17++; s_tot.df17++; }
     st->sig_sum += LVL_TO_DBFS(lvl); st->sig_n++; s_tot.sig_sum += LVL_TO_DBFS(lvl); s_tot.sig_n++;
@@ -243,8 +330,10 @@ void adsb_feed_ms1(const uint8_t *raw, uint32_t len)
     if (lvl > s_tot.sig_peak) s_tot.sig_peak = lvl;
     if (LVL_TO_DBFS(lvl) > -3.f) { st->strong++; s_tot.strong++; }
     ac_t *a = ac_get(icao, now, st);
-    a->last_ms = now; a->msgs++; a->lvl_last = lvl; a->lvl_sum += lvl; a->lvl_n++;
-    if (df == 17 && nb == 14) decode_df17(a, m, now, st);
+    a->last_ms = now; a->msgs++; a->lvl_last = lvl; a->lvl_sum += lvl; a->lvl_n++; a->last_ts = ts;
+    if (!fix) a->clean_ms = now;
+    if (df == 17 && nb == 14) decode_df17(a, m, now, st, ts);
+    beast_send(m, nb, t64, lvl);
   }
   xSemaphoreGive(s_mx);
 }
@@ -252,7 +341,19 @@ void adsb_feed_ms1(const uint8_t *raw, uint32_t len)
 void adsb_feed_dbg(const aispkt_dbg_t *d)
 {
   if (!s_ac) return;
+  beast_service();                                   /* accept Beast clients even with no traffic */
+  int64_t esp_us = esp_timer_get_time();
   xSemaphoreTake(s_mx, portMAX_DELAY);
+  {
+    uint32_t fg = d->loops;
+    if (fg < s_fg_last) s_fg_hi += 0x100000000ull;
+    s_fg_last = fg;
+    int64_t off = esp_us - (int64_t)(s_fg_hi | fg);
+    uint32_t nowm = millis();
+    if (off < s_off_win) s_off_win = off;
+    if (!s_off_ok || nowm - s_off_t0 > 60000u) { s_off = s_off_win; s_off_ok = true; s_off_win = INT64_MAX; s_off_t0 = nowm; }
+    else if (off < s_off) s_off = off;
+  }
   st_t *st = st_cur();
   if (s_dbg_have && d->bytes_rx >= p_bytes) {
     uint32_t db = d->bytes_rx - p_bytes, dt = (uint32_t)d->ftick - p_trig;
@@ -298,7 +399,7 @@ static void h_aircraft(void)
   xSemaphoreTake(s_mx, portMAX_DELAY);
   uint32_t now = millis(); double ep = now_epoch();
   s_len = 0;
-  J("{\"now\":%.1f,\"messages\":%lu,\"aircraft\":[", ep, (unsigned long)s_msgs_total);
+  J("{\"now\":%.3f,\"messages\":%lu,\"aircraft\":[", ep, (unsigned long)s_msgs_total);
   bool first = true;
   for (uint32_t i = 0; i < s_nac; i++) {
     ac_t *a = &s_ac[i];
@@ -307,9 +408,15 @@ static void h_aircraft(void)
     if (a->flight[0]) J(",\"flight\":\"%s\"", a->flight);
     if (a->cat[0]) J(",\"category\":\"%s\"", a->cat);
     if (a->alt_ok) J(",\"alt_baro\":%ld", (long)a->alt);
+    if (a->alt_ok && a->geo_ok) J(",\"alt_geom\":%ld,\"geom_minus_baro\":%ld", (long)(a->alt + a->geo_diff), (long)a->geo_diff);
+    if (a->nic >= 0) J(",\"nic\":%d", a->nic);
+    if (a->nacp >= 0) J(",\"nac_p\":%d", a->nacp);
+    if (a->sil >= 0) J(",\"sil\":%d", a->sil);
+    if (a->ver >= 0) J(",\"version\":%d", a->ver);
     if (a->vel_ok) J(",\"gs\":%.1f,\"track\":%.1f,\"baro_rate\":%ld", a->gs, a->track, (long)a->vrate);
-    if (a->pos_ok) J(",\"lat\":%.6f,\"lon\":%.6f,\"seen_pos\":%.1f", a->lat, a->lon, (now - a->pos_ms) / 1000.0);
-    J(",\"messages\":%lu,\"seen\":%.1f,\"rssi\":%.1f}", (unsigned long)a->msgs, (now - a->last_ms) / 1000.0,
+    if (a->pos_ok) J(",\"lat\":%.6f,\"lon\":%.6f,\"seen_pos\":%.3f,\"pos_ts\":%.3f", a->lat, a->lon,
+                     ep - a->pos_ts, a->pos_ts);
+    J(",\"messages\":%lu,\"seen\":%.3f,\"last_ts\":%.3f,\"rssi\":%.1f}", (unsigned long)a->msgs, ep - a->last_ts, a->last_ts,
       LVL_TO_DBFS(a->lvl_n ? a->lvl_sum / a->lvl_n : a->lvl_last));
   }
   J("]}");
@@ -350,8 +457,8 @@ static void j_period(const char *name, int minutes, double ep, uint32_t cur)
     "\"global_skipped\":0,\"local_ok\":%lu,\"local_aircraft_relative\":%lu,\"local_receiver_relative\":0,\"local_skipped\":0,"
     "\"local_range\":0,\"local_speed\":0,\"filtered\":0},", (unsigned long)a.pos, (unsigned long)a.gok, (unsigned long)a.lok, (unsigned long)a.lok);
   J("\"tracks\":{\"all\":%lu,\"single_message\":0},", (unsigned long)a.newac);
-  J("\"fg23\":{\"triggers\":%lu,\"fifo_full\":%lu,\"df11\":%lu,\"df17\":%lu,\"minutes\":%lu}}",
-    (unsigned long)a.trig, (unsigned long)a.ovf, (unsigned long)a.df11, (unsigned long)a.df17, (unsigned long)got);
+  J("\"fg23\":{\"triggers\":%lu,\"fifo_full\":%lu,\"df11\":%lu,\"df17\":%lu,\"fix_rejected\":%lu,\"minutes\":%lu}}",
+    (unsigned long)a.trig, (unsigned long)a.ovf, (unsigned long)a.df11, (unsigned long)a.df17, (unsigned long)a.fix_rej, (unsigned long)got);
 }
 
 static void h_stats(void)
@@ -364,8 +471,9 @@ static void h_stats(void)
     if (s_ac[i].pos_ok && now - s_ac[i].pos_ms < 60000u) wp++; else wop++;
   }
   s_len = 0;
-  J("{\"now\":%.1f,\"aircraft_with_pos\":%lu,\"aircraft_without_pos\":%lu,\"aircraft_count_by_type\":{\"adsb_icao\":%lu},",
-    ep, (unsigned long)wp, (unsigned long)wop, (unsigned long)(wp + wop));
+  J("{\"now\":%.3f,\"clock\":{\"fg23_synced\":%s,\"ntp\":%s},\"beast\":{\"port\":%d,\"frames_sent\":%lu},\"aircraft_with_pos\":%lu,\"aircraft_without_pos\":%lu,\"aircraft_count_by_type\":{\"adsb_icao\":%lu},",
+    ep, s_off_ok ? "true" : "false", ep > 1700000000.0 ? "true" : "false", BEAST_PORT, (unsigned long)s_beast_sent,
+    (unsigned long)wp, (unsigned long)wop, (unsigned long)(wp + wop));
   /* "latest" = the running minute */
   { st_t *b = st_cur(); J("\"latest\":{\"start\":%.1f,\"end\":%.1f,\"messages\":%lu},",
       ep - (now % 60000u) / 1000.0, ep, (unsigned long)b->msgs); }

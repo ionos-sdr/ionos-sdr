@@ -837,7 +837,7 @@ static void send_block(uint32_t now)
       D->ftick = (int32_t)s_am_ntrig; D->cfgdata_st = (uint16_t)s_am_npre;
       D->wd = (uint16_t)s_am_ok; D->rearm = (uint16_t)s_am_ovf; D->bytes_rx = s_am_w;
       D->isr = s_am_fix2; D->src = (uint8_t)s_am_fix1;          /* corrected frames: 2-bit / 1-bit (mod 256) */
-      D->loops = s_am_dec_max;                                   /* max decode time, us */
+      D->loops = (uint32_t)RAIL_GetTime();   /* FG23 clock at sending, us: the ESP syncs MS1 timestamps to it */                                   /* max decode time, us */
       {                   /* DWT: pump and decode share of all cycles since the last block, per mille */
         uint32_t tot = DWT->CYCCNT - s_am_cyc_t0; if (!tot) tot = 1;
         uint32_t pp = (uint32_t)((uint64_t)s_am_cyc_pump * 1000u / tot), dd = (uint32_t)((uint64_t)s_am_cyc_dec * 1000u / tot);
