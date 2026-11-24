@@ -47,6 +47,10 @@ static double        s_tick_hz = 4.6492;
 static volatile bool s_active = false;
 static bool s_cap_hold = false;            /* bring-up: AK capture done, no raw drain until A1/A2 */
 static bool s_am = false;                  /* bring-up: AM Mode S monitor running */
+/* bring-up: AGC registers (xG23, from the configurator's register model; not in the RM) */
+#define AGC_STATUS0_REG  (*(volatile uint32_t *)0xB800C008u)   /* PGA[15:12] LNA[19:16] PN[24:20] */
+#define AGC_MANGAIN_REG  (*(volatile uint32_t *)0xB800C044u)   /* EN[0] PGA[4:1] LNA[8:5] PN[13:9] */
+static uint32_t s_mangain = 0;             /* AG...: 0 = AGC, else MANGAIN value to hold */
 static char          s_chan = 'A';
 static uint16_t      s_ch = AIS_CH_A;
 static int32_t       s_ftick = 0;
@@ -583,14 +587,45 @@ static inline float am_s(uint32_t q0, uint32_t q1)         /* mean over a quarte
   return (float)am_sum(a, a + n) * s_am_rcp[n];
 }
 
-static bool am_try(uint32_t q, uint8_t *out, uint32_t *nb)
+/* CRC-24 syndrome of a single flipped bit in a 112-bit frame (bits 88..111 = parity) */
+static const uint32_t s_am_syn[112] = {
+  0x3935EAu, 0x1C9AF5u, 0xF1B77Eu, 0x78DBBFu, 0xC397DBu, 0x9E31E9u,
+  0xB0E2F0u, 0x587178u, 0x2C38BCu, 0x161C5Eu, 0x0B0E2Fu, 0xFA7D13u,
+  0x82C48Du, 0xBE9842u, 0x5F4C21u, 0xD05C14u, 0x682E0Au, 0x341705u,
+  0xE5F186u, 0x72F8C3u, 0xC68665u, 0x9CB936u, 0x4E5C9Bu, 0xD8D449u,
+  0x939020u, 0x49C810u, 0x24E408u, 0x127204u, 0x093902u, 0x049C81u,
+  0xFDB444u, 0x7EDA22u, 0x3F6D11u, 0xE04C8Cu, 0x702646u, 0x381323u,
+  0xE3F395u, 0x8E03CEu, 0x4701E7u, 0xDC7AF7u, 0x91C77Fu, 0xB719BBu,
+  0xA476D9u, 0xADC168u, 0x56E0B4u, 0x2B705Au, 0x15B82Du, 0xF52612u,
+  0x7A9309u, 0xC2B380u, 0x6159C0u, 0x30ACE0u, 0x185670u, 0x0C2B38u,
+  0x06159Cu, 0x030ACEu, 0x018567u, 0xFF38B7u, 0x80665Fu, 0xBFC92Bu,
+  0xA01E91u, 0xAFF54Cu, 0x57FAA6u, 0x2BFD53u, 0xEA04ADu, 0x8AF852u,
+  0x457C29u, 0xDD4410u, 0x6EA208u, 0x375104u, 0x1BA882u, 0x0DD441u,
+  0xF91024u, 0x7C8812u, 0x3E4409u, 0xE0D800u, 0x706C00u, 0x383600u,
+  0x1C1B00u, 0x0E0D80u, 0x0706C0u, 0x038360u, 0x01C1B0u, 0x00E0D8u,
+  0x00706Cu, 0x003836u, 0x001C1Bu, 0xFFF409u, 0x800000u, 0x400000u,
+  0x200000u, 0x100000u, 0x080000u, 0x040000u, 0x020000u, 0x010000u,
+  0x008000u, 0x004000u, 0x002000u, 0x001000u, 0x000800u, 0x000400u,
+  0x000200u, 0x000100u, 0x000080u, 0x000040u, 0x000020u, 0x000010u,
+  0x000008u, 0x000004u, 0x000002u, 0x000001u,
+};
+static uint8_t  s_am_fixmode = 0;          /* AX<n>: 0 off, 1 single bit (syndrome), 2 + pairs of the 6 weakest bits */
+static uint32_t s_am_fix1, s_am_fix2;
+
+/* decide the bits at quarter-sample q; fix > 0 allows DF17 error correction.
+ * *nfix = corrected bits (0..2). */
+static bool am_try(uint32_t q, uint8_t *out, uint32_t *nb, uint32_t fix, uint32_t *nfix)
 {
   uint8_t by[14]; memset(by, 0, sizeof by);
+  float conf[112];
+  *nfix = 0;
   uint32_t base = q + 208u;                                  /* 8 us x 26 quarter-samples */
   for (uint32_t k = 0; k < 112; k++) {
     uint32_t t = base + 26u * k;
     if (((t + 26u + 2u) >> 2) > AM_WIN) return false;
-    if (am_s(t, t + 13u) > am_s(t + 13u, t + 26u)) by[k >> 3] |= (uint8_t)(0x80u >> (k & 7u));
+    float a = am_s(t, t + 13u), b = am_s(t + 13u, t + 26u);
+    conf[k] = (a > b) ? (a - b) : (b - a);
+    if (a > b) by[k >> 3] |= (uint8_t)(0x80u >> (k & 7u));
     if (k == 4) {         /* early out: only DF11/17/18 are self-checking */
       uint32_t df = by[0] >> 3;
       if (df != 11 && df != 17 && df != 18) return false;
@@ -602,6 +637,27 @@ static bool am_try(uint32_t q, uint8_t *out, uint32_t *nb)
     }
   }
   uint32_t r = am_crc(by, 11) ^ ((uint32_t)by[11] << 16 | (uint32_t)by[12] << 8 | by[13]);
+  if (r && fix && (by[0] >> 3) == 17) {
+    int fa = -1, fb = -1;
+    for (int i = 5; i < 112; i++) if (s_am_syn[i] == r) { fa = i; break; }     /* DF bits stay as decided */
+    if (fa < 0 && fix >= 2) {
+      int w[6]; for (int j = 0; j < 6; j++) w[j] = -1;              /* 6 least confident bits (not DF) */
+      for (int i = 5; i < 112; i++) {
+        int j = 5;
+        if (w[j] >= 0 && conf[i] >= conf[w[j]]) continue;
+        while (j > 0 && (w[j - 1] < 0 || conf[i] < conf[w[j - 1]])) { w[j] = w[j - 1]; j--; }
+        w[j] = i;
+      }
+      for (int x = 0; x < 6 && fa < 0; x++)
+        for (int y = x + 1; y < 6; y++)
+          if (w[x] >= 0 && w[y] >= 0 && (s_am_syn[w[x]] ^ s_am_syn[w[y]]) == r) { fa = w[x]; fb = w[y]; break; }
+    }
+    if (fa >= 0) {
+      by[fa >> 3] ^= (uint8_t)(0x80u >> (fa & 7)); *nfix = 1;
+      if (fb >= 0) { by[fb >> 3] ^= (uint8_t)(0x80u >> (fb & 7)); *nfix = 2; }
+      r = 0;
+    }
+  }
   if (r) return false;
   memcpy(out, by, 14); *nb = 14; return true;
 }
@@ -633,20 +689,24 @@ static bool am_decode(const uint8_t *ring, uint32_t M, uint32_t p, uint32_t t_hi
   s_am_npre++;
   static const int8_t dq[5] = { 0, -1, 1, -2, 2 };
   uint8_t fr[14]; uint32_t nb = 0;
-  for (int c = 0; c < 2; c++) {
+  for (int pass = 0; pass < (s_am_fixmode ? 2 : 1); pass++)    /* pass 1: error correction, best candidate only */
+  for (int c = 0; c < (pass ? 1 : 2); c++) {
     uint32_t q0 = 4u * (c ? os : ob);
-    for (int j = 0; j < 5; j++) {
+    for (int j = 0; j < (pass ? 3 : 5); j++) {
       int32_t q = (int32_t)q0 + dq[j];
       if (q < 0) continue;
-      if (am_try((uint32_t)q, fr, &nb)) {
+      uint32_t nf = 0;
+      if (am_try((uint32_t)q, fr, &nb, pass ? s_am_fixmode : 0u, &nf)) {
         s_am_ok++;
+        if (nf == 1) s_am_fix1++; else if (nf == 2) s_am_fix2++;
+        nb |= nf << 6;                                        /* record: bit6/7 = corrected bits */
         if (s_am_on == 0) { s_am_out[0] = 'M'; s_am_out[1] = 'S'; s_am_out[2] = '1'; s_am_out[3] = 0; s_am_on = 4; }
         if (s_am_on + 20u <= sizeof s_am_out) {
           uint8_t *r = s_am_out + s_am_on;
           memcpy(r, &t_hit, 4); r[4] = (uint8_t)nb;
           float lv = am_s((uint32_t)q, (uint32_t)q + 13);
           r[5] = (uint8_t)(int8_t)(lv > 127 ? 127 : (lv < -128 ? -128 : lv));
-          memset(r + 6, 0, 14); memcpy(r + 6, fr, nb);
+          memset(r + 6, 0, 14); memcpy(r + 6, fr, nb & 0x1Fu);
           s_am_on += 20u; s_am_out[3]++;
         }
         return true;
@@ -659,7 +719,7 @@ static bool am_decode(const uint8_t *ring, uint32_t M, uint32_t p, uint32_t t_hi
 static void am_start(int8_t thr)
 {
   s_am_thr = thr; s_am_w = s_am_scan = 0; s_am_haspend = false;
-  s_am_ntrig = s_am_npre = s_am_ok = s_am_ovf = 0; s_am_on = 0; s_am_last_ms = now_ms();
+  s_am_ntrig = s_am_npre = s_am_ok = s_am_ovf = 0; s_am_fix1 = s_am_fix2 = 0; s_am_on = 0; s_am_last_ms = now_ms();
   s_cap_hold = true;
   RAIL_ResetFifo(s_rail, false, true);
   s_am = true;
@@ -672,6 +732,7 @@ static void am_run(void)
   if (!ring || (rl & (rl - 1u))) { s_am = false; return; }
   const uint32_t M = rl - 1u;
   const int8_t thr = s_am_thr;
+  if (s_mangain) AGC_MANGAIN_REG = s_mangain;               /* RAIL may reload the AGC on re-arm */
   uint32_t t0 = (uint32_t)RAIL_GetTime();
   while (((uint32_t)RAIL_GetTime() - t0) < 20000u) {        /* 20 ms slices */
     uint32_t a = RAIL_GetRxFifoBytesAvailable(s_rail);
@@ -739,6 +800,11 @@ static void send_block(uint32_t now)
     if (s_am) {           /* AM monitor: triggers / preambles / CRC-ok / FIFO near-full */
       D->ftick = (int32_t)s_am_ntrig; D->cfgdata_st = (uint16_t)s_am_npre;
       D->wd = (uint16_t)s_am_ok; D->rearm = (uint16_t)s_am_ovf; D->bytes_rx = s_am_w;
+      D->isr = s_am_fix2; D->src = (uint8_t)s_am_fix1;          /* corrected frames: 2-bit / 1-bit (mod 256) */
+    }
+    {                     /* AGC: startrx = gain indexes now (PN<<8 | LNA<<4 | PGA), opts high bits unused */
+      uint32_t st = AGC_STATUS0_REG;
+      D->startrx_st = (uint16_t)((((st >> 20) & 31u) << 8) | (((st >> 16) & 15u) << 4) | ((st >> 12) & 15u));
     }
     RAIL_FrequencyOffset_t fo = RAIL_GetRxFreqOffset(s_rail);
     D->foff_raw = (fo == RAIL_FREQUENCY_OFFSET_INVALID) ? INT16_MIN : (int16_t)fo;
@@ -818,6 +884,36 @@ void ais_hw_option(const char *a)
     int n = a[1] - '0';
     if (n == 0 || n == 1 || n == 4 || n == 5) s_src = (RAIL_RxDataSource_t)n;
     printf("# AIS HW: rx source %d (next A1/A2)\r\n", (int)s_src);
+  } else if (*a == 'G') {
+    /* AGA = AGC on, AGF = freeze the indexes the AGC holds now, AG<pga>,<lna>,<pn> = manual */
+    if (a[1] == 'A') { s_mangain = 0; AGC_MANGAIN_REG = 0; }
+    else if (a[1] == 'R') {         /* AGR: dump AGC 0x000..0x3BC as an AISRAW block */
+      if (s_rd_state == 0) {
+        for (uint32_t i = 0; i < sizeof s_rd_buf / 4u; i++) {
+          uint32_t v = ((volatile uint32_t *)0xB800C000u)[i];
+          memcpy(s_rd_buf + 4u * i, &v, 4);
+        }
+        s_rd_n = sizeof s_rd_buf; s_rd_state = 2;
+      }
+    } else {
+      uint32_t pga, lna, pn;
+      if (a[1] == 'F') {
+        uint32_t st = AGC_STATUS0_REG;
+        pga = (st >> 12) & 15u; lna = (st >> 16) & 15u; pn = (st >> 20) & 31u;
+      } else {
+        uint32_t v[3] = { 0, 0, 0 }; const char *p = a + 1;
+        for (int i = 0; i < 3; i++) {
+          while (*p >= '0' && *p <= '9') v[i] = v[i] * 10u + (uint32_t)(*p++ - '0');
+          if (*p == ',') p++;
+        }
+        pga = v[0] & 15u; lna = v[1] & 15u; pn = v[2] & 31u;
+      }
+      s_mangain = 1u | (pga << 1) | (lna << 5) | (pn << 9);
+      AGC_MANGAIN_REG = s_mangain;
+    }
+  } else if (*a == 'X') {
+    /* AX<n>: Mode S error correction 0 off, 1 single bit, 2 single + weak-bit pairs */
+    s_am_fixmode = (uint8_t)((a[1] >= '0' && a[1] <= '2') ? (a[1] - '0') : 0);
   } else if (*a == 'M') {
     /* AM<thr>: continuous on-chip Mode S monitor; AMS = stop */
     if (a[1] == 'S') { s_am = false; printf("# AIS HW: AM stop\r\n"); }
