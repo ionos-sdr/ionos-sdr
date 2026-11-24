@@ -542,6 +542,8 @@ static void cap_feed(void)
   s_cap_sent += k; s_rd_n = (uint16_t)k; s_rd_state = 2;
 }
 
+#pragma GCC push_options
+#pragma GCC optimize ("O3")
 /* ---- AM<thr>: on-chip Mode S monitor (bring-up, ADS-B probe PHY via AC<ch>, AD1) ----
  * RX_DEMOD_DATA arrives at 6.5 MS/s (13 samples per Mode S bit). The FIFO is
  * read in big chunks into a 32 KB ring (the capture buffer) and scanned a word
@@ -561,6 +563,24 @@ static uint8_t  s_am_out[484]; static uint32_t s_am_on;     /* 24 frames */
 #define AM_PRE   60
 #define AM_SKIP  780u               /* 120 us */
 static int8_t   s_am_win[AM_WIN];
+static uint8_t *s_am_rbuf; static uint32_t s_am_rmask, s_am_rlen;   /* ring, set by am_run */
+static uint32_t s_am_pumps;
+static uint32_t s_am_dec_max, s_am_gap_max, s_am_t_exit;   /* bring-up profiling, us */
+static uint32_t s_am_cyc_pump, s_am_cyc_dec, s_am_cyc_t0, s_am_pump_n, s_am_pump_b;   /* DWT cycles */
+/* move whatever the RX FIFO holds into the ring - called from inside the
+ * decoder too, so a decode never lets the 4 KB FIFO (~630 us) overflow */
+static void am_pump(void)
+{
+  uint32_t c0 = DWT->CYCCNT;
+  uint32_t a = RAIL_GetRxFifoBytesAvailable(s_rail);
+  if (!a) { s_am_cyc_pump += DWT->CYCCNT - c0; return; }
+  if (a >= 4000u) s_am_ovf++;
+  uint32_t wi = s_am_w & s_am_rmask;
+  if (a > s_am_rlen - wi) a = s_am_rlen - wi;
+  a = RAIL_ReadRxFifo(s_rail, s_am_rbuf + wi, (uint16_t)a);
+  s_am_w += a; s_am_pumps++; s_am_pump_n++; s_am_pump_b += a;
+  s_am_cyc_pump += DWT->CYCCNT - c0;
+}
 static const float s_am_rcp[9] = { 1.f, 1.f, 1.f/2, 1.f/3, 1.f/4, 1.f/5, 1.f/6, 1.f/7, 1.f/8 };
 
 static uint32_t am_crc(const uint8_t *b, uint32_t n)       /* CRC-24 0xFFF409, bitwise */
@@ -617,15 +637,22 @@ static uint32_t s_am_fix1, s_am_fix2;
 static bool am_try(uint32_t q, uint8_t *out, uint32_t *nb, uint32_t fix, uint32_t *nfix)
 {
   uint8_t by[14]; memset(by, 0, sizeof by);
-  float conf[112];
+  int32_t conf[112];
   *nfix = 0;
   uint32_t base = q + 208u;                                  /* 8 us x 26 quarter-samples */
   for (uint32_t k = 0; k < 112; k++) {
     uint32_t t = base + 26u * k;
-    if (((t + 26u + 2u) >> 2) > AM_WIN) return false;
-    float a = am_s(t, t + 13u), b = am_s(t + 13u, t + 26u);
-    conf[k] = (a > b) ? (a - b) : (b - a);
-    if (a > b) by[k >> 3] |= (uint8_t)(0x80u >> (k & 7u));
+    uint32_t i0 = (t + 2u) >> 2, i1 = (t + 15u) >> 2, i2 = (t + 28u) >> 2;   /* half-chip borders, rounded */
+    if (i2 > AM_WIN) return false;
+    if (i1 <= i0) i1 = i0 + 1u;
+    if (i2 <= i1) i2 = i1 + 1u;
+    int32_t sa = 0, sb = 0;
+    for (uint32_t i = i0; i < i1; i++) sa += s_am_win[i];
+    for (uint32_t i = i1; i < i2; i++) sb += s_am_win[i];
+    int32_t d = sa * (int32_t)(i2 - i1) - sb * (int32_t)(i1 - i0);   /* mean(a) - mean(b), scaled */
+    conf[k] = d < 0 ? -d : d;
+    if (d > 0) by[k >> 3] |= (uint8_t)(0x80u >> (k & 7u));
+    if ((k & 15u) == 15u) am_pump();
     if (k == 4) {         /* early out: only DF11/17/18 are self-checking */
       uint32_t df = by[0] >> 3;
       if (df != 11 && df != 17 && df != 18) return false;
@@ -670,7 +697,7 @@ static int32_t am_pscore(uint32_t o)
   return pl - gp;
 }
 
-static bool am_decode(const uint8_t *ring, uint32_t M, uint32_t p, uint32_t t_hit)
+static int am_decode(const uint8_t *ring, uint32_t M, uint32_t p, uint32_t t_hit)
 {
   uint32_t b0 = p - AM_PRE;
   for (uint32_t i = 0; i < AM_WIN; i++) s_am_win[i] = (int8_t)ring[(b0 + i) & M];
@@ -685,7 +712,7 @@ static bool am_decode(const uint8_t *ring, uint32_t M, uint32_t p, uint32_t t_hi
       if (sc > best) { sec = best; os = ob; best = sc; ob = (uint32_t)o; }
       else if (sc > sec && (uint32_t)o != ob) { sec = sc; os = (uint32_t)o; }
     }
-  if (best < 60) return false;                               /* ~5 per sample over 12; -60 dBm gives ~120 */
+  if (best < 60) return 0;                                   /* ~5 per sample over 12; -60 dBm gives ~120 */
   s_am_npre++;
   static const int8_t dq[5] = { 0, -1, 1, -2, 2 };
   uint8_t fr[14]; uint32_t nb = 0;
@@ -696,6 +723,7 @@ static bool am_decode(const uint8_t *ring, uint32_t M, uint32_t p, uint32_t t_hi
       int32_t q = (int32_t)q0 + dq[j];
       if (q < 0) continue;
       uint32_t nf = 0;
+      am_pump();
       if (am_try((uint32_t)q, fr, &nb, pass ? s_am_fixmode : 0u, &nf)) {
         s_am_ok++;
         if (nf == 1) s_am_fix1++; else if (nf == 2) s_am_fix2++;
@@ -709,16 +737,18 @@ static bool am_decode(const uint8_t *ring, uint32_t M, uint32_t p, uint32_t t_hi
           memset(r + 6, 0, 14); memcpy(r + 6, fr, nb & 0x1Fu);
           s_am_on += 20u; s_am_out[3]++;
         }
-        return true;
+        return 2;
       }
     }
   }
-  return false;
+  return 1;
 }
 
 static void am_start(int8_t thr)
 {
   s_am_thr = thr; s_am_w = s_am_scan = 0; s_am_haspend = false;
+  CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk; DWT->CYCCNT = 0; DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+  s_am_cyc_t0 = 0; s_am_cyc_pump = s_am_cyc_dec = 0;
   s_am_ntrig = s_am_npre = s_am_ok = s_am_ovf = 0; s_am_fix1 = s_am_fix2 = 0; s_am_on = 0; s_am_last_ms = now_ms();
   s_cap_hold = true;
   RAIL_ResetFifo(s_rail, false, true);
@@ -732,38 +762,43 @@ static void am_run(void)
   if (!ring || (rl & (rl - 1u))) { s_am = false; return; }
   const uint32_t M = rl - 1u;
   const int8_t thr = s_am_thr;
+  s_am_rbuf = ring; s_am_rmask = M; s_am_rlen = rl;
   if (s_mangain) AGC_MANGAIN_REG = s_mangain;               /* RAIL may reload the AGC on re-arm */
   uint32_t t0 = (uint32_t)RAIL_GetTime();
+  if (s_am_t_exit) { uint32_t g = t0 - s_am_t_exit; if (g > s_am_gap_max) s_am_gap_max = g; }
   while (((uint32_t)RAIL_GetTime() - t0) < 20000u) {        /* 20 ms slices */
-    uint32_t a = RAIL_GetRxFifoBytesAvailable(s_rail);
-    if (a >= 4000u) s_am_ovf++;
-    if (a) {
-      uint32_t wi = s_am_w & M;
-      if (a > rl - wi) a = rl - wi;
-      a = RAIL_ReadRxFifo(s_rail, ring + wi, (uint16_t)a);
-      s_am_w += a;
-    }
+    am_pump();
     if (s_am_w - s_am_scan > rl - 2048u) { s_am_scan = (s_am_w - 1024u) & ~3u; s_am_haspend = false; }
     if (s_am_haspend) {
       if (s_am_w < s_am_pend - AM_PRE + AM_WIN) continue;
-      am_decode(ring, M, s_am_pend, (uint32_t)RAIL_GetTime());
-      s_am_scan = (s_am_pend + AM_SKIP) & ~3u;
+      uint32_t td = (uint32_t)RAIL_GetTime(), cd = DWT->CYCCNT, pb = s_am_cyc_pump;
+      int res = am_decode(ring, M, s_am_pend, td);
+      s_am_cyc_dec += (DWT->CYCCNT - cd) - (s_am_cyc_pump - pb);          /* decode without its pumps */
+      td = (uint32_t)RAIL_GetTime() - td; if (td > s_am_dec_max) s_am_dec_max = td;
+      /* frame: skip it; preamble without a frame: a short step; noise: next word */
+      s_am_scan = (s_am_pend + (res == 2 ? AM_SKIP : (res == 1 ? 40u : 8u))) & ~3u;
       s_am_haspend = false;
     }
-    /* word scan: samples 0 and 2 of each aligned word */
-    uint32_t end = s_am_w & ~3u;
-    while (s_am_scan < end) {
-      uint32_t v = *(const uint32_t *)(ring + (s_am_scan & M));
-      if ((int8_t)v > thr || (int8_t)(v >> 16) > thr) {
-        if (s_am_scan >= (uint32_t)AM_PRE) {
-          s_am_pend = s_am_scan + (((int8_t)v > thr) ? 0u : 2u);
-          s_am_haspend = true; s_am_ntrig++;
-          break;
-        }
+    /* word scan, all 4 samples at once: (s + 128) - (thr + 128) saturated is non-zero
+     * in a byte lane exactly when s > thr (UQSUB8 on the offset-binary samples) */
+    {
+      const uint32_t K = (uint32_t)(uint8_t)((int)thr + 128) * 0x01010101u;
+      uint32_t sc = s_am_scan, end = s_am_w & ~3u;
+      while (sc < end) {
+        uint32_t off = sc & M, lim = end;
+        if (lim - sc > rl - off) lim = sc + (rl - off);           /* contiguous part of the ring */
+        const uint32_t *w = (const uint32_t *)(ring + off);
+        uint32_t nw = (lim - sc) >> 2, i = 0, hit = 0;
+        for (; i < nw; i++) { hit = __UQSUB8(w[i] ^ 0x80808080u, K); if (hit) break; }
+        if (i == nw) { sc += nw << 2; continue; }
+        uint32_t pos = sc + (i << 2) + (__CLZ(__RBIT(hit)) >> 3);
+        sc += (i + 1u) << 2;
+        if (pos >= (uint32_t)AM_PRE) { s_am_pend = pos; s_am_haspend = true; s_am_ntrig++; break; }
       }
-      s_am_scan += 4u;
+      s_am_scan = sc;
     }
   }
+  s_am_t_exit = (uint32_t)RAIL_GetTime();
 }
 
 static void am_flush(uint32_t now)
@@ -775,6 +810,7 @@ static void am_flush(uint32_t now)
   s_rd_n = (uint16_t)s_am_on; s_rd_state = 2;
   s_am_on = 0; s_am_last_ms = now;
 }
+#pragma GCC pop_options
 
 static void send_block(uint32_t now)
 {
@@ -801,6 +837,16 @@ static void send_block(uint32_t now)
       D->ftick = (int32_t)s_am_ntrig; D->cfgdata_st = (uint16_t)s_am_npre;
       D->wd = (uint16_t)s_am_ok; D->rearm = (uint16_t)s_am_ovf; D->bytes_rx = s_am_w;
       D->isr = s_am_fix2; D->src = (uint8_t)s_am_fix1;          /* corrected frames: 2-bit / 1-bit (mod 256) */
+      D->loops = s_am_dec_max;                                   /* max decode time, us */
+      {                   /* DWT: pump and decode share of all cycles since the last block, per mille */
+        uint32_t tot = DWT->CYCCNT - s_am_cyc_t0; if (!tot) tot = 1;
+        uint32_t pp = (uint32_t)((uint64_t)s_am_cyc_pump * 1000u / tot), dd = (uint32_t)((uint64_t)s_am_cyc_dec * 1000u / tot);
+        D->isr = (pp << 16) | (dd & 0xFFFFu);
+        s_am_cyc_pump = s_am_cyc_dec = 0; s_am_pump_n = s_am_pump_b = 0; s_am_cyc_t0 = DWT->CYCCNT;
+      }
+      D->radio_state = (uint16_t)(s_am_gap_max > 65535u ? 65535u : s_am_gap_max);   /* max time outside am_run, us */
+      s_am_dec_max = 0; s_am_gap_max = 0;
+      D->opts |= 0x80u;                                         /* marks AM telemetry for the ESP (adsb_esp) */
     }
     {                     /* AGC: startrx = gain indexes now (PN<<8 | LNA<<4 | PGA), opts high bits unused */
       uint32_t st = AGC_STATUS0_REG;

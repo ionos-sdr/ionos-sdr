@@ -308,6 +308,7 @@
 #endif
 #include "cw_rx.h"          /* CW Morse decoder */
 #include "ais_mode.h"       /* AIS receiver, NMEA on TCP 10110 */
+#include "adsb_esp.h"       /* ADS-B: aircraft table, tar1090/readsb JSON on :8080 */
 
 /* ---- Menu and button. The Heltec V3 PRG button (GPIO0) pages through the
  * screens and switches the demodulators. Details: ui.h */
@@ -2817,6 +2818,7 @@ void setup()
 #endif
   cw_rx_init();
   ais_mode_init();
+  adsb_init();           /* FG23 Mode S aircraft table + tar1090/readsb JSON on :8080 */
 
   DIAG.println("Over USB (PC-side decoder + SPI loss measurement):");
   DIAG.println("   python usb_aprs_rx.py --period 1.131 --seconds 90");

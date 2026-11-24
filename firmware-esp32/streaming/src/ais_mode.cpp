@@ -10,6 +10,7 @@
 #include "ais_mode.h"
 #include "ais_rx.h"
 #include "aispkt.h"
+#include "adsb_esp.h"
 #include <Arduino.h>
 #include <WiFi.h>
 #include <string.h>
@@ -125,6 +126,14 @@ void ais_mode_hwblk(const void *blk1040)
                          (unsigned)D.startrx_st, (unsigned)D.cfgdata_st, (unsigned)D.radio_state,
                          (unsigned)D.src, (unsigned)D.opts, (unsigned)D.rearm, (unsigned)D.wd,
                          (long)D.ftick, (int)D.foff_raw, D.rssi_qdbm / 4.0);
+  }
+  {                       /* ADS-B (AM on the FG23): telemetry + MS1 records to the aircraft table */
+    aispkt_dbg_t D2;
+    memcpy(&D2, raw8 + AISPKT_DBG_OFS, sizeof D2);
+    if (D2.opts & 0x80u) adsb_feed_dbg(&D2);          /* FG23 marks AM telemetry with opts bit 7 */
+    if ((B->hdr.flags & AISPKT_FLAG_RAW) && raw8[AISPKT_RAW_OFS] == 'M' && raw8[AISPKT_RAW_OFS + 1] == 'S'
+        && raw8[AISPKT_RAW_OFS + 2] == '1')
+      adsb_feed_ms1(raw8 + AISPKT_RAW_OFS, AISPKT_RAW_LEN);
   }
   if (B->hdr.flags & AISPKT_FLAG_RAW) {
     static const char hx[] = "0123456789abcdef";
