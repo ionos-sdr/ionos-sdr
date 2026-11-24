@@ -261,6 +261,14 @@ static int16_t arm_thresh_qdbm = 4 * (-95);   /* -95 dBm, quarter-dBm */
 static iq_in_t capture_buf[CAPTURE_SAMPLES];
 static volatile uint32_t capture_idx  = 0;
 static volatile bool     capturing    = false;
+/* ais_hw.c borrows the 32 KB capture buffer for its burst capture (AK) - the
+ * I/Q capture ('c') cannot run while AIS HW is active */
+uint8_t *app_capture_buf(uint32_t *len)
+{
+  if (capturing) return NULL;
+  *len = sizeof capture_buf;
+  return (uint8_t *)capture_buf;
+}
 static volatile bool     capture_done = false;
 static volatile bool     capture_bad  = false;
 static volatile uint32_t stat_events = 0, stat_short_reads = 0,

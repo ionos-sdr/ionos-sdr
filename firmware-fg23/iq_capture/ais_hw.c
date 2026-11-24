@@ -45,9 +45,12 @@
 static RAIL_Handle_t s_rail;
 static double        s_tick_hz = 4.6492;
 static volatile bool s_active = false;
+static bool s_cap_hold = false;            /* bring-up: AK capture done, no raw drain until A1/A2 */
+static bool s_am = false;                  /* bring-up: AM Mode S monitor running */
 static char          s_chan = 'A';
 static uint16_t      s_ch = AIS_CH_A;
 static int32_t       s_ftick = 0;
+static uint16_t      s_ch_override = 0;   /* AC<ch>: other PHY channel for bring-up, 0 = AIS */
 
 /* options (runtime, for the bring-up: which bit order the FIFO really has) */
 static bool    s_data_lsb_first = true;   /* first air bit = byte bit 0 */
@@ -214,14 +217,35 @@ static inline void stream_bit(uint8_t L)
   if (s_h_win == 0x7E) { dec_begin(0); s_d.prev = L; }
 }
 
+/* AR in the raw (direct) sources: the dump starts on activity - the first
+ * non-zero byte after >= 32 zero bytes - with the 64 bytes before it, so a
+ * short burst (a 120 us Mode S frame) lands in the dump instead of being
+ * hit by chance. AR2 = start at once (no trigger). */
+#define PRE_N 64u
+static uint8_t  s_pre[PRE_N];
+static uint16_t s_pre_w = 0, s_zero_run = 0;
+static uint8_t  s_rd_trig = 1;
+
 static void stream_bytes(const uint8_t *p, uint16_t n)
 {
   s_bytes_rx += n;
-  if (s_rd_state == 1) {
-    for (uint16_t i = 0; i < n && s_rd_n < sizeof s_rd_buf; i++) s_rd_buf[s_rd_n++] = p[i];
-    if (s_rd_n >= sizeof s_rd_buf) s_rd_state = 2;
+  for (uint16_t i = 0; i < n; i++) {
+    uint8_t v = p[i];
+    if (s_rd_state == 1) {
+      if (s_rd_n == 0 && s_rd_trig && !(v != 0 && s_zero_run >= 32)) {
+        /* waiting for activity */
+      } else {
+        if (s_rd_n == 0 && s_rd_trig) {
+          for (uint16_t k = 0; k < PRE_N; k++) s_rd_buf[s_rd_n++] = s_pre[(s_pre_w + k) % PRE_N];
+        }
+        s_rd_buf[s_rd_n++] = v;
+        if (s_rd_n >= sizeof s_rd_buf) s_rd_state = 2;
+      }
+    }
+    s_pre[s_pre_w] = v; s_pre_w = (uint16_t)((s_pre_w + 1) % PRE_N);
+    s_zero_run = v ? 0 : (s_zero_run < 0xFFFF ? s_zero_run + 1 : s_zero_run);
   }
-  if (s_src == RX_DEMOD_DATA) return;        /* MB/s of samples: dump only, no bit decode */
+  if (s_src != RX_DIRECT_SYNCHRONOUS_MODE_DATA) return;   /* MB/s of samples: dump only, no AIS decode */
   for (uint16_t i = 0; i < n; i++) {
     uint8_t v = p[i];
     for (int k = 0; k < 8; k++)
@@ -248,7 +272,7 @@ static void drain_fifo(void)
   /* Bounded: RX_DEMOD_DATA measured 2026-11-23 at ~3.4 MB/s (not 1200 B/s)
    * - an unbounded drain never left the interrupt (process() starved, no
    * blocks to the ESP). Bit-rate sources stay far below the bound. */
-  uint32_t budget = 1024u;
+  uint32_t budget = 1024u;   /* 16384 for the raw sources hung the main loop (measured) */
   while (budget && (n = RAIL_GetRxFifoBytesAvailable(s_rail)) > 0) {
     if (n > budget) n = (uint16_t)budget;
     if (n > sizeof tmp) n = sizeof tmp;
@@ -278,7 +302,9 @@ bool ais_hw_on_event(RAIL_Handle_t rail, RAIL_Events_t ev)
   if (ev & RAIL_EVENT_RX_TIMING_DETECT) s_n_tim++;
   if (ev & RAIL_EVENT_RX_FIFO_OVERFLOW) { s_st.n_ovf++; s_d.in = false; s_restart = true; }
   if (s_stream) {
-    if (ev & RAIL_EVENT_RX_FIFO_ALMOST_FULL) drain_fifo();
+    /* raw sources run at MB/s: draining in the interrupt starves the main
+     * loop (no AIS1 blocks at all, measured) - process() drains instead */
+    if (s_src == RX_DIRECT_SYNCHRONOUS_MODE_DATA && (ev & RAIL_EVENT_RX_FIFO_ALMOST_FULL)) drain_fifo();
     return true;
   }
   if (ev & (RAIL_EVENT_RX_SYNC1_DETECT | RAIL_EVENT_RX_SYNC2_DETECT)) {
@@ -340,6 +366,7 @@ bool ais_hw_start(char chan, int32_t freq_tick)
   if (s_active) ais_hw_stop();
   s_chan  = (chan == 'B') ? 'B' : 'A';
   s_ch    = (s_chan == 'B') ? AIS_CH_B : AIS_CH_A;
+  if (s_ch_override) { s_ch = s_ch_override; freq_tick = 0; }   /* probe PHY: no 162 MHz correction */
   /* The crystal correction comes in the I/Q PHY's synth ticks (4.6492 Hz).
    * The AIS PHY's tick is ~3.9x larger: measured 2026-11-23 with AF<n> -
    * the demod output ran away to all ones at 539 (the I/Q value) and to all
@@ -372,12 +399,17 @@ bool ais_hw_start(char chan, int32_t freq_tick)
   RAIL_StateTransitions_t tr = { RAIL_RF_STATE_RX, RAIL_RF_STATE_RX };
   RAIL_SetRxTransitions(s_rail, &tr);
   RAIL_SetRxFifoThreshold(s_rail, AIS_FIFO_THRESH);
+  /* raw sources (demod / direct mode, MB/s): no FIFO interrupt at all - it
+   * starved the main loop even without draining in it (measured); process()
+   * polls the FIFO, overflows are expected and only counted */
+  bool raw_src = s_stream && s_src != RX_DIRECT_SYNCHRONOUS_MODE_DATA;
   RAIL_ConfigEvents(s_rail, RAIL_EVENTS_ALL,
-                    RAIL_EVENT_RX_SYNC1_DETECT | RAIL_EVENT_RX_SYNC2_DETECT
+                    raw_src ? RAIL_EVENTS_NONE :
+                    (RAIL_EVENT_RX_SYNC1_DETECT | RAIL_EVENT_RX_SYNC2_DETECT
                     | RAIL_EVENT_RX_PREAMBLE_DETECT | RAIL_EVENT_RX_TIMING_DETECT
                     | RAIL_EVENT_RX_FIFO_ALMOST_FULL | RAIL_EVENT_RX_FIFO_OVERFLOW
                     | RAIL_EVENT_RX_PACKET_RECEIVED | RAIL_EVENT_RX_PACKET_ABORTED
-                    | RAIL_EVENT_RX_FRAME_ERROR);
+                    | RAIL_EVENT_RX_FRAME_ERROR));
 
   memset(&s_st, 0, sizeof s_st);
   s_qw = s_qr = 0; s_restart = false;
@@ -387,6 +419,7 @@ bool ais_hw_start(char chan, int32_t freq_tick)
   g_ais_bc[2] = 3;
   iq_stream_ext_begin();
   g_ais_bc[2] = 4;
+  s_cap_hold = (s_ch_override != 0);   /* bring-up: other PHY (ADS-B 6.5 MB/s) - capture only, no drain */
   s_active = true;
   rx_arm();
   g_ais_bc[2] = 5;
@@ -409,6 +442,7 @@ void ais_hw_stop(void)
 {
   if (!s_active) return;
   s_active = false;
+  s_am = false;
   RAIL_Idle(s_rail, RAIL_IDLE_ABORT, true);
   RAIL_SetFixedLength(s_rail, RAIL_SETFIXEDLENGTH_INVALID);
   RAIL_ResetFifo(s_rail, false, true);
@@ -417,6 +451,268 @@ void ais_hw_stop(void)
   iq_stream_ext_end();
   ais_hw_print_stats();
   printf("# AIS HW: stopped\r\n");
+}
+
+/* ---- burst capture (AK<thr>): the raw sources at their full rate ----
+ * Continuous streaming of RX_DEMOD_DATA through the main loop cannot keep up
+ * (1.16 MB/s drain-limited, measured). For a feasibility look at short
+ * bursts (Mode S: 120 us) the FIFO is read in a tight loop until a soft
+ * sample above <thr> arrives, then 512 samples before it and the rest of
+ * the 32 KB capture buffer (borrowed from app.c) are kept; the loop also
+ * measures the real byte rate. The capture goes to the ESP as AISRAW dumps,
+ * 960 B each, the rate in the telemetry's ftick field. */
+extern uint8_t *app_capture_buf(uint32_t *len);
+static volatile uint8_t s_cap_state = 0;   /* 0 idle, 1 armed, 2 sending */
+static int8_t   s_cap_thr = 20;
+static uint32_t s_cap_n = 0, s_cap_sent = 0, s_cap_rate = 0, s_cap_total = 0;
+#define CAP_PRE 512u
+static uint32_t s_cap_len = 0;             /* 0 = whole buffer */
+
+static void rev(uint8_t *p, uint32_t a, uint32_t b)   /* reverse p[a..b) */
+{
+  while (a + 1 < b) { uint8_t t = p[a]; p[a] = p[b - 1]; p[b - 1] = t; a++; b--; }
+}
+
+static void cap_run(void)
+{
+  /* The whole buffer is a ring the FIFO is read into in big chunks (no
+   * per-byte copy); before the trigger only every 2nd sample is compared
+   * (a 0.5 us pulse is 3+ samples at 6.5 MS/s), so the scan keeps up with
+   * the demod rate and the pre-trigger part stays contiguous with the rest.
+   * Afterwards the ring is rotated so the capture starts at buf[0]. */
+  uint32_t rl = 0;
+  uint8_t *buf = app_capture_buf(&rl);
+  if (!buf) { s_cap_state = 0; return; }
+  uint32_t len = (s_cap_len && s_cap_len < rl) ? s_cap_len : rl;
+  uint32_t w = 0, total = 0, tpos = 0, post = 0;
+  bool trig = false;
+  const int8_t thr = s_cap_thr;
+  RAIL_ResetFifo(s_rail, false, true);
+  uint32_t t0 = (uint32_t)RAIL_GetTime(), t1 = t0;
+  while (((t1 = (uint32_t)RAIL_GetTime()) - t0) < 500000u) {     /* 0.5 s max */
+    uint32_t a = RAIL_GetRxFifoBytesAvailable(s_rail);
+    if (!a) continue;
+    uint32_t wi = w % rl;
+    if (a > rl - wi) a = rl - wi;                 /* up to the ring end */
+    if (trig && a > post) a = post;
+    a = RAIL_ReadRxFifo(s_rail, buf + wi, (uint16_t)(a > 0xFFFFu ? 0xFFFFu : a));
+    total += a;
+    if (!trig) {
+      const int8_t *q = (const int8_t *)(buf + wi);
+      for (uint32_t i = (w & 1u); i < a; i += 2) {
+        if (q[i] > thr && w + i >= CAP_PRE) {
+          trig = true; tpos = w + i;
+          post = len - CAP_PRE;                   /* samples still wanted from tpos */
+          uint32_t got = a - i;
+          post = (got >= post) ? 0 : post - got;
+          break;
+        }
+      }
+    } else {
+      post -= a;
+    }
+    w += a;
+    if (trig && post == 0) break;
+  }
+  s_cap_total = total;
+  s_cap_rate = (t1 != t0) ? (uint32_t)((uint64_t)total * 1000000u / (t1 - t0)) : 0;
+  s_cap_hold = true;      /* no raw drain afterwards (6.5 MB/s starves the loop) until A1/A2 */
+  if (trig) {             /* rotate the ring left so the capture (tpos - PRE) starts at 0 */
+    uint32_t st = (tpos - CAP_PRE) % rl;
+    rev(buf, 0, st); rev(buf, st, rl); rev(buf, 0, rl);
+  }
+  s_cap_n = trig ? len : 0; s_cap_sent = 0;
+  s_cap_state = trig ? 2 : 0;
+  RAIL_ResetFifo(s_rail, false, true);
+}
+
+static void cap_feed(void)
+{
+  if (s_cap_state != 2 || s_rd_state != 0) return;
+  uint32_t len = 0;
+  uint8_t *buf = app_capture_buf(&len);
+  if (!buf || s_cap_sent >= s_cap_n) { s_cap_state = 0; return; }
+  uint32_t k = s_cap_n - s_cap_sent; if (k > sizeof s_rd_buf) k = sizeof s_rd_buf;
+  memcpy(s_rd_buf, buf + s_cap_sent, k);
+  if (k < sizeof s_rd_buf) memset(s_rd_buf + k, 0, sizeof s_rd_buf - k);
+  s_cap_sent += k; s_rd_n = (uint16_t)k; s_rd_state = 2;
+}
+
+/* ---- AM<thr>: on-chip Mode S monitor (bring-up, ADS-B probe PHY via AC<ch>, AD1) ----
+ * RX_DEMOD_DATA arrives at 6.5 MS/s (13 samples per Mode S bit). The FIFO is
+ * read in big chunks into a 32 KB ring (the capture buffer) and scanned a word
+ * at a time (samples 0 and 2 of each word against <thr>: a 0.5 us pulse is 3+
+ * samples). A hit takes the next ~860 samples into a flat window; the preamble
+ * (pulses at 0, 1, 3.5, 4.5 us) is searched only where the hit can be one of
+ * its pulses, the 112 PPM bits are decided chip-half against chip-half at
+ * quarter-sample resolution and checked with CRC-24 (DF17/18 112 bit, DF11
+ * 56 bit with IID < 128). Every hit skips ~120 us so one reply costs one
+ * decode. Good frames go to the ESP as AISRAW dumps:
+ *   'M','S','1',n, then n x { u32 t_us, u8 nbytes, i8 level, u8 data[14] } */
+static int8_t   s_am_thr = 4;
+static uint32_t s_am_w, s_am_scan, s_am_pend; static bool s_am_haspend;
+static uint32_t s_am_ntrig, s_am_npre, s_am_ok, s_am_ovf, s_am_last_ms;
+static uint8_t  s_am_out[484]; static uint32_t s_am_on;     /* 24 frames */
+#define AM_WIN   880u               /* samples per hit: 60 before + 8 us + 112 bits + slack */
+#define AM_PRE   60
+#define AM_SKIP  780u               /* 120 us */
+static int8_t   s_am_win[AM_WIN];
+static const float s_am_rcp[9] = { 1.f, 1.f, 1.f/2, 1.f/3, 1.f/4, 1.f/5, 1.f/6, 1.f/7, 1.f/8 };
+
+static uint32_t am_crc(const uint8_t *b, uint32_t n)       /* CRC-24 0xFFF409, bitwise */
+{
+  uint32_t c = 0;
+  for (uint32_t i = 0; i < n; i++) {
+    c ^= (uint32_t)b[i] << 16;
+    for (int k = 0; k < 8; k++) c = (c & 0x800000u) ? ((c << 1) ^ 0xFFF409u) : (c << 1);
+  }
+  return c & 0xFFFFFFu;
+}
+static inline int32_t am_sum(uint32_t a, uint32_t b)       /* samples [a,b) of the window */
+{
+  int32_t s = 0;
+  if (b > AM_WIN) b = AM_WIN;
+  for (uint32_t i = a; i < b; i++) s += s_am_win[i];
+  return s;
+}
+static inline float am_s(uint32_t q0, uint32_t q1)         /* mean over a quarter-sample span (<= 8 samples) */
+{
+  uint32_t a = (q0 + 2u) >> 2, b = (q1 + 2u) >> 2;
+  if (b <= a) b = a + 1u;
+  uint32_t n = b - a; if (n > 8u) n = 8u;
+  return (float)am_sum(a, a + n) * s_am_rcp[n];
+}
+
+static bool am_try(uint32_t q, uint8_t *out, uint32_t *nb)
+{
+  uint8_t by[14]; memset(by, 0, sizeof by);
+  uint32_t base = q + 208u;                                  /* 8 us x 26 quarter-samples */
+  for (uint32_t k = 0; k < 112; k++) {
+    uint32_t t = base + 26u * k;
+    if (((t + 26u + 2u) >> 2) > AM_WIN) return false;
+    if (am_s(t, t + 13u) > am_s(t + 13u, t + 26u)) by[k >> 3] |= (uint8_t)(0x80u >> (k & 7u));
+    if (k == 4) {         /* early out: only DF11/17/18 are self-checking */
+      uint32_t df = by[0] >> 3;
+      if (df != 11 && df != 17 && df != 18) return false;
+    }
+    if (k == 55 && (by[0] >> 3) == 11) {
+      uint32_t r = am_crc(by, 4) ^ ((uint32_t)by[4] << 16 | (uint32_t)by[5] << 8 | by[6]);
+      if (r == 0u) { memcpy(out, by, 7); *nb = 7; return true; }   /* IID 0 only: <128 gave false hits on noise */
+      return false;
+    }
+  }
+  uint32_t r = am_crc(by, 11) ^ ((uint32_t)by[11] << 16 | (uint32_t)by[12] << 8 | by[13]);
+  if (r) return false;
+  memcpy(out, by, 14); *nb = 14; return true;
+}
+
+/* preamble score at sample offset o: pulse sums minus gap sums, pulses 3 samples each */
+static int32_t am_pscore(uint32_t o)
+{
+  int32_t pl = am_sum(o, o + 3) + am_sum(o + 7, o + 10) + am_sum(o + 23, o + 26) + am_sum(o + 29, o + 32);
+  int32_t gp = am_sum(o + 3, o + 6) + am_sum(o + 11, o + 14) + am_sum(o + 15, o + 18) + am_sum(o + 33, o + 36);
+  return pl - gp;
+}
+
+static bool am_decode(const uint8_t *ring, uint32_t M, uint32_t p, uint32_t t_hit)
+{
+  uint32_t b0 = p - AM_PRE;
+  for (uint32_t i = 0; i < AM_WIN; i++) s_am_win[i] = (int8_t)ring[(b0 + i) & M];
+  /* the hit (window index AM_PRE) is in pulse 1, 2, 3 or 4: starts 0 / 6.5 / 22.75 / 29.25 samples earlier */
+  static const uint8_t back[4] = { 0, 7, 23, 29 };
+  int32_t best = -100000, sec = -100000; uint32_t ob = 0, os = 0;
+  for (int k = 0; k < 4; k++)
+    for (int d = -4; d <= 2; d++) {
+      int32_t o = AM_PRE - back[k] + d;
+      if (o < 0) continue;
+      int32_t sc = am_pscore((uint32_t)o);
+      if (sc > best) { sec = best; os = ob; best = sc; ob = (uint32_t)o; }
+      else if (sc > sec && (uint32_t)o != ob) { sec = sc; os = (uint32_t)o; }
+    }
+  if (best < 60) return false;                               /* ~5 per sample over 12; -60 dBm gives ~120 */
+  s_am_npre++;
+  static const int8_t dq[5] = { 0, -1, 1, -2, 2 };
+  uint8_t fr[14]; uint32_t nb = 0;
+  for (int c = 0; c < 2; c++) {
+    uint32_t q0 = 4u * (c ? os : ob);
+    for (int j = 0; j < 5; j++) {
+      int32_t q = (int32_t)q0 + dq[j];
+      if (q < 0) continue;
+      if (am_try((uint32_t)q, fr, &nb)) {
+        s_am_ok++;
+        if (s_am_on == 0) { s_am_out[0] = 'M'; s_am_out[1] = 'S'; s_am_out[2] = '1'; s_am_out[3] = 0; s_am_on = 4; }
+        if (s_am_on + 20u <= sizeof s_am_out) {
+          uint8_t *r = s_am_out + s_am_on;
+          memcpy(r, &t_hit, 4); r[4] = (uint8_t)nb;
+          float lv = am_s((uint32_t)q, (uint32_t)q + 13);
+          r[5] = (uint8_t)(int8_t)(lv > 127 ? 127 : (lv < -128 ? -128 : lv));
+          memset(r + 6, 0, 14); memcpy(r + 6, fr, nb);
+          s_am_on += 20u; s_am_out[3]++;
+        }
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+static void am_start(int8_t thr)
+{
+  s_am_thr = thr; s_am_w = s_am_scan = 0; s_am_haspend = false;
+  s_am_ntrig = s_am_npre = s_am_ok = s_am_ovf = 0; s_am_on = 0; s_am_last_ms = now_ms();
+  s_cap_hold = true;
+  RAIL_ResetFifo(s_rail, false, true);
+  s_am = true;
+}
+
+static void am_run(void)
+{
+  uint32_t rl = 0;
+  uint8_t *ring = app_capture_buf(&rl);
+  if (!ring || (rl & (rl - 1u))) { s_am = false; return; }
+  const uint32_t M = rl - 1u;
+  const int8_t thr = s_am_thr;
+  uint32_t t0 = (uint32_t)RAIL_GetTime();
+  while (((uint32_t)RAIL_GetTime() - t0) < 20000u) {        /* 20 ms slices */
+    uint32_t a = RAIL_GetRxFifoBytesAvailable(s_rail);
+    if (a >= 4000u) s_am_ovf++;
+    if (a) {
+      uint32_t wi = s_am_w & M;
+      if (a > rl - wi) a = rl - wi;
+      a = RAIL_ReadRxFifo(s_rail, ring + wi, (uint16_t)a);
+      s_am_w += a;
+    }
+    if (s_am_w - s_am_scan > rl - 2048u) { s_am_scan = (s_am_w - 1024u) & ~3u; s_am_haspend = false; }
+    if (s_am_haspend) {
+      if (s_am_w < s_am_pend - AM_PRE + AM_WIN) continue;
+      am_decode(ring, M, s_am_pend, (uint32_t)RAIL_GetTime());
+      s_am_scan = (s_am_pend + AM_SKIP) & ~3u;
+      s_am_haspend = false;
+    }
+    /* word scan: samples 0 and 2 of each aligned word */
+    uint32_t end = s_am_w & ~3u;
+    while (s_am_scan < end) {
+      uint32_t v = *(const uint32_t *)(ring + (s_am_scan & M));
+      if ((int8_t)v > thr || (int8_t)(v >> 16) > thr) {
+        if (s_am_scan >= (uint32_t)AM_PRE) {
+          s_am_pend = s_am_scan + (((int8_t)v > thr) ? 0u : 2u);
+          s_am_haspend = true; s_am_ntrig++;
+          break;
+        }
+      }
+      s_am_scan += 4u;
+    }
+  }
+}
+
+static void am_flush(uint32_t now)
+{
+  if (s_rd_state != 0) return;
+  if (s_am_on == 0 || (s_am_out[3] < 20 && now - s_am_last_ms < 500u)) return;
+  memset(s_rd_buf, 0, sizeof s_rd_buf);
+  memcpy(s_rd_buf, s_am_out, s_am_on);
+  s_rd_n = (uint16_t)s_am_on; s_rd_state = 2;
+  s_am_on = 0; s_am_last_ms = now;
 }
 
 static void send_block(uint32_t now)
@@ -439,7 +735,11 @@ static void send_block(uint32_t now)
     D->radio_state = (uint16_t)RAIL_GetRadioState(s_rail); D->src = (uint8_t)s_src;
     D->opts = (uint8_t)((s_data_lsb_first ? 1u : 0u) | (s_sync_lsb_first ? 2u : 0u));
     D->rearm = (uint16_t)g_ais_bc[6]; D->wd = s_n_pre;               /* bring-up: preamble detects */
-    D->ftick = s_ftick;
+    D->ftick = s_cap_rate ? (int32_t)s_cap_rate : s_ftick;   /* bring-up: AK capture rate, B/s */
+    if (s_am) {           /* AM monitor: triggers / preambles / CRC-ok / FIFO near-full */
+      D->ftick = (int32_t)s_am_ntrig; D->cfgdata_st = (uint16_t)s_am_npre;
+      D->wd = (uint16_t)s_am_ok; D->rearm = (uint16_t)s_am_ovf; D->bytes_rx = s_am_w;
+    }
     RAIL_FrequencyOffset_t fo = RAIL_GetRxFreqOffset(s_rail);
     D->foff_raw = (fo == RAIL_FREQUENCY_OFFSET_INVALID) ? INT16_MIN : (int16_t)fo;
     D->rssi_qdbm = RAIL_GetRssi(s_rail, false);
@@ -472,9 +772,13 @@ void ais_hw_process(void)
     s_rx_restarts++;
     rx_arm();
   }
+  if (s_am) { am_run(); am_flush(now_ms()); }
+  if (s_cap_state == 1 && !iq_stream_ext_busy()) cap_run();
+  if (s_stream && s_src != RX_DIRECT_SYNCHRONOUS_MODE_DATA && s_cap_state == 0 && !s_cap_hold) drain_fifo();   /* ISR leaves these to us */
   g_ais_bc[2] = 110;
   iq_stream_ext_pump();
   g_ais_bc[2] = 120;
+  cap_feed();
   uint32_t now = now_ms();
   if (!iq_stream_ext_busy()) send_block(now);
   g_ais_bc[2] = 130;
@@ -500,14 +804,46 @@ void ais_hw_option(const char *a)
     while (*p >= '0' && *p <= '9') v = v * 10 + (*p++ - '0');
     s_ftick = (int32_t)(sg * v);
     if (s_active) rx_arm();
+  } else if (*a == 'C') {
+    /* AC<ch>: next A1 listens on this radio channel instead of AIS A (bring-up
+     * of other PHYs in the radioconf, e.g. the 1090 MHz probe at ch 4000);
+     * AC0 = back to AIS A/B */
+    long v = 0;
+    for (const char *p = a + 1; *p >= '0' && *p <= '9'; p++) v = v * 10 + (*p - '0');
+    s_ch_override = (uint16_t)v;
+    printf("# AIS HW: channel override %u (next A1)\r\n", (unsigned)s_ch_override);
   } else if (*a == 'D') {
     /* AD<n>: RX data source (0 packet/HW sync, 1 demod, 5 direct sync);
      * takes effect at the next A1/A2 */
     int n = a[1] - '0';
     if (n == 0 || n == 1 || n == 4 || n == 5) s_src = (RAIL_RxDataSource_t)n;
     printf("# AIS HW: rx source %d (next A1/A2)\r\n", (int)s_src);
+  } else if (*a == 'M') {
+    /* AM<thr>: continuous on-chip Mode S monitor; AMS = stop */
+    if (a[1] == 'S') { s_am = false; printf("# AIS HW: AM stop\r\n"); }
+    else {
+      const char *p = a + 1; int sg = 1; int v = 4;
+      if (*p == '-') { sg = -1; p++; }
+      if (*p >= '0' && *p <= '9') { v = 0; while (*p >= '0' && *p <= '9') v = v * 10 + (*p++ - '0'); }
+      am_start((int8_t)(sg * v));
+      printf("# AIS HW: AM thr %d\r\n", sg * v);
+    }
+  } else if (*a == 'K') {
+    /* AK<thr>: one burst capture of the raw source at full rate (see cap_run) */
+    const char *p = a + 1; int sg = 1; int v = 0;
+    if (*p == '-') { sg = -1; p++; }
+    while (*p >= '0' && *p <= '9') v = v * 10 + (*p++ - '0');
+    if (p != a + 1) s_cap_thr = (int8_t)(sg * v);
+    s_cap_len = 0;
+    if (*p == ',') {      /* AK<thr>,<bytes>: shorter capture (antenna: one frame ~800 samples) */
+      uint32_t l = 0; p++;
+      while (*p >= '0' && *p <= '9') l = l * 10 + (uint32_t)(*p++ - '0');
+      if (l > CAP_PRE) s_cap_len = l;
+    }
+    s_cap_rate = 0; s_cap_state = 1;
   } else if (*a == 'R') {
-    s_rd_n = 0; s_rd_state = 1;              /* AR: dump 960 stream bytes (AISRAW) */
+    s_rd_trig = (a[1] == '2') ? 0 : 1;       /* AR: dump 960 stream bytes (AISRAW); AR2 = no trigger */
+    s_rd_n = 0; s_rd_state = 1;
   } else if (*a == 'S') {
     int n = 0;
     for (const char *p = a + 1; *p >= '0' && *p <= '9'; p++) n = n * 10 + (*p - '0');
