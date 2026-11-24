@@ -8,6 +8,9 @@
  * needed or stored. Levels: the FG23 soft level of the first preamble pulse;
  * "rssi" = level - 30 (a rough dBFS-like scale, not calibrated). */
 #include "adsb_esp.h"
+#include "adsb_map_html.h"
+#include "adsb_graphs_html.h"
+#include "station_config.h"
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WebServer.h>
@@ -24,6 +27,14 @@
 #define CPR_PAIR_MS    10000u
 #define LOCAL_MAX_MS   600000u
 #define LVL_TO_DBFS(l) ((float)(l) - 30.0f)
+/* range reference: Budapest centre unless the (not public) station config sets the receiver */
+#ifndef ADSB_REF_LAT
+#define ADSB_REF_LAT   47.4979
+#define ADSB_REF_LON   19.0402
+#endif
+#define RANGE_MAX_M    600000.0     /* positions further than this are treated as CPR errors */
+#define RNG_N          72           /* 5 degree sectors for the range outline */
+#define HIST_N         1440         /* one record per minute, 24 h */
 
 typedef struct {
   uint32_t icao, first_ms, last_ms, pos_ms, msgs;
@@ -41,6 +52,7 @@ typedef struct {
   float    sig_sum; uint32_t sig_n; int32_t sig_peak; uint32_t strong;
   uint64_t samples; uint32_t pre, trig, ovf;
   float    noise_sum; uint32_t noise_n;
+  float    maxd;                      /* max distance from the reference, m */
 } st_t;
 
 #define ST_N 17
@@ -56,6 +68,15 @@ static uint16_t          p_pre = 0, p_ovf = 0;
 static WebServer        *s_srv = NULL;
 static char             *s_buf = NULL;
 static size_t            s_cap = 0, s_len = 0;
+
+typedef struct { float d, lat, lon; int32_t alt; } rng_t;
+static rng_t             s_rng[RNG_N];
+typedef struct {
+  uint32_t t; uint16_t msgs, pos, ac, acpos, tracks, df17;
+  float sig, peak, noise, maxd, msps; uint32_t trig, pre, ovf;
+} hist_t;
+static hist_t           *s_hist = NULL;
+static uint32_t          s_hw = 0, s_hist_min = UINT32_MAX;
 
 /* ---------------------------------------------------------------- time */
 static double now_epoch(void)
@@ -81,6 +102,7 @@ static void st_add(st_t *a, const st_t *b)
   if (b->sig_peak > a->sig_peak) a->sig_peak = b->sig_peak;
   a->strong += b->strong; a->samples += b->samples; a->pre += b->pre; a->trig += b->trig; a->ovf += b->ovf;
   a->noise_sum += b->noise_sum; a->noise_n += b->noise_n;
+  if (b->maxd > a->maxd) a->maxd = b->maxd;
 }
 
 /* ---------------------------------------------------------------- Mode S helpers */
@@ -129,6 +151,21 @@ static void cpr_local(ac_t *a, int f)
   if (fabs(lat - a->lat) < 1.0 && fabs(lon - a->lon) < 1.5) { a->lat = lat; a->lon = lon; }
 }
 
+static void ac_range(const ac_t *a, st_t *st)
+{
+  const double k = M_PI / 180.0;
+  double p1 = ADSB_REF_LAT * k, p2 = a->lat * k, dl = (a->lon - ADSB_REF_LON) * k;
+  double x = sin((p2 - p1) / 2), y = sin(dl / 2);
+  double d = 2.0 * 6371000.0 * asin(sqrt(x * x + cos(p1) * cos(p2) * y * y));
+  if (d > RANGE_MAX_M) return;
+  double b = atan2(sin(dl) * cos(p2), cos(p1) * sin(p2) - sin(p1) * cos(p2) * cos(dl)) / k;
+  if (b < 0) b += 360.0;
+  int sct = ((int)(b / (360.0 / RNG_N))) % RNG_N;
+  if (d > s_rng[sct].d) { s_rng[sct].d = (float)d; s_rng[sct].lat = (float)a->lat; s_rng[sct].lon = (float)a->lon; s_rng[sct].alt = a->alt; }
+  if (d > st->maxd) st->maxd = (float)d;
+  if (d > s_tot.maxd) s_tot.maxd = (float)d;
+}
+
 static ac_t *ac_get(uint32_t icao, uint32_t now, st_t *st)
 {
   ac_t *old = NULL;
@@ -157,9 +194,9 @@ static void decode_df17(ac_t *a, const uint8_t *m, uint32_t now, st_t *st)
     a->cpr_lat[f] = bits(m, 54, 17); a->cpr_lon[f] = bits(m, 71, 17); a->cpr_ms[f] = now; a->cpr_ok[f] = true;
     st->pos++; s_tot.pos++;
     if (a->cpr_ok[0] && a->cpr_ok[1] && (uint32_t)abs((int32_t)(a->cpr_ms[0] - a->cpr_ms[1])) < CPR_PAIR_MS) {
-      if (cpr_global(a, f == 1)) { a->pos_ok = true; a->pos_ms = now; st->gok++; s_tot.gok++; return; }
+      if (cpr_global(a, f == 1)) { a->pos_ok = true; a->pos_ms = now; st->gok++; s_tot.gok++; ac_range(a, st); return; }
     }
-    if (a->pos_ok && now - a->pos_ms < LOCAL_MAX_MS) { cpr_local(a, f); a->pos_ms = now; st->lok++; s_tot.lok++; }
+    if (a->pos_ok && now - a->pos_ms < LOCAL_MAX_MS) { cpr_local(a, f); a->pos_ms = now; st->lok++; s_tot.lok++; ac_range(a, st); }
   } else if (tc == 19) {
     uint32_t sub = bits(m, 37, 3);
     if (sub == 1 || sub == 2) {
@@ -293,7 +330,7 @@ static void j_period(const char *name, int minutes, double ep, uint32_t cur)
   } else { st_add(&a, &s_tot); }
   double span = minutes > 0 ? minutes * 60.0 : millis() / 1000.0;
   J("\"%s\":{\"start\":%.1f,\"end\":%.1f,\"messages\":%lu,\"messages_valid\":%lu,\"position_count_total\":%lu,"
-    "\"max_distance\":0,", name, ep - span, ep, (unsigned long)a.msgs, (unsigned long)a.msgs, (unsigned long)a.pos);
+    "\"max_distance\":%.0f,", name, ep - span, ep, (unsigned long)a.msgs, (unsigned long)a.msgs, (unsigned long)a.pos, a.maxd);
   J("\"local\":{\"samples_processed\":%llu,\"samples_dropped\":0,\"samples_lost\":0,\"modeac\":0,\"modes\":%lu,"
     "\"bad\":%lu,\"unknown_icao\":0,\"accepted\":[%lu,%lu,%lu],", (unsigned long long)a.samples, (unsigned long)a.pre,
     (unsigned long)(a.pre > a.msgs ? a.pre - a.msgs : 0), (unsigned long)a.acc[0], (unsigned long)a.acc[1], (unsigned long)a.acc[2]);
@@ -332,6 +369,101 @@ static void h_stats(void)
   send_json();
 }
 
+/* one history record per completed minute (called from the HTTP task, under s_mx) */
+static void hist_tick(void)
+{
+  uint32_t cur = millis() / 60000u;
+  if (s_hist_min == UINT32_MAX) { s_hist_min = cur; return; }
+  if (cur == s_hist_min) return;
+  uint32_t m = cur - 1u, now = millis();
+  const st_t *b = &s_st[m % ST_N];
+  hist_t h; memset(&h, 0, sizeof h);
+  h.t = (uint32_t)now_epoch(); h.sig = h.peak = h.noise = NAN;
+  if (b->min == m) {
+    h.msgs = (uint16_t)b->msgs; h.pos = (uint16_t)b->pos; h.tracks = (uint16_t)b->newac; h.df17 = (uint16_t)b->df17;
+    if (b->sig_n) { h.sig = b->sig_sum / b->sig_n; h.peak = LVL_TO_DBFS(b->sig_peak); }
+    if (b->noise_n) h.noise = b->noise_sum / b->noise_n;
+    h.maxd = b->maxd; h.msps = (float)(b->samples / 60e6); h.trig = b->trig; h.pre = b->pre; h.ovf = b->ovf;
+  }
+  for (uint32_t i = 0; i < s_nac; i++) {
+    if (now - s_ac[i].last_ms < 60000u) h.ac++;
+    if (s_ac[i].pos_ok && now - s_ac[i].pos_ms < 60000u) h.acpos++;
+  }
+  s_hist[s_hw % HIST_N] = h; s_hw++;
+  s_hist_min = cur;
+}
+static void jf(const char *pre, float v, int dec)
+{
+  if (isnan(v)) J("%snull", pre); else J(dec ? "%s%.1f" : "%s%.0f", pre, v);
+}
+
+static void h_history(void)
+{
+  uint32_t mins = 1440;
+  if (s_srv->hasArg("mins")) { long v = s_srv->arg("mins").toInt(); if (v > 0 && v < 1440) mins = (uint32_t)v; }
+  xSemaphoreTake(s_mx, portMAX_DELAY);
+  uint32_t n = s_hw < HIST_N ? s_hw : HIST_N; if (n > mins) n = mins;
+  uint32_t first = s_hw - n;
+  s_len = 0;
+  J("{\"now\":%.1f,\"step\":60,\"n\":%lu", now_epoch(), (unsigned long)n);
+  const char *names[] = { "t", "msgs", "pos", "ac", "acpos", "tracks", "df17", "sig", "peak", "noise", "range_km", "msps", "trig", "pre", "ovf" };
+  for (int f = 0; f < 15; f++) {
+    J(",\"%s\":[", names[f]);
+    for (uint32_t i = 0; i < n; i++) {
+      const hist_t *h = &s_hist[(first + i) % HIST_N];
+      const char *c = i ? "," : "";
+      switch (f) {
+        case 0: J("%s%lu", c, (unsigned long)h->t); break;
+        case 1: J("%s%u", c, h->msgs); break;
+        case 2: J("%s%u", c, h->pos); break;
+        case 3: J("%s%u", c, h->ac); break;
+        case 4: J("%s%u", c, h->acpos); break;
+        case 5: J("%s%u", c, h->tracks); break;
+        case 6: J("%s%u", c, h->df17); break;
+        case 7: jf(c, h->sig, 1); break;
+        case 8: jf(c, h->peak, 1); break;
+        case 9: jf(c, h->noise, 1); break;
+        case 10: jf(c, h->maxd / 1000.0f, 1); break;
+        case 11: J("%s%.2f", c, h->msps); break;
+        case 12: J("%s%lu", c, (unsigned long)h->trig); break;
+        case 13: J("%s%lu", c, (unsigned long)h->pre); break;
+        case 14: J("%s%lu", c, (unsigned long)h->ovf); break;
+      }
+    }
+    J("]");
+  }
+  J("}");
+  xSemaphoreGive(s_mx);
+  send_json();
+}
+
+static void h_outline(void)
+{
+  xSemaphoreTake(s_mx, portMAX_DELAY);
+  s_len = 0;
+  J("{\"note\":\"farthest position per 5 deg sector from a reference point, since boot\",\"actualRange\":{\"last24h\":{\"points\":[");
+  bool first = true;
+  for (int i = 0; i < RNG_N; i++) {
+    if (s_rng[i].d <= 0) continue;
+    J("%s[%.4f,%.4f,%ld]", first ? "" : ",", s_rng[i].lat, s_rng[i].lon, (long)s_rng[i].alt); first = false;
+  }
+  J("]}}}");
+  xSemaphoreGive(s_mx);
+  send_json();
+}
+
+static void h_graphs(void)
+{
+  s_srv->sendHeader("Cache-Control", "no-cache");
+  s_srv->send_P(200, "text/html; charset=utf-8", ADSB_GRAPHS_HTML, sizeof ADSB_GRAPHS_HTML - 1);
+}
+
+static void h_map(void)
+{
+  s_srv->sendHeader("Cache-Control", "no-cache");
+  s_srv->send_P(200, "text/html; charset=utf-8", ADSB_MAP_HTML, sizeof ADSB_MAP_HTML - 1);
+}
+
 static void h_root(void)
 {
   char t[256];
@@ -351,15 +483,21 @@ static void http_task(void *arg)
       if (WiFi.status() == WL_CONNECTED && WiFi.getMode() != WIFI_AP) {
         configTime(0, 0, "pool.ntp.org", "time.google.com");
         s_srv = new WebServer(ADSB_HTTP_PORT);
-        s_srv->on("/", h_root);
+        s_srv->on("/", h_map);
+        s_srv->on("/index.html", h_map);
+        s_srv->on("/status", h_root);
         s_srv->on("/data/aircraft.json", h_aircraft);
         s_srv->on("/data/receiver.json", h_receiver);
         s_srv->on("/data/stats.json", h_stats);
+        s_srv->on("/data/history.json", h_history);
+        s_srv->on("/data/outline.json", h_outline);
+        s_srv->on("/graphs", h_graphs);
         s_srv->begin();
         up = true;
       } else { vTaskDelay(pdMS_TO_TICKS(1000)); continue; }
     }
     s_srv->handleClient();
+    xSemaphoreTake(s_mx, portMAX_DELAY); hist_tick(); xSemaphoreGive(s_mx);
     vTaskDelay(pdMS_TO_TICKS(5));
   }
 }
@@ -368,8 +506,9 @@ void adsb_init(void)
 {
   if (s_ac) return;
   s_ac = (ac_t *)ps_calloc(AC_MAX, sizeof(ac_t));
-  s_cap = 96 * 1024; s_buf = (char *)ps_malloc(s_cap);
-  if (!s_ac || !s_buf) { s_ac = NULL; return; }
+  s_cap = 256 * 1024; s_buf = (char *)ps_malloc(s_cap);
+  s_hist = (hist_t *)ps_calloc(HIST_N, sizeof(hist_t));
+  if (!s_ac || !s_buf || !s_hist) { s_ac = NULL; return; }
   for (int i = 0; i < ST_N; i++) s_st[i].min = UINT32_MAX;
   memset(&s_tot, 0, sizeof s_tot); s_tot.sig_peak = -128;
   s_mx = xSemaphoreCreateMutex();
