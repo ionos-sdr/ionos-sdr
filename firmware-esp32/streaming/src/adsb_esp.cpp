@@ -39,6 +39,7 @@
 typedef struct {
   uint32_t icao, first_ms, last_ms, pos_ms, msgs;
   char     flight[9];
+  char     cat[3];                    /* emitter category, e.g. "A3" (readsb "category") */
   int32_t  alt; bool alt_ok;
   float    gs, track; int32_t vrate; bool vel_ok;
   double   lat, lon; bool pos_ok;
@@ -76,6 +77,11 @@ typedef struct {
   float sig, peak, noise, maxd, msps; uint32_t trig, pre, ovf;
 } hist_t;
 static hist_t           *s_hist = NULL;
+/* reference comparison (adsb.fi), one record per minute POSTed from the LAN by adsbfi_bench.py */
+typedef struct { uint32_t t; uint16_t ref, ours, matched, only; uint8_t cov[5]; uint16_t maxkm; } bench_t;
+#define BENCH_N 1440
+static bench_t          *s_bench = NULL;
+static uint32_t          s_bw = 0;
 static uint32_t          s_hw = 0, s_hist_min = UINT32_MAX;
 
 /* ---------------------------------------------------------------- time */
@@ -187,6 +193,8 @@ static void decode_df17(ac_t *a, const uint8_t *m, uint32_t now, st_t *st)
   if (tc >= 1 && tc <= 4) {
     for (int i = 0; i < 8; i++) a->flight[i] = cs[bits(m, 40 + 6 * i, 6) & 63];
     a->flight[8] = 0;
+    uint32_t ca = bits(m, 37, 3);                    /* TC 4/3/2/1 = set A/B/C/D */
+    if (ca) { a->cat[0] = (char)('A' + (4 - (int)tc)); a->cat[1] = (char)('0' + ca); a->cat[2] = 0; }
   } else if (tc >= 9 && tc <= 18) {
     uint32_t a12 = bits(m, 40, 12);
     if (a12 & 0x10u) { uint32_t n = ((a12 >> 5) << 4) | (a12 & 0xFu); a->alt = (int32_t)n * 25 - 1000; a->alt_ok = true; }
@@ -297,6 +305,7 @@ static void h_aircraft(void)
     if (now - a->last_ms >= AC_SHOW_MS) continue;
     J("%s{\"hex\":\"%06lx\",\"type\":\"adsb_icao\"", first ? "" : ",", (unsigned long)a->icao); first = false;
     if (a->flight[0]) J(",\"flight\":\"%s\"", a->flight);
+    if (a->cat[0]) J(",\"category\":\"%s\"", a->cat);
     if (a->alt_ok) J(",\"alt_baro\":%ld", (long)a->alt);
     if (a->vel_ok) J(",\"gs\":%.1f,\"track\":%.1f,\"baro_rate\":%ld", a->gs, a->track, (long)a->vrate);
     if (a->pos_ok) J(",\"lat\":%.6f,\"lon\":%.6f,\"seen_pos\":%.1f", a->lat, a->lon, (now - a->pos_ms) / 1000.0);
@@ -452,6 +461,56 @@ static void h_outline(void)
   send_json();
 }
 
+static void h_bench_post(void)
+{
+  /* body: t,ref,ours,matched,only,c0,c1,c2,c3,c4,maxkm  (cN = coverage % per distance band, 255 = no aircraft) */
+  if (!s_srv->hasArg("plain")) { s_srv->send(400, "text/plain", "no body\n"); return; }
+  unsigned long v[11]; memset(v, 0, sizeof v);
+  int n = sscanf(s_srv->arg("plain").c_str(), "%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu",
+                 &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7], &v[8], &v[9], &v[10]);
+  if (n != 11) { s_srv->send(400, "text/plain", "expected 11 fields\n"); return; }
+  bench_t b; b.t = v[0]; b.ref = (uint16_t)v[1]; b.ours = (uint16_t)v[2]; b.matched = (uint16_t)v[3]; b.only = (uint16_t)v[4];
+  for (int i = 0; i < 5; i++) b.cov[i] = (uint8_t)(v[5 + i] > 255 ? 255 : v[5 + i]);
+  b.maxkm = (uint16_t)v[10];
+  xSemaphoreTake(s_mx, portMAX_DELAY);
+  s_bench[s_bw % BENCH_N] = b; s_bw++;
+  xSemaphoreGive(s_mx);
+  s_srv->send(200, "text/plain", "ok\n");
+}
+
+static void h_bench(void)
+{
+  uint32_t mins = 1440;
+  if (s_srv->hasArg("mins")) { long v = s_srv->arg("mins").toInt(); if (v > 0 && v < 1440) mins = (uint32_t)v; }
+  xSemaphoreTake(s_mx, portMAX_DELAY);
+  uint32_t n = s_bw < BENCH_N ? s_bw : BENCH_N; if (n > mins) n = mins;
+  uint32_t first = s_bw - n;
+  s_len = 0;
+  J("{\"source\":\"adsb.fi (https://adsb.fi), circle of 250 NM around the receiver\",\"step\":60,\"n\":%lu,"
+    "\"bands_km\":[\"0-50\",\"50-100\",\"100-200\",\"200-300\",\"300+\"]", (unsigned long)n);
+  const char *names[] = { "t", "ref", "ours", "matched", "only_ours", "cov0", "cov1", "cov2", "cov3", "cov4", "max_km" };
+  for (int f = 0; f < 11; f++) {
+    J(",\"%s\":[", names[f]);
+    for (uint32_t i = 0; i < n; i++) {
+      const bench_t *b = &s_bench[(first + i) % BENCH_N];
+      const char *c = i ? "," : "";
+      switch (f) {
+        case 0: J("%s%lu", c, (unsigned long)b->t); break;
+        case 1: J("%s%u", c, b->ref); break;
+        case 2: J("%s%u", c, b->ours); break;
+        case 3: J("%s%u", c, b->matched); break;
+        case 4: J("%s%u", c, b->only); break;
+        case 10: J("%s%u", c, b->maxkm); break;
+        default: { uint8_t v = b->cov[f - 5]; if (v == 255) J("%snull", c); else J("%s%u", c, v); }
+      }
+    }
+    J("]");
+  }
+  J("}");
+  xSemaphoreGive(s_mx);
+  send_json();
+}
+
 static void h_graphs(void)
 {
   s_srv->sendHeader("Cache-Control", "no-cache");
@@ -492,6 +551,8 @@ static void http_task(void *arg)
         s_srv->on("/data/history.json", h_history);
         s_srv->on("/data/outline.json", h_outline);
         s_srv->on("/graphs", h_graphs);
+        s_srv->on("/data/bench", HTTP_POST, h_bench_post);
+        s_srv->on("/data/bench.json", h_bench);
         s_srv->begin();
         up = true;
       } else { vTaskDelay(pdMS_TO_TICKS(1000)); continue; }
@@ -508,7 +569,8 @@ void adsb_init(void)
   s_ac = (ac_t *)ps_calloc(AC_MAX, sizeof(ac_t));
   s_cap = 256 * 1024; s_buf = (char *)ps_malloc(s_cap);
   s_hist = (hist_t *)ps_calloc(HIST_N, sizeof(hist_t));
-  if (!s_ac || !s_buf || !s_hist) { s_ac = NULL; return; }
+  s_bench = (bench_t *)ps_calloc(BENCH_N, sizeof(bench_t));
+  if (!s_ac || !s_buf || !s_hist || !s_bench) { s_ac = NULL; return; }
   for (int i = 0; i < ST_N; i++) s_st[i].min = UINT32_MAX;
   memset(&s_tot, 0, sizeof s_tot); s_tot.sig_peak = -128;
   s_mx = xSemaphoreCreateMutex();
