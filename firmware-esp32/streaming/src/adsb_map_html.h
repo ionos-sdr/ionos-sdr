@@ -28,7 +28,7 @@ const q=location.search, map=L.map('map',{worldCopyJump:true}).setView([47.5,19.
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:12,attribution:'&copy; OpenStreetMap'}).addTo(map);
 const ac={}, TR={}; let sel=null, hov=null, fitted=false, outline=null;
 document.getElementById('gl').href='graphs'+q;
-async function rng(){try{const o=await (await fetch('data/outline.json'+q,{cache:'no-store'})).json();
+async function rng(){try{const o=await (await fetch('data/outline.json'+q+(q?'&':'?')+'rx='+(tab=='rtl'?'rtl':'fg23'),{cache:'no-store'})).json();
  const p=o.actualRange.last24h.points.map(x=>[x[0],x[1]]); if(p.length<3)return;
  if(!outline)outline=L.polygon(p,{color:'#bbb',weight:1.5,dashArray:'4 4',fill:true,fillColor:'#000',fillOpacity:.08,interactive:false}).addTo(map);
  else outline.setLatLngs(p)}catch(e){}}
@@ -62,7 +62,7 @@ function icon(a,c){const s=shape(a), rot=(s=='balloon'||s=='drone')?0:(a.track||
 function seg(t,a,b){if(b[3]-a[3]>600)return; L.polyline([[a[0],a[1]],[b[0],b[1]]],{color:col(b[2]),weight:3,opacity:.95,interactive:false}).addTo(t.grp)}
 function addPt(t,p){const l=t.pts[t.pts.length-1]; if(l&&l[0]==p[0]&&l[1]==p[1])return; t.pts.push(p); if(l)seg(t,l,p)}
 async function showTrail(h){if(TR[h])return; const t=TR[h]={pts:[],ok:false,grp:L.layerGroup().addTo(map)};
- try{const r=await (await fetch('data/trace.json'+q+(q?'&':'?')+'hex='+h,{cache:'no-store'})).json();
+ try{const r=await (await fetch('data/trace.json'+q+(q?'&':'?')+'hex='+h.split('.')[0]+'&rx='+(h.split('.')[1]||'fg23'),{cache:'no-store'})).json();
   if(TR[h]!==t)return; for(const p of r.trace)addPt(t,[p[1],p[2],p[3],p[0]])}catch(e){}
  if(TR[h]!==t)return; t.ok=true; if(ac[h]){const ll=ac[h].getLatLng(); addPt(t,[ll.lat,ll.lng,ac[h].alt,Date.now()/1000])}}
 function hideTrail(h){if(h==sel||h==hov||!TR[h])return; map.removeLayer(TR[h].grp); delete TR[h]}
@@ -70,8 +70,9 @@ function selectAc(h){const o=sel; sel=(o==h)?null:h; if(o)hideTrail(o); if(sel)s
 map.on('click',()=>{const o=sel; sel=null; if(o)hideTrail(o)});
 /* receiver tabs: FG23 on-chip / RTL-SDR (same antenna via a splitter) / both merged */
 let tab=(location.hash||'#fg23').slice(1); if(!['fg23','rtl','all'].includes(tab))tab='fg23';
-function rxOk(a){const r=a.ionos_rx||'fg23'; return tab=='all'||r=='both'||r==tab}
-function setTab(t){tab=t; history.replaceState(null,'',location.pathname+location.search+'#'+t);
+/* each receiver has its own aircraft entries (independent decode): key = hex.rx */
+function rxOk(a){return tab=='all'||(a.ionos_rx||'fg23')==tab}
+function setTab(t){tab=t; if(outline){map.removeLayer(outline);outline=null} rng(); history.replaceState(null,'',location.pathname+location.search+'#'+t);
  document.querySelectorAll('#tabs button').forEach(b=>b.classList.toggle('on',b.dataset.t==t));
  for(const h in ac){map.removeLayer(ac[h]);delete ac[h]} for(const h in TR){map.removeLayer(TR[h].grp);delete TR[h]} sel=null; tick()}
 document.querySelectorAll('#tabs button').forEach(b=>b.onclick=()=>setTab(b.dataset.t));
@@ -80,28 +81,28 @@ function fmt(v,d){return v==null?'':(d?v.toFixed(d):v)}
 async function tick(){
  let j; try{j=await (await fetch('data/aircraft.json'+q,{cache:'no-store'})).json()}catch(e){document.getElementById('st').textContent='no connection';return}
  const seen=new Set(); let np=0;
- const cnt={fg23:0,rtl:0,all:0}; for(const a of j.aircraft){const r=a.ionos_rx; if(r=='fg23'||r=='both')cnt.fg23++; if(r=='rtl'||r=='both')cnt.rtl++; if(r&&r!='none')cnt.all++}
+ const cnt={fg23:0,rtl:0,all:0}; for(const a of j.aircraft){const r=a.ionos_rx||'fg23'; a.key=a.hex+'.'+r; cnt[r]++; cnt.all++}
  document.getElementById('nfg').textContent=cnt.fg23; document.getElementById('nrt').textContent=cnt.rtl; document.getElementById('nal').textContent=cnt.all;
- j={...j,aircraft:j.aircraft.filter(rxOk)};
+ j={...j,aircraft:j.aircraft.filter(rxOk),messages:tab=='rtl'?j.messages_rtl:tab=='fg23'?j.messages_fg23:j.messages};
  for(const a of j.aircraft){
-  seen.add(a.hex); const c=col(a.alt_baro);
+  seen.add(a.key); const c=col(a.alt_baro);
   if(a.lat!=null&&a.seen_pos<60){np++;
-   const ll=[a.lat,a.lon], lab=(a.flight||a.hex).trim()+(a.alt_baro!=null?' '+Math.round(a.alt_baro/100):'');
-   if(!ac[a.hex]){ac[a.hex]=L.marker(ll,{icon:icon(a,c)}).addTo(map).bindTooltip(lab,{permanent:true,direction:'right',offset:[SZ/2,0],className:'lbl'});
-     const h=a.hex;
+   const ll=[a.lat,a.lon], lab=(a.flight||a.hex).trim()+(a.alt_baro!=null?' '+Math.round(a.alt_baro/100):'')+(tab=='all'?(a.ionos_rx=='rtl'?' ·R':' ·F'):'');
+   if(!ac[a.key]){ac[a.key]=L.marker(ll,{icon:icon(a,c)}).addTo(map).bindTooltip(lab,{permanent:true,direction:'right',offset:[SZ/2,0],className:'lbl'});
+     const h=a.key;
      ac[h].on('mouseover',()=>{hov=h;showTrail(h)}).on('mouseout',()=>{hov=null;hideTrail(h)})
       .on('click',()=>{selectAc(h);render(j)})}
-   else{ac[a.hex].setLatLng(ll).setIcon(icon(a,c)).setTooltipContent(lab)}
-   ac[a.hex].alt=a.alt_baro;
-   const t=TR[a.hex]; if(t&&t.ok)addPt(t,[ll[0],ll[1],a.alt_baro,j.now]);
+   else{ac[a.key].setLatLng(ll).setIcon(icon(a,c)).setTooltipContent(lab)}
+   ac[a.key].alt=a.alt_baro;
+   const t=TR[a.key]; if(t&&t.ok)addPt(t,[ll[0],ll[1],a.alt_baro,j.now]);
   } }
  for(const h in ac) if(!seen.has(h)){map.removeLayer(ac[h]);delete ac[h]; if(TR[h]){map.removeLayer(TR[h].grp);delete TR[h]}; if(sel==h)sel=null}
  if(!fitted&&np>2){const b=L.latLngBounds(Object.values(ac).map(m=>m.getLatLng()));map.fitBounds(b.pad(0.2));fitted=true}
  render(j,np)}
 function render(j,np){
- const rows=j.aircraft.slice().sort((a,b)=>a.seen-b.seen).map(a=>`<tr data-h="${a.hex}" class="${a.hex==sel?'sel':''}"><td>${a.hex}</td><td>${(a.flight||'').trim()}</td><td>${a.category||''}</td><td>${fmt(a.alt_baro)}</td><td>${fmt(a.gs,0)}</td><td>${fmt(a.track,0)}</td><td>${a.messages}</td><td>${a.seen.toFixed(0)}s</td><td>${fmt(a.rssi,1)}</td></tr>`).join('');
+ const rows=j.aircraft.slice().sort((a,b)=>a.seen-b.seen).map(a=>`<tr data-h="${a.key}" class="${a.key==sel?'sel':''}"><td>${a.hex}${tab=='all'?(a.ionos_rx=='rtl'?' R':' F'):''}</td><td>${(a.flight||'').trim()}</td><td>${a.category||''}</td><td>${fmt(a.alt_baro)}</td><td>${fmt(a.gs,0)}</td><td>${fmt(a.track,0)}</td><td>${a.messages}</td><td>${a.seen.toFixed(0)}s</td><td>${fmt(a.rssi,1)}</td></tr>`).join('');
  const tb=document.getElementById('tb'); tb.innerHTML=rows;
  tb.querySelectorAll('tr').forEach(r=>r.onclick=()=>{const h=r.dataset.h; if(sel!=h)selectAc(h); if(ac[h])map.panTo(ac[h].getLatLng()); render(j,np)});
- if(np!=null)document.getElementById('st').textContent=`${({fg23:'FG23 on-chip',rtl:'RTL-SDR',all:'both receivers'})[tab]}: ${j.aircraft.length} aircraft, ${np} with position · ${j.messages} messages (all) · ${new Date(j.now*1000).toLocaleTimeString()}`}
+ if(np!=null)document.getElementById('st').textContent=`${({fg23:'FG23 on-chip',rtl:'RTL-SDR',all:'both receivers'})[tab]}: ${j.aircraft.length} aircraft, ${np} with position · ${j.messages} messages · ${new Date(j.now*1000).toLocaleTimeString()}`}
 tick(); setInterval(tick,1000); rng(); setInterval(rng,30000);
 </script></body></html>)HTML";

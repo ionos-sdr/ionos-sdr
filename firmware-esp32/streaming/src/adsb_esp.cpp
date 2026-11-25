@@ -24,7 +24,7 @@
 #include "freertos/semphr.h"
 #include "esp_timer.h"
 
-#define AC_MAX         256
+#define AC_MAX         384          /* per receiver entries: FG23 + RTL-SDR each have their own */
 #define AC_SHOW_MS     300000u      /* aircraft.json lists those seen in the last 5 min */
 #define CPR_PAIR_MS    10000u
 #define LOCAL_MAX_MS   600000u
@@ -44,6 +44,7 @@
 
 typedef struct {
   uint32_t icao, first_ms, last_ms, pos_ms, msgs;
+  uint8_t  src;                       /* 0 = FG23, 1 = RTL-SDR: one entry PER RECEIVER, nothing shared */
   uint32_t seen_ms[2], posmsg_ms[2];   /* per receiver: 0 = FG23, 1 = RTL-SDR (splitter: both at once) */
   char     flight[9];
   char     cat[3];                    /* emitter category, e.g. "A3" (readsb "category") */
@@ -76,7 +77,7 @@ typedef struct {
   float    noise_sum; uint32_t noise_n;
   float    maxd;                      /* max distance from the reference, m */
   uint32_t fix_rej;                   /* corrected frames dropped (unknown ICAO) */
-  uint32_t msgs_rtl;                  /* of msgs: from the Beast input (RTL-SDR), the rest from the FG23 */
+  uint32_t msgs_rtl;                  /* unused since the receivers have separate statistics (s_stv[1]) */
   uint32_t cpr_rej;                   /* global CPR fixes rejected as implausible (pos_sane) */
 } st_t;
 
@@ -84,9 +85,14 @@ typedef struct {
 static ac_t             *s_ac = NULL;
 static uint32_t          s_nac = 0;
 static SemaphoreHandle_t s_mx = NULL;
-static st_t              s_st[ST_N];
-static st_t              s_tot;
-static uint32_t          s_msgs_total = 0;
+/* statistics PER RECEIVER: [0] FG23 on-chip, [1] RTL-SDR (Beast input). The two
+ * benchmarks share no table, no counter, no CPR state and no range outline. */
+static st_t              s_stv[2][ST_N];
+static st_t              s_totv[2];
+#define s_st  s_stv[0]
+#define s_tot s_totv[0]
+static uint32_t          s_msgs_totv[2] = { 0, 0 };
+#define s_msgs_total s_msgs_totv[0]
 static bool              s_dbg_have = false;
 static uint32_t          p_bytes = 0, p_trig = 0;
 static uint16_t          p_pre = 0, p_ovf = 0;
@@ -105,7 +111,7 @@ static char             *s_buf = NULL;
 static size_t            s_cap = 0, s_len = 0;
 
 typedef struct { float d, lat, lon; int32_t alt; } rng_t;
-static rng_t             s_rng[RNG_N];
+static rng_t             s_rngv[2][RNG_N];
 typedef struct {
   uint32_t t; uint16_t msgs, pos, ac, acpos, tracks, df17, rtl, ac_rx[2], acpos_rx[2];
   float sig, peak, noise, maxd, msps; uint32_t trig, pre, ovf;
@@ -127,10 +133,10 @@ static double now_epoch(void)
 }
 
 /* ---------------------------------------------------------------- stats */
-static st_t *st_cur(void)
+static st_t *st_cur(int src = 0)
 {
   uint32_t m = millis() / 60000u;
-  st_t *b = &s_st[m % ST_N];
+  st_t *b = &s_stv[src][m % ST_N];
   if (b->min != m) { memset(b, 0, sizeof *b); b->min = m; }
   return b;
 }
@@ -218,9 +224,10 @@ static void ac_range(const ac_t *a, st_t *st)
   double b = atan2(sin(dl) * cos(p2), cos(p1) * sin(p2) - sin(p1) * cos(p2) * cos(dl)) / k;
   if (b < 0) b += 360.0;
   int sct = ((int)(b / (360.0 / RNG_N))) % RNG_N;
-  if (d > s_rng[sct].d) { s_rng[sct].d = (float)d; s_rng[sct].lat = (float)a->lat; s_rng[sct].lon = (float)a->lon; s_rng[sct].alt = a->alt; }
+  rng_t *R = s_rngv[a->src];
+  if (d > R[sct].d) { R[sct].d = (float)d; R[sct].lat = (float)a->lat; R[sct].lon = (float)a->lon; R[sct].alt = a->alt; }
   if (d > st->maxd) st->maxd = (float)d;
-  if (d > s_tot.maxd) s_tot.maxd = (float)d;
+  if (d > s_totv[a->src].maxd) s_totv[a->src].maxd = (float)d;
 }
 
 static uint64_t fg_unwrap(uint32_t t)            /* FG23 32-bit us near the last telemetry -> 64 bit */
@@ -235,25 +242,25 @@ static double fg_epoch(uint64_t t64)               /* FG23 us -> epoch s, using 
   return now_epoch() - age;
 }
 
-static ac_t *ac_find(uint32_t icao)
+static ac_t *ac_find(uint32_t icao, int src)
 {
-  for (uint32_t i = 0; i < s_nac; i++) if (s_ac[i].icao == icao) return &s_ac[i];
+  for (uint32_t i = 0; i < s_nac; i++) if (s_ac[i].icao == icao && s_ac[i].src == src) return &s_ac[i];
   return NULL;
 }
 
-static ac_t *ac_get(uint32_t icao, uint32_t now, st_t *st)
+static ac_t *ac_get(uint32_t icao, int src, uint32_t now, st_t *st)
 {
   ac_t *old = NULL;
   for (uint32_t i = 0; i < s_nac; i++) {
-    if (s_ac[i].icao == icao) return &s_ac[i];
+    if (s_ac[i].icao == icao && s_ac[i].src == src) return &s_ac[i];
     if (!old || s_ac[i].last_ms < old->last_ms) old = &s_ac[i];
   }
   ac_t *a = (s_nac < AC_MAX) ? &s_ac[s_nac++] : old;      /* full: reuse the stalest */
   memset(a, 0, sizeof *a);
   s_trn[a - s_ac] = 0; s_trw[a - s_ac] = 0;
-  a->icao = icao; a->first_ms = now;
+  a->icao = icao; a->first_ms = now; a->src = (uint8_t)src;
   a->nic = a->nacp = a->sil = a->ver = -1;
-  st->newac++; s_tot.newac++;
+  st->newac++; s_totv[src].newac++;
   return a;
 }
 
@@ -299,20 +306,20 @@ static void decode_df17(ac_t *a, const uint8_t *m, uint32_t now, st_t *st, doubl
     if (a12 & 0x10u) { uint32_t n = ((a12 >> 5) << 4) | (a12 & 0xFu); a->alt = (int32_t)n * 25 - 1000; a->alt_ok = true; }
     int f = (int)bits(m, 53, 1);
     a->cpr_lat[f] = bits(m, 54, 17); a->cpr_lon[f] = bits(m, 71, 17); a->cpr_ms[f] = now; a->cpr_ok[f] = true; a->cpr_fix[f] = fixed;
-    st->pos++; s_tot.pos++;
+    st->pos++; s_totv[a->src].pos++;
     /* global decode only from two CRC-clean halves: a mis-corrected bit in a CPR
      * field (1-2 bit correction on the FG23 path) moves the fix by a whole zone
      * or more - corrected frames may still refine a known position (local) */
     if (a->cpr_ok[0] && a->cpr_ok[1] && !a->cpr_fix[0] && !a->cpr_fix[1] && (uint32_t)abs((int32_t)(a->cpr_ms[0] - a->cpr_ms[1])) < CPR_PAIR_MS) {
       double olat = a->lat, olon = a->lon;
       if (cpr_global(a, f == 1)) {
-        if (pos_sane(a, olat, olon, now)) { a->pos_ok = true; a->pos_ms = now; a->pos_ts = ts; st->gok++; s_tot.gok++; ac_range(a, st); return; }
+        if (pos_sane(a, olat, olon, now)) { a->pos_ok = true; a->pos_ms = now; a->pos_ts = ts; st->gok++; s_totv[a->src].gok++; ac_range(a, st); return; }
         /* rejected: keep the old position, demand a fresh even/odd pair */
-        a->lat = olat; a->lon = olon; a->cpr_ok[0] = a->cpr_ok[1] = false; st->cpr_rej++; s_tot.cpr_rej++;
+        a->lat = olat; a->lon = olon; a->cpr_ok[0] = a->cpr_ok[1] = false; st->cpr_rej++; s_totv[a->src].cpr_rej++;
         return;
       }
     }
-    if (a->pos_ok && now - a->pos_ms < LOCAL_MAX_MS) { cpr_local(a, f); a->pos_ms = now; a->pos_ts = ts; st->lok++; s_tot.lok++; ac_range(a, st); }
+    if (a->pos_ok && now - a->pos_ms < LOCAL_MAX_MS) { cpr_local(a, f); a->pos_ms = now; a->pos_ts = ts; st->lok++; s_totv[a->src].lok++; ac_range(a, st); }
   } else if (tc == 19) {
     uint32_t sub = bits(m, 37, 3);
     if (sub == 1 || sub == 2) {
@@ -432,8 +439,7 @@ int adsb_ac_list(adsb_ac_view_t *o, int max)
     if (v->pos_ok) ref_km(a->lat, a->lon, &v->dx_km, &v->dy_km); else v->dx_km = v->dy_km = 0;
     v->alt = a->alt; v->alt_ok = a->alt_ok; v->trk = a->track; v->trk_ok = a->vel_ok;
     v->age_ms = now - a->last_ms;
-    v->rx = (uint8_t)(((a->seen_ms[0] && now - a->seen_ms[0] < 60000u) ? 1 : 0) |
-                      ((a->seen_ms[1] && now - a->seen_ms[1] < 60000u) ? 2 : 0));
+    v->rx = (uint8_t)(1u << a->src);
   }
   xSemaphoreGive(s_mx);
   return n;
@@ -459,7 +465,7 @@ void adsb_feed_ms1(const uint8_t *raw, uint32_t len)
     if (nb != 7 && nb != 14) continue;
     uint32_t df = m[0] >> 3, icao = ((uint32_t)m[1] << 16) | ((uint32_t)m[2] << 8) | m[3];
     if (fix) {                                       /* corrected: only for an aircraft heard clean recently */
-      ac_t *k = ac_find(icao);
+      ac_t *k = ac_find(icao, 0);
       if (!k || !k->clean_ms || now - k->clean_ms > FIX_KNOWN_MS) { st->fix_rej++; s_tot.fix_rej++; continue; }
     }
     uint32_t th; memcpy(&th, r, 4);
@@ -477,15 +483,15 @@ static void ingest(st_t *st, const uint8_t *m, uint32_t nb, uint32_t df, uint32_
                    double ts, uint32_t now, int src)
 {
   {
-    st->msgs++; st->acc[fix > 2 ? 2 : fix]++; s_tot.msgs++; s_tot.acc[fix > 2 ? 2 : fix]++; s_msgs_total++;
-    if (df == 11) { st->df11++; s_tot.df11++; } else { st->df17++; s_tot.df17++; }
+    st->msgs++; st->acc[fix > 2 ? 2 : fix]++; s_totv[src].msgs++; s_totv[src].acc[fix > 2 ? 2 : fix]++; s_msgs_totv[src]++;
+    if (df == 11) { st->df11++; s_totv[src].df11++; } else { st->df17++; s_totv[src].df17++; }
     if (lvl != -128) {
-      st->sig_sum += LVL_TO_DBFS(lvl); st->sig_n++; s_tot.sig_sum += LVL_TO_DBFS(lvl); s_tot.sig_n++;
+      st->sig_sum += LVL_TO_DBFS(lvl); st->sig_n++; s_totv[src].sig_sum += LVL_TO_DBFS(lvl); s_totv[src].sig_n++;
       if (lvl > st->sig_peak) st->sig_peak = lvl;
-      if (lvl > s_tot.sig_peak) s_tot.sig_peak = lvl;
-      if (LVL_TO_DBFS(lvl) > -3.f) { st->strong++; s_tot.strong++; }
+      if (lvl > s_totv[src].sig_peak) s_totv[src].sig_peak = lvl;
+      if (LVL_TO_DBFS(lvl) > -3.f) { st->strong++; s_totv[src].strong++; }
     }
-    ac_t *a = ac_get(icao, now, st);
+    ac_t *a = ac_get(icao, src, now, st);
     a->last_ms = now; a->msgs++; a->last_ts = ts;
     if (lvl != -128) { a->lvl_last = lvl; a->lvl_sum += lvl; a->lvl_n++; }
     if (!fix) a->clean_ms = now;
@@ -504,7 +510,8 @@ static void ingest(st_t *st, const uint8_t *m, uint32_t nb, uint32_t df, uint32_
 
 /* ---------------------------------------------------------------- RTL-SDR (Beast input) */
 /* A PC decoder on the same antenna (tools/rtl_feed.py: rtl_adsb or dump1090 -> Beast)
- * connects here; its frames go into the same tables, counted as msgs_rtl.
+ * connects here; its frames go into their OWN aircraft entries and statistics
+ * (src 1) - nothing is shared with the FG23 decode, so the two are independent.
  * Hot-swap: the antenna is moved between the FG23 and the RTL-SDR; whichever
  * hears the traffic fills the map and the graphs. The feeder sends only
  * CRC-good DF11/17/18. */
@@ -525,9 +532,8 @@ static void rtl_frame(const uint8_t *f, int n)
   if (f[7]) { float db = 20.0f * log10f(f[7] / 255.0f); l = (int)lrintf(db + 30.0f); if (l < -127) l = -127; if (l > 127) l = 127; }
   uint32_t now = millis();
   xSemaphoreTake(s_mx, portMAX_DELAY);
-  st_t *st = st_cur();
+  st_t *st = st_cur(1);
   ingest(st, m, nb, df == 18 ? 17 : df, icao, 0, (int8_t)l, now_epoch(), now, 1);
-  st->msgs_rtl++; s_tot.msgs_rtl++;
   xSemaphoreGive(s_mx);
   s_rtl_frames++; s_rtl_last_ms = now;
 }
@@ -595,7 +601,7 @@ void adsb_feed_dbg(const aispkt_dbg_t *d)
 uint32_t adsb_aircraft_count(void)
 {
   uint32_t n = 0, now = millis();
-  for (uint32_t i = 0; i < s_nac; i++) if (now - s_ac[i].last_ms < AC_SHOW_MS) n++;
+  for (uint32_t i = 0; i < s_nac; i++) if (s_ac[i].src == 0 && now - s_ac[i].last_ms < AC_SHOW_MS) n++;
   return n;
 }
 
@@ -626,14 +632,20 @@ static void h_aircraft(void)
   xSemaphoreTake(s_mx, portMAX_DELAY);
   uint32_t now = millis(); double ep = now_epoch();
   s_len = 0;
-  J("{\"now\":%.3f,\"messages\":%lu,\"aircraft\":[", ep, (unsigned long)s_msgs_total);
+  /* ?rx=fg23|rtl: one receiver only; default both, each entry tagged - the same
+   * hex appears once per receiver that heard it (independent decodes) */
+  int only = -1;
+  if (s_srv->hasArg("rx")) only = (s_srv->arg("rx") == "rtl") ? 1 : 0;
+  J("{\"now\":%.3f,\"messages\":%lu,\"messages_fg23\":%lu,\"messages_rtl\":%lu,\"aircraft\":[", ep,
+    (unsigned long)(only < 0 ? s_msgs_totv[0] + s_msgs_totv[1] : s_msgs_totv[only]),
+    (unsigned long)s_msgs_totv[0], (unsigned long)s_msgs_totv[1]);
   bool first = true;
   for (uint32_t i = 0; i < s_nac; i++) {
     ac_t *a = &s_ac[i];
     if (now - a->last_ms >= AC_SHOW_MS) continue;
+    if (only >= 0 && a->src != only) continue;
     J("%s{\"hex\":\"%06lx\",\"type\":\"adsb_icao\"", first ? "" : ",", (unsigned long)a->icao); first = false;
-    { bool f0 = a->seen_ms[0] && now - a->seen_ms[0] < 60000u, f1 = a->seen_ms[1] && now - a->seen_ms[1] < 60000u;
-      J(",\"ionos_rx\":\"%s\"", f0 && f1 ? "both" : f1 ? "rtl" : f0 ? "fg23" : "none"); }
+    J(",\"ionos_rx\":\"%s\"", a->src ? "rtl" : "fg23");
     if (a->flight[0]) J(",\"flight\":\"%s\"", a->flight);
     if (a->cat[0]) J(",\"category\":\"%s\"", a->cat);
     if (a->alt_ok) J(",\"alt_baro\":%ld", (long)a->alt);
@@ -696,7 +708,7 @@ static void h_stats(void)
   double ep = now_epoch(); uint32_t cur = millis() / 60000u, now = millis();
   uint32_t wp = 0, wop = 0;
   for (uint32_t i = 0; i < s_nac; i++) {
-    if (now - s_ac[i].last_ms >= AC_SHOW_MS) continue;
+    if (s_ac[i].src != 0 || now - s_ac[i].last_ms >= AC_SHOW_MS) continue;
     if (s_ac[i].pos_ok && now - s_ac[i].pos_ms < 60000u) wp++; else wop++;
   }
   s_len = 0;
@@ -710,13 +722,16 @@ static void h_stats(void)
   j_period("last5min", 5, ep, cur); J(",");
   j_period("last15min", 15, ep, cur); J(",");
   j_period("total", 0, ep, cur);
-  { const st_t *b = st_cur();
+  { const st_t *b = st_cur(0), *r = st_cur(1);
     J(",\"sources\":{\"rtl_in\":{\"port\":%d,\"connected\":%s,\"connections\":%lu,\"frames\":%lu,\"last_s\":%.1f},"
       "\"this_minute\":{\"fg23\":%lu,\"rtl\":%lu},\"total\":{\"fg23\":%lu,\"rtl\":%lu}}",
       RTL_IN_PORT, (s_rtl_cli && s_rtl_cli.connected()) ? "true" : "false", (unsigned long)s_rtl_conn,
       (unsigned long)s_rtl_frames, s_rtl_last_ms ? (now - s_rtl_last_ms) / 1000.0 : -1.0,
-      (unsigned long)(b->msgs - b->msgs_rtl), (unsigned long)b->msgs_rtl,
-      (unsigned long)(s_tot.msgs - s_tot.msgs_rtl), (unsigned long)s_tot.msgs_rtl); }
+      (unsigned long)b->msgs, (unsigned long)r->msgs,
+      (unsigned long)s_totv[0].msgs, (unsigned long)s_totv[1].msgs);
+    J(",\"rtl\":{\"messages\":%lu,\"positions\":%lu,\"global_cpr\":%lu,\"cpr_rejected\":%lu,\"max_distance\":%.0f}",
+      (unsigned long)s_totv[1].msgs, (unsigned long)s_totv[1].pos, (unsigned long)s_totv[1].gok,
+      (unsigned long)s_totv[1].cpr_rej, s_totv[1].maxd); }
   J("}");
   xSemaphoreGive(s_mx);
   send_json();
@@ -729,22 +744,23 @@ static void hist_tick(void)
   if (s_hist_min == UINT32_MAX) { s_hist_min = cur; return; }
   if (cur == s_hist_min) return;
   uint32_t m = cur - 1u, now = millis();
-  const st_t *b = &s_st[m % ST_N];
+  const st_t *b = &s_stv[0][m % ST_N], *rb = &s_stv[1][m % ST_N];
   hist_t h; memset(&h, 0, sizeof h);
   h.t = (uint32_t)now_epoch(); h.sig = h.peak = h.noise = NAN;
   if (b->min == m) {
-    h.msgs = (uint16_t)b->msgs; h.rtl = (uint16_t)b->msgs_rtl; h.pos = (uint16_t)b->pos; h.tracks = (uint16_t)b->newac; h.df17 = (uint16_t)b->df17;
+    h.msgs = (uint16_t)b->msgs; h.rtl = (rb->min == m) ? (uint16_t)rb->msgs : 0; h.pos = (uint16_t)b->pos; h.tracks = (uint16_t)b->newac; h.df17 = (uint16_t)b->df17;
     if (b->sig_n) { h.sig = b->sig_sum / b->sig_n; h.peak = LVL_TO_DBFS(b->sig_peak); }
     if (b->noise_n) h.noise = b->noise_sum / b->noise_n;
     h.maxd = b->maxd; h.msps = (float)(b->samples / 60e6); h.trig = b->trig; h.pre = b->pre; h.ovf = b->ovf;
   }
+  /* per receiver, from its own entries: aircraft heard / aircraft with a position
+   * DECODED from that receiver's frames alone in the last minute */
   for (uint32_t i = 0; i < s_nac; i++) {
-    if (now - s_ac[i].last_ms < 60000u) h.ac++;
-    for (int k = 0; k < 2; k++) {
-      if (s_ac[i].seen_ms[k] && now - s_ac[i].seen_ms[k] < 60000u) h.ac_rx[k]++;
-      if (s_ac[i].posmsg_ms[k] && now - s_ac[i].posmsg_ms[k] < 60000u) h.acpos_rx[k]++;
-    }
-    if (s_ac[i].pos_ok && now - s_ac[i].pos_ms < 60000u) h.acpos++;
+    const ac_t *a = &s_ac[i]; int k = a->src;
+    bool heard = now - a->last_ms < 60000u, pos = a->pos_ok && now - a->pos_ms < 60000u;
+    if (heard) h.ac_rx[k]++;
+    if (pos) h.acpos_rx[k]++;
+    if (k == 0) { if (heard) h.ac++; if (pos) h.acpos++; }
   }
   s_hist[s_hw % HIST_N] = h; s_hw++;
   s_hist_min = cur;
@@ -805,7 +821,7 @@ static void h_trace(void)                         /* /data/trace.json?hex=xxxxxx
   xSemaphoreTake(s_mx, portMAX_DELAY);
   s_len = 0;
   J("{\"now\":%.1f,\"hex\":\"%06lx\",\"trace\":[", now_epoch(), (unsigned long)icao);
-  ac_t *a = ac_find(icao);
+  ac_t *a = ac_find(icao, s_srv->arg("rx") == "rtl" ? 1 : 0);
   if (a && s_tr) {
     uint32_t i = (uint32_t)(a - s_ac), n = s_trn[i], w = s_trw[i];
     const trp_t *tr = s_tr + i * TR_N;
@@ -826,9 +842,10 @@ static void h_outline(void)
   s_len = 0;
   J("{\"note\":\"farthest position per 5 deg sector from a reference point, since boot\",\"actualRange\":{\"last24h\":{\"points\":[");
   bool first = true;
+  const rng_t *R = s_rngv[s_srv->arg("rx") == "rtl" ? 1 : 0];
   for (int i = 0; i < RNG_N; i++) {
-    if (s_rng[i].d <= 0) continue;
-    J("%s[%.4f,%.4f,%ld]", first ? "" : ",", s_rng[i].lat, s_rng[i].lon, (long)s_rng[i].alt); first = false;
+    if (R[i].d <= 0) continue;
+    J("%s[%.4f,%.4f,%ld]", first ? "" : ",", R[i].lat, R[i].lon, (long)R[i].alt); first = false;
   }
   J("]}}}");
   xSemaphoreGive(s_mx);
@@ -962,8 +979,8 @@ void adsb_init(void)
   s_bench = (bench_t *)ps_calloc(BENCH_N, sizeof(bench_t));
   s_tr = (trp_t *)ps_calloc((size_t)AC_MAX * TR_N, sizeof(trp_t));   /* 1 MB; no trails if it fails */
   if (!s_ac || !s_buf || !s_hist || !s_bench) { s_ac = NULL; return; }
-  for (int i = 0; i < ST_N; i++) s_st[i].min = UINT32_MAX;
-  memset(&s_tot, 0, sizeof s_tot); s_tot.sig_peak = -128;
+  for (int i = 0; i < ST_N; i++) s_stv[0][i].min = s_stv[1][i].min = UINT32_MAX;
+  memset(s_totv, 0, sizeof s_totv); s_totv[0].sig_peak = s_totv[1].sig_peak = -128;
   s_mx = xSemaphoreCreateMutex();
   /* stack in PSRAM: internal RAM is only ~10 KB free with streaming running, and lwIP needs it */
   if (xTaskCreatePinnedToCoreWithCaps(http_task, "adsb_http", 8192, NULL, 1, NULL, 0, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS)
