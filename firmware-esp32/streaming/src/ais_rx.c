@@ -17,11 +17,6 @@
  *   PLL: an AIS burst is ~26 ms with only 24 training bits — a PLL that
  *   locks that fast is noisy, five fixed phases cost five HDLC states only.
  */
-/* The firmware is built with -Os; this file is the DSP hot path (dual A+B at
- * 100 ksps took ~51 % of a core at -Os, 2026-11-25). */
-#if defined(__GNUC__) && !defined(__clang__)
-#pragma GCC optimize("O3")
-#endif
 #include "ais_rx.h"
 #include <string.h>
 #include <math.h>
@@ -220,7 +215,13 @@ void ais_rx_feed(ais_rx_t *r, const int16_t *iq, int nsamp)
       else r->p_noise += (r->p_fast - r->p_noise) >> 20;
     }
 
-    r->gate = r->p_noise > 0 && r->p_short > 3 * r->p_noise;
+    /* gate relative to the recent burst level, not to the noise floor: on a
+     * busy channel (a burst in every slot) the floor estimate crept up to the
+     * signal and the gate stayed shut - VSG 2026-11-25, -104 dBm: 70 % PER.
+     * Peak: fast attack, ~20 ms decay; after a burst the noise is >6 dB below it. */
+    if (r->p_short > r->p_peak) r->p_peak += (r->p_short - r->p_peak) >> 1;
+    else r->p_peak -= r->p_peak >> 9;
+    r->gate = r->p_short * 4 > r->p_peak;
     int32_t dr = (int32_t)fi * r->pi + (int32_t)fq * r->pq;
     int32_t di = (int32_t)fq * r->pi - (int32_t)fi * r->pq;
     r->pi = fi; r->pq = fq;

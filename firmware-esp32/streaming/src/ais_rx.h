@@ -46,7 +46,7 @@ typedef struct {
   /* per-packet RF parameters (valid inside the frame callback):
    * level = channel power over the last ~5 ms of the frame, noise = slow
    * floor tracked outside bursts, foff = carrier offset from the slicer mean */
-  int64_t  p_fast, p_noise, p_short;
+  int64_t  p_fast, p_noise, p_short, p_peak;
   uint8_t  gate;                   /* signal present (short power > 3x floor): feeds the slicer mean */
   int32_t  afc_est;                 /* AFC: carrier offset estimate, Q13 angle per sample (at sps_i), Q8 */
   int32_t  afc_step;                /* NCO correction (per input sample) */
