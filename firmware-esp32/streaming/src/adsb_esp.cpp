@@ -39,6 +39,7 @@
 #define HIST_N         1440         /* one record per minute, 24 h */
 #define FIX_KNOWN_MS   60000u       /* a corrected frame is accepted only for an ICAO heard clean this recently */
 #define BEAST_PORT     30005
+#define RTL_IN_PORT    30004        /* Beast input from a PC decoder (RTL-SDR on the same antenna), readsb beast_in style */
 #define BEAST_MAX_CLI  3
 
 typedef struct {
@@ -72,6 +73,7 @@ typedef struct {
   float    noise_sum; uint32_t noise_n;
   float    maxd;                      /* max distance from the reference, m */
   uint32_t fix_rej;                   /* corrected frames dropped (unknown ICAO) */
+  uint32_t msgs_rtl;                  /* of msgs: from the Beast input (RTL-SDR), the rest from the FG23 */
 } st_t;
 
 #define ST_N 17
@@ -101,7 +103,7 @@ static size_t            s_cap = 0, s_len = 0;
 typedef struct { float d, lat, lon; int32_t alt; } rng_t;
 static rng_t             s_rng[RNG_N];
 typedef struct {
-  uint32_t t; uint16_t msgs, pos, ac, acpos, tracks, df17;
+  uint32_t t; uint16_t msgs, pos, ac, acpos, tracks, df17, rtl;
   float sig, peak, noise, maxd, msps; uint32_t trig, pre, ovf;
 } hist_t;
 static hist_t           *s_hist = NULL;
@@ -337,6 +339,9 @@ static void beast_flush(const beast_msg_t *q, uint32_t nq)       /* outside s_mx
 }
 
 /* ---------------------------------------------------------------- feeds */
+static void ingest(st_t *st, const uint8_t *m, uint32_t nb, uint32_t df, uint32_t icao, uint32_t fix, int8_t lvl,
+                   double ts, uint32_t now);
+
 void adsb_feed_ms1(const uint8_t *raw, uint32_t len)
 {
   if (!s_ac || len < 4 || raw[0] != 'M' || raw[1] != 'S' || raw[2] != '1') return;
@@ -359,20 +364,90 @@ void adsb_feed_ms1(const uint8_t *raw, uint32_t len)
     uint32_t th; memcpy(&th, r, 4);
     uint64_t t64 = fg_unwrap(th);
     double ts = s_off_ok ? fg_epoch(t64) : now_epoch();
-    st->msgs++; st->acc[fix > 2 ? 2 : fix]++; s_tot.msgs++; s_tot.acc[fix > 2 ? 2 : fix]++; s_msgs_total++;
-    if (df == 11) { st->df11++; s_tot.df11++; } else { st->df17++; s_tot.df17++; }
-    st->sig_sum += LVL_TO_DBFS(lvl); st->sig_n++; s_tot.sig_sum += LVL_TO_DBFS(lvl); s_tot.sig_n++;
-    if (lvl > st->sig_peak) st->sig_peak = lvl;
-    if (lvl > s_tot.sig_peak) s_tot.sig_peak = lvl;
-    if (LVL_TO_DBFS(lvl) > -3.f) { st->strong++; s_tot.strong++; }
-    ac_t *a = ac_get(icao, now, st);
-    a->last_ms = now; a->msgs++; a->lvl_last = lvl; a->lvl_sum += lvl; a->lvl_n++; a->last_ts = ts;
-    if (!fix) a->clean_ms = now;
-    if (df == 17 && nb == 14) decode_df17(a, m, now, st, ts);
+    ingest(st, m, nb, df, icao, fix, lvl, ts, now);
     if (nbq < 48) beast_build(&bq[nbq++], m, nb, t64, lvl);
   }
   xSemaphoreGive(s_mx);
   beast_flush(bq, nbq);
+}
+
+/* one CRC-good frame into the tables (caller holds s_mx) */
+static void ingest(st_t *st, const uint8_t *m, uint32_t nb, uint32_t df, uint32_t icao, uint32_t fix, int8_t lvl,
+                   double ts, uint32_t now)
+{
+  {
+    st->msgs++; st->acc[fix > 2 ? 2 : fix]++; s_tot.msgs++; s_tot.acc[fix > 2 ? 2 : fix]++; s_msgs_total++;
+    if (df == 11) { st->df11++; s_tot.df11++; } else { st->df17++; s_tot.df17++; }
+    if (lvl != -128) {
+      st->sig_sum += LVL_TO_DBFS(lvl); st->sig_n++; s_tot.sig_sum += LVL_TO_DBFS(lvl); s_tot.sig_n++;
+      if (lvl > st->sig_peak) st->sig_peak = lvl;
+      if (lvl > s_tot.sig_peak) s_tot.sig_peak = lvl;
+      if (LVL_TO_DBFS(lvl) > -3.f) { st->strong++; s_tot.strong++; }
+    }
+    ac_t *a = ac_get(icao, now, st);
+    a->last_ms = now; a->msgs++; a->lvl_last = lvl; a->lvl_sum += lvl; a->lvl_n++; a->last_ts = ts;
+    if (!fix) a->clean_ms = now;
+    if (df == 17 && nb == 14) decode_df17(a, m, now, st, ts);
+  }
+}
+
+/* ---------------------------------------------------------------- RTL-SDR (Beast input) */
+/* A PC decoder on the same antenna (tools/rtl_feed.py: rtl_adsb or dump1090 -> Beast)
+ * connects here; its frames go into the same tables, counted as msgs_rtl.
+ * Hot-swap: the antenna is moved between the FG23 and the RTL-SDR; whichever
+ * hears the traffic fills the map and the graphs. The feeder sends only
+ * CRC-good DF11/17/18. */
+static WiFiServer *s_rtl_srv = NULL;
+static WiFiClient  s_rtl_cli;
+static uint32_t    s_rtl_frames = 0, s_rtl_last_ms = 0, s_rtl_conn = 0;
+static uint8_t     s_rb[64]; static int s_rn = -1; static bool s_resc = false;
+static void rtl_frame(const uint8_t *f, int n)
+{
+  /* f: type, 6 B timestamp, 1 B signal, message */
+  int nb = (f[0] == '3') ? 14 : (f[0] == '2') ? 7 : 0;
+  if (!nb || n != 1 + 6 + 1 + nb) return;
+  const uint8_t *m = f + 8;
+  uint32_t df = m[0] >> 3, icao = ((uint32_t)m[1] << 16) | ((uint32_t)m[2] << 8) | m[3];
+  if (!(df == 11 || df == 17 || df == 18)) return;
+  /* Beast signal = amplitude; 0 = unknown (rtl_adsb gives none): no signal statistics then */
+  int l = -128;
+  if (f[7]) { float db = 20.0f * log10f(f[7] / 255.0f); l = (int)lrintf(db + 30.0f); if (l < -127) l = -127; if (l > 127) l = 127; }
+  uint32_t now = millis();
+  xSemaphoreTake(s_mx, portMAX_DELAY);
+  st_t *st = st_cur();
+  ingest(st, m, nb, df == 18 ? 17 : df, icao, 0, (int8_t)l, now_epoch(), now);
+  st->msgs_rtl++; s_tot.msgs_rtl++;
+  xSemaphoreGive(s_mx);
+  s_rtl_frames++; s_rtl_last_ms = now;
+}
+static void rtl_service(void)
+{
+  if (!s_rtl_srv) {
+    if (WiFi.status() != WL_CONNECTED || WiFi.getMode() == WIFI_AP) return;
+    s_rtl_srv = new WiFiServer(RTL_IN_PORT); s_rtl_srv->begin(); s_rtl_srv->setNoDelay(true);
+  }
+  if (s_rtl_srv->hasClient()) {                     /* the newest feeder wins (hot-swap, restarts) */
+    if (s_rtl_cli) s_rtl_cli.stop();
+    s_rtl_cli = s_rtl_srv->available(); s_rtl_cli.setNoDelay(true); s_rtl_conn++; s_rn = -1;
+  }
+  if (!s_rtl_cli || !s_rtl_cli.connected()) return;
+  uint8_t buf[256];
+  for (int guard = 0; guard < 16; guard++) {
+    int k = s_rtl_cli.available(); if (k <= 0) break;
+    if (k > (int)sizeof buf) k = sizeof buf;
+    k = s_rtl_cli.read(buf, k); if (k <= 0) break;
+    for (int i = 0; i < k; i++) {
+      uint8_t c = buf[i];
+      if (s_resc) {
+        s_resc = false;
+        if (c != 0x1A) { s_rn = 0; s_rb[s_rn++] = c; continue; }      /* start of a new frame */
+      } else if (c == 0x1A) { s_resc = true; if (s_rn > 0 && s_rn < 64) { } continue; }
+      if (s_rn < 0) continue;
+      if (s_rn < (int)sizeof s_rb) s_rb[s_rn++] = c;
+      int need = (s_rb[0] == '3') ? 1 + 6 + 1 + 14 : (s_rb[0] == '2') ? 1 + 6 + 1 + 7 : 1 + 6 + 1 + 2;
+      if (s_rn == need) { rtl_frame(s_rb, s_rn); s_rn = -1; }
+    }
+  }
 }
 
 void adsb_feed_dbg(const aispkt_dbg_t *d)
@@ -522,6 +597,13 @@ static void h_stats(void)
   j_period("last5min", 5, ep, cur); J(",");
   j_period("last15min", 15, ep, cur); J(",");
   j_period("total", 0, ep, cur);
+  { const st_t *b = st_cur();
+    J(",\"sources\":{\"rtl_in\":{\"port\":%d,\"connected\":%s,\"connections\":%lu,\"frames\":%lu,\"last_s\":%.1f},"
+      "\"this_minute\":{\"fg23\":%lu,\"rtl\":%lu},\"total\":{\"fg23\":%lu,\"rtl\":%lu}}",
+      RTL_IN_PORT, (s_rtl_cli && s_rtl_cli.connected()) ? "true" : "false", (unsigned long)s_rtl_conn,
+      (unsigned long)s_rtl_frames, s_rtl_last_ms ? (now - s_rtl_last_ms) / 1000.0 : -1.0,
+      (unsigned long)(b->msgs - b->msgs_rtl), (unsigned long)b->msgs_rtl,
+      (unsigned long)(s_tot.msgs - s_tot.msgs_rtl), (unsigned long)s_tot.msgs_rtl); }
   J("}");
   xSemaphoreGive(s_mx);
   send_json();
@@ -538,7 +620,7 @@ static void hist_tick(void)
   hist_t h; memset(&h, 0, sizeof h);
   h.t = (uint32_t)now_epoch(); h.sig = h.peak = h.noise = NAN;
   if (b->min == m) {
-    h.msgs = (uint16_t)b->msgs; h.pos = (uint16_t)b->pos; h.tracks = (uint16_t)b->newac; h.df17 = (uint16_t)b->df17;
+    h.msgs = (uint16_t)b->msgs; h.rtl = (uint16_t)b->msgs_rtl; h.pos = (uint16_t)b->pos; h.tracks = (uint16_t)b->newac; h.df17 = (uint16_t)b->df17;
     if (b->sig_n) { h.sig = b->sig_sum / b->sig_n; h.peak = LVL_TO_DBFS(b->sig_peak); }
     if (b->noise_n) h.noise = b->noise_sum / b->noise_n;
     h.maxd = b->maxd; h.msps = (float)(b->samples / 60e6); h.trig = b->trig; h.pre = b->pre; h.ovf = b->ovf;
@@ -564,8 +646,8 @@ static void h_history(void)
   uint32_t first = s_hw - n;
   s_len = 0;
   J("{\"now\":%.1f,\"step\":60,\"n\":%lu", now_epoch(), (unsigned long)n);
-  const char *names[] = { "t", "msgs", "pos", "ac", "acpos", "tracks", "df17", "sig", "peak", "noise", "range_km", "msps", "trig", "pre", "ovf" };
-  for (int f = 0; f < 15; f++) {
+  const char *names[] = { "t", "msgs", "pos", "ac", "acpos", "tracks", "df17", "sig", "peak", "noise", "range_km", "msps", "trig", "pre", "ovf", "msgs_rtl" };
+  for (int f = 0; f < 16; f++) {
     J(",\"%s\":[", names[f]);
     for (uint32_t i = 0; i < n; i++) {
       const hist_t *h = &s_hist[(first + i) % HIST_N];
@@ -586,6 +668,7 @@ static void h_history(void)
         case 12: J("%s%lu", c, (unsigned long)h->trig); break;
         case 13: J("%s%lu", c, (unsigned long)h->pre); break;
         case 14: J("%s%lu", c, (unsigned long)h->ovf); break;
+        case 15: J("%s%u", c, h->rtl); break;
       }
     }
     J("]");
@@ -729,6 +812,7 @@ static void http_task(void *arg)
       } else { vTaskDelay(pdMS_TO_TICKS(1000)); continue; }
     }
     s_srv->handleClient();
+    rtl_service();
     if (xSemaphoreTake(s_mx, pdMS_TO_TICKS(1000)) == pdTRUE) { hist_tick(); xSemaphoreGive(s_mx); }
     static uint32_t t_diag = 0, low = 0;
     if (millis() - t_diag >= 10000) {

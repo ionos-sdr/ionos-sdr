@@ -1434,8 +1434,14 @@ static uint32_t oled_khz = 0;
  * within 1 s only once. The repeat is sent from the loop (cmdlink_tick). */
 static char     s_cmd_repeat[48];
 static uint32_t s_cmd_repeat_ms = 0;
+/* the stream start line, re-sent once if no blocks follow (menu_decim_start_tick);
+ * any OTHER line to the FG23 cancels that: after an 'A1' (on-chip AIS / ADS-B)
+ * the stream is stopped on purpose, and a re-sent 'i4' threw the FG23 out of
+ * that mode (ID1, 2026-11-25) */
+static char s_decim_verify[16];
 static void cmdlink_send(const char *s)
 {
+  if (s_decim_verify[0] && strcmp(s, s_decim_verify) != 0) s_decim_verify[0] = 0;
 #if CMDLINK_ENABLE
   /* NO flush(): it would block until the last bit is out (~1 ms), stalling
    * the main loop meanwhile. Buffered write is enough - the FG23 does not
@@ -2586,7 +2592,6 @@ static void menu_decim_tick(uint32_t now)
   DIAG.printf("MENU: decimation -> R=%ld (%s)\n", (long)s_decim_pending, running ? "restart" : "start");
   s_decim_pending = 0;
 }
-static char     s_decim_verify[16];       /* the start line, re-sent once if no blocks follow */
 static uint32_t s_decim_verify_ms = 0;
 static void menu_decim_start_tick(uint32_t now)
 {
