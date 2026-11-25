@@ -67,7 +67,7 @@ typedef struct {
 #define TR_STEP_S   4                 /* at most one point per 4 s */
 typedef struct { float lat, lon; int32_t alt; uint32_t t; } trp_t;
 static trp_t   *s_tr = NULL;          /* AC_MAX * TR_N */
-static uint16_t s_trn[AC_MAX], s_trw[AC_MAX];
+static uint16_t *s_trn = NULL, *s_trw = NULL;   /* AC_MAX each, PSRAM (internal RAM feeds lwIP) */
 
 typedef struct {
   uint32_t min;                       /* millis()/60000 of this bucket, UINT32_MAX = empty */
@@ -87,7 +87,7 @@ static uint32_t          s_nac = 0;
 static SemaphoreHandle_t s_mx = NULL;
 /* statistics PER RECEIVER: [0] FG23 on-chip, [1] RTL-SDR (Beast input). The two
  * benchmarks share no table, no counter, no CPR state and no range outline. */
-static st_t              s_stv[2][ST_N];
+static st_t            (*s_stv)[ST_N] = NULL;   /* [2][ST_N], PSRAM: internal RAM is what lwIP sends from */
 static st_t              s_totv[2];
 #define s_st  s_stv[0]
 #define s_tot s_totv[0]
@@ -111,7 +111,7 @@ static char             *s_buf = NULL;
 static size_t            s_cap = 0, s_len = 0;
 
 typedef struct { float d, lat, lon; int32_t alt; } rng_t;
-static rng_t             s_rngv[2][RNG_N];
+static rng_t           (*s_rngv)[RNG_N] = NULL; /* [2][RNG_N], PSRAM */
 typedef struct {
   uint32_t t; uint16_t msgs, pos, ac, acpos, tracks, df17, rtl, ac_rx[2], acpos_rx[2];
   float sig, peak, noise, maxd, msps; uint32_t trig, pre, ovf;
@@ -257,7 +257,7 @@ static ac_t *ac_get(uint32_t icao, int src, uint32_t now, st_t *st)
   }
   ac_t *a = (s_nac < AC_MAX) ? &s_ac[s_nac++] : old;      /* full: reuse the stalest */
   memset(a, 0, sizeof *a);
-  s_trn[a - s_ac] = 0; s_trw[a - s_ac] = 0;
+  if (s_trn) { s_trn[a - s_ac] = 0; s_trw[a - s_ac] = 0; }
   a->icao = icao; a->first_ms = now; a->src = (uint8_t)src;
   a->nic = a->nacp = a->sil = a->ver = -1;
   st->newac++; s_totv[src].newac++;
@@ -978,7 +978,12 @@ void adsb_init(void)
   s_hist = (hist_t *)ps_calloc(HIST_N, sizeof(hist_t));
   s_bench = (bench_t *)ps_calloc(BENCH_N, sizeof(bench_t));
   s_tr = (trp_t *)ps_calloc((size_t)AC_MAX * TR_N, sizeof(trp_t));   /* 1 MB; no trails if it fails */
-  if (!s_ac || !s_buf || !s_hist || !s_bench) { s_ac = NULL; return; }
+  s_trn = (uint16_t *)ps_calloc(AC_MAX, sizeof(uint16_t));
+  s_trw = (uint16_t *)ps_calloc(AC_MAX, sizeof(uint16_t));
+  s_stv = (st_t (*)[ST_N])ps_calloc(2 * ST_N, sizeof(st_t));
+  s_rngv = (rng_t (*)[RNG_N])ps_calloc(2 * RNG_N, sizeof(rng_t));
+  if (!s_trn || !s_trw) s_tr = NULL;
+  if (!s_ac || !s_buf || !s_hist || !s_bench || !s_stv || !s_rngv) { s_ac = NULL; return; }
   for (int i = 0; i < ST_N; i++) s_stv[0][i].min = s_stv[1][i].min = UINT32_MAX;
   memset(s_totv, 0, sizeof s_totv); s_totv[0].sig_peak = s_totv[1].sig_peak = -128;
   s_mx = xSemaphoreCreateMutex();
