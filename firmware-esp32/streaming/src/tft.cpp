@@ -16,6 +16,8 @@
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "esp_heap_caps.h"
+#include <math.h>
 
 #ifndef TFT_OUT
 #define TFT_OUT Serial0
@@ -349,12 +351,17 @@ static void wait_te(void)
     xSemaphoreTake(s_te_sem, pdMS_TO_TICKS(50));    /* the next V-blank     */
 }
 
+/* on-chip view (bottom of the file) */
+static volatile bool s_vw_pending;
+static void view_render(void);
+
 /* ===================== display task ==================================== */
 static void tft_task(void *arg)
 {
     (void)arg;
     for (;;) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);   /* BLOCKS, no spinning */
+        if (s_vw_pending) { if (s_test) view_render(); s_vw_pending = false; }
         if (!s_row_full) continue;
         if (s_test) { s_row_full = false; continue; }  /* test pattern on screen */
 
@@ -442,7 +449,7 @@ void tft_init(void)
                        n > 5 ? "ALIVE, using it" : "NOT ARRIVING - check the wire");
     }
 
-    xTaskCreatePinnedToCore(tft_task, "tft", 4096, NULL, 1, &s_task, 0);
+    xTaskCreatePinnedToCore(tft_task, "tft", 5120, NULL, 1, &s_task, 0);
     TFT_OUT.printf("TFT: ILI9341 alive (SPI2, 40 MHz, %dx%d, header %d px, "
                    "waterfall %d rows)\n", W, H, HDR_H, VSA);
 }
@@ -458,8 +465,22 @@ void tft_set_span(uint32_t center_hz, uint32_t span_hz)
     s_scale_dirty = true;
 }
 
+static char     s_st_val[16] = "", s_st_line[44] = "";
+static uint16_t s_st_col = TFT_DARKGREY, s_st_line_col = TFT_WHITE;
+
+static void draw_state_line(void)
+{
+    lcd.fillRect(0, 39, W, 10, TFT_BLACK);
+    lcd.setTextSize(1);
+    lcd.setTextColor(s_st_line_col, TFT_BLACK);
+    int x = (W - 6 * (int)strlen(s_st_line)) / 2; if (x < 0) x = 0;
+    lcd.setCursor(x, 40);
+    lcd.print(s_st_line);
+}
+
 static void draw_scale(void)
 {
+    if (s_st_line[0]) return;               /* on-chip: the state line owns the row */
     if (!s_scale_dirty || !s_span_hz) return;
     s_scale_dirty = false;
 
@@ -508,9 +529,13 @@ void tft_show(const tft_stat_t *s)
     char b[32];
 
     lcd_lock();
-    uint16_t allapot = (s->blokk_s > 100.0f) ? TFT_GREEN : TFT_RED;
-    snprintf(b, sizeof b, "%.0f blk/s", s->blokk_s);
-    mezo(6, 20, "RADIO", b, allapot);
+    if (s_st_val[0]) {
+        mezo(6, 20, "FG23", s_st_val, s_st_col);      /* radio_sm state, see tft_set_state */
+    } else {
+        uint16_t allapot = (s->blokk_s > 100.0f) ? TFT_GREEN : TFT_RED;
+        snprintf(b, sizeof b, "%.0f blk/s", s->blokk_s);
+        mezo(6, 20, "RADIO", b, allapot);
+    }
 
     snprintf(b, sizeof b, "%d dBm", s->rssi_dbm);
     mezo(78, 20, "SIGNAL", b, TFT_YELLOW);
@@ -546,5 +571,108 @@ void tft_set_page(const char *page, const char *mode)
     lcd.setTextColor(TFT_CYAN, TFT_BLACK);
     lcd.setCursor(150, 11);
     lcd.print(b);
+    lcd_unlock();
+}
+
+void tft_set_state(const char *val, uint16_t col, const char *line, uint16_t line_col)
+{
+    if (!s_ok) return;
+    bool had_line = s_st_line[0] != 0;
+    snprintf(s_st_val, sizeof s_st_val, "%-11.11s", val ? val : "");
+    s_st_col = col;
+    snprintf(s_st_line, sizeof s_st_line, "%.40s", line ? line : "");
+    s_st_line_col = line_col;
+    lcd_lock();
+    mezo(6, 20, "FG23", s_st_val, s_st_col);
+    if (s_st_line[0]) draw_state_line();
+    else if (had_line) { lcd.fillRect(0, 39, W, 10, TFT_BLACK); s_scale_dirty = true; draw_scale(); }
+    lcd_unlock();
+}
+
+/* ===================== on-chip view ===================================== */
+static tft_view_t *s_vw = NULL;           /* hand-over copy (PSRAM) */
+/* s_vw_pending: defined above tft_task */
+static LGFX_Sprite *s_spr = NULL;
+
+void tft_view_show(const tft_view_t *v)
+{
+    if (!s_ok || !v || !s_task) return;
+    if (!s_vw) s_vw = (tft_view_t *)heap_caps_malloc(sizeof(tft_view_t), MALLOC_CAP_SPIRAM);
+    if (!s_vw || s_vw_pending) return;     /* the previous one is still being drawn: skip */
+    memcpy(s_vw, v, sizeof *v);
+    s_vw_pending = true;
+    xTaskNotifyGive(s_task);
+}
+
+static uint16_t alt_col(const tv_ac_t *a)
+{
+    if (!a->alt_ok) return TFT_LIGHTGREY;
+    if (a->alt < 10000) return TFT_GREEN;
+    if (a->alt < 25000) return TFT_YELLOW;
+    if (a->alt < 35000) return TFT_ORANGE;
+    return TFT_MAGENTA;
+}
+
+static void view_render(void)
+{
+    const tft_view_t *v = s_vw;
+    if (!s_spr) {
+        s_spr = new LGFX_Sprite(&lcd);
+        s_spr->setPsram(true);
+        s_spr->setColorDepth(16);
+        if (!s_spr->createSprite(W, VSA)) { delete s_spr; s_spr = NULL; TFT_OUT.println("TFT: view sprite alloc FAILED"); return; }
+        s_spr->setTextWrap(false);
+    }
+    LGFX_Sprite &g = *s_spr;
+    g.fillSprite(TFT_BLACK);
+    g.setTextSize(1);
+    g.setTextColor(v->title_c, TFT_BLACK);
+    g.setCursor(0, 2);
+    g.print(v->title);
+    int y0 = 14;
+    if (v->kind == 1) {
+        const int cx = W / 2, cy = 12 + 75, R = 72;
+        float rk = v->range_km ? (float)v->range_km : 100.0f;
+        g.drawCircle(cx, cy, R, TFT_DARKGREY);
+        g.drawCircle(cx, cy, R / 2, 0x39E7);
+        g.drawFastHLine(cx - R, cy, 2 * R, 0x2104);
+        g.drawFastVLine(cx, cy - R, 2 * R, 0x2104);
+        g.setTextColor(TFT_DARKGREY, TFT_BLACK);
+        char b[16];
+        snprintf(b, sizeof b, "%u km", (unsigned)v->range_km); g.setCursor(cx + R - 30, cy + R - 8); g.print(b);
+        snprintf(b, sizeof b, "%u", (unsigned)(v->range_km / 2)); g.setCursor(cx + R / 2 + 2, cy + 2); g.print(b);
+        g.setCursor(cx - 2, cy - R - 0); g.print("N");
+        g.fillCircle(cx, cy, 2, TFT_WHITE);                       /* the station */
+        for (int i = 0; i < v->nac; i++) {
+            const tv_ac_t *a = &v->ac[i];
+            float px = cx + (a->x / 10.0f) / rk * R, py = cy - (a->y / 10.0f) / rk * R;
+            float dx = px - cx, dy = py - cy;
+            if (dx * dx + dy * dy > (R + 3) * (R + 3)) continue;
+            uint16_t c = alt_col(a);
+            if (a->trk >= 0) {
+                float t = a->trk * (float)M_PI / 180.0f;
+                g.drawLine((int)px, (int)py, (int)(px + 9 * sinf(t)), (int)(py - 9 * cosf(t)), c);
+            }
+            if (a->rx & 1) g.fillRect((int)px - 2, (int)py - 2, 5, 5, c);      /* FG23 heard it: filled */
+            else           g.drawRect((int)px - 2, (int)py - 2, 5, 5, c);      /* RTL-SDR only: hollow */
+            g.setTextColor(c, TFT_BLACK);
+            int lx = (int)px + 4; if (lx > W - 42) lx = (int)px - 46;
+            g.setCursor(lx, (int)py - 3);
+            g.print(a->lab);
+        }
+        g.setTextColor(TFT_DARKGREY, TFT_BLACK);
+        g.setCursor(0, 12 + 150 - 8); g.print("#FG23 oRTL");
+        y0 = 12 + 150 + 3;
+        g.drawFastHLine(0, y0 - 2, W, TFT_DARKGREY);
+    }
+    for (int i = 0; i < v->nln; i++) {
+        int y = y0 + 10 * i;
+        if (y > VSA - 9) break;
+        g.setTextColor(v->ln[i].c, TFT_BLACK);
+        g.setCursor(0, y);
+        g.print(v->ln[i].s);
+    }
+    lcd_lock();
+    if (s_test) s_spr->pushSprite(0, TFA);         /* only while the overlay is ours (VSP parked) */
     lcd_unlock();
 }

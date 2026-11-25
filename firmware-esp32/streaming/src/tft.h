@@ -82,6 +82,28 @@ bool tft_overlay_on(void);
 void tft_fill(int x, int y, int w, int h, uint16_t color);
 void tft_text(int x, int y, int size, uint16_t fg, uint16_t bg, const char *s);
 
+/* ---- FG23 state (radio_sm) in the header ----
+ * The first header field becomes "FG23 <val>" in <col>; a non-empty <line>
+ * replaces the frequency scale row (y 39..48) - in the on-chip modes the
+ * waterfall's band scale means nothing. NULL / "" = scale back. */
+void tft_set_state(const char *val, uint16_t col, const char *line, uint16_t line_col);
+
+/* ---- on-chip view: replaces the waterfall while the FG23 decodes itself ----
+ * Rendered into a PSRAM sprite by the display task and pushed in one go
+ * (no flicker); the caller owns the overlay (tft_overlay(true) first). */
+#define TV_AC 48
+#define TV_LN 25
+typedef struct { int16_t x, y; int32_t alt; int16_t trk; uint8_t rx; bool alt_ok; char lab[9]; } tv_ac_t;  /* x,y: 0.1 km E/N */
+typedef struct { char s[41]; uint16_t c; } tv_ln_t;
+typedef struct {
+    uint8_t  kind;               /* 1 = radar + list (ADS-B), 2 = list only (AIS) */
+    char     title[41]; uint16_t title_c;
+    uint16_t range_km;
+    uint8_t  nac;  tv_ac_t ac[TV_AC];
+    uint8_t  nln;  tv_ln_t ln[TV_LN];
+} tft_view_t;
+void tft_view_show(const tft_view_t *v);
+
 #ifdef __cplusplus
 }
 #endif

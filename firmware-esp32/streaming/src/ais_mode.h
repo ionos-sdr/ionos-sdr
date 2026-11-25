@@ -22,6 +22,11 @@ uint32_t    ais_mode_ships(void);    /* distinct MMSIs seen */
 uint32_t    ais_mode_tune_khz(void); /* the I/Q path's centre for the current setup */
 int32_t     ais_mode_decim(void);    /* the FG23 stream decimation it needs (R) */
 void        ais_iq_cmd(const char *arg);   /* AISIQ[1|2|H<n>|S<hz>] */
+/* recent messages for the TFT's on-chip view, newest first */
+typedef struct { uint32_t ms; long t; char chan; bool hw; float dbm, foff; char txt[48]; } ais_msg_view_t;
+int         ais_recent(ais_msg_view_t *o, int max);
+float       ais_hw_noise_dbm(void);      /* FG23 idle-channel RSSI, NAN = n/a */
+uint32_t    ais_hw_frames(void);
 
 /* ---- EXPERIMENTAL (branch exp/fg23-ais-onchip): AIS decoded on the FG23 ----
  * The FG23 sends AIS1 blocks (aispkt.h) instead of I/Q while 'A1' runs. The

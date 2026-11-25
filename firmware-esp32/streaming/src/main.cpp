@@ -309,6 +309,7 @@
 #include "cw_rx.h"          /* CW Morse decoder */
 #include "ais_mode.h"       /* AIS receiver, NMEA on TCP 10110 */
 #include "adsb_esp.h"       /* ADS-B: aircraft table, tar1090/readsb JSON on :8080 */
+#include "radio_sm.h"       /* the FG23's state from its blocks (docs/radio-state-machine.md) */
 
 /* ---- Menu and button. The Heltec V3 PRG button (GPIO0) pages through the
  * screens and switches the demodulators. Details: ui.h */
@@ -1086,6 +1087,8 @@ static void oled_header(const char *title)
 {
   ui_page_t m = ui_mode();
   const char *tag = (m == UI_PAGE_STATUS) ? "---" : ui_page_name(m);
+  rs_state_t rst = rs_get()->st;
+  if (rst != RS_IQ && rst != RS_BOOT) tag = rs_name(rst);   /* the FG23's real state wins */
 
   /* The indicator is RIGHT-aligned by its actual pixel width - not estimated
    * from the character count. 5x8 is needed so that longer names (e.g.
@@ -1368,10 +1371,46 @@ static void oled_page_todo(ui_page_t p)
   }
 }
 
+/* ---- FG23 on-chip (radio_sm): no I/Q, so the RF/SDR/AIS pages would show
+ * stale stream figures - show what the FG23 actually does instead ---- */
+static void oled_page_onchip(void)
+{
+  const rs_info_t *r = rs_get();
+  char buf[48];
+  bool adsb = (r->st == RS_ADSB_HW) || (r->target == RS_ADSB_HW) || r->ac_ch == 4000u;
+  oled_header(adsb ? "FG23 ADS-B chip" : "FG23 AIS chip");
+  u8g2.setFont(u8g2_font_7x13B_tr);
+  uint32_t fk = rs_freq_khz();
+  if (r->st == RS_ADSB_HW || r->st == RS_AIS_HW) snprintf(buf, sizeof buf, "%lu.%03lu MHz", (unsigned long)(fk / 1000u), (unsigned long)(fk % 1000u));
+  else snprintf(buf, sizeof buf, "%s", rs_name(r->st));
+  u8g2.drawStr(0, 24, buf);
+  if (adsb) {
+    snprintf(buf, sizeof buf, "AC:%lu thr:%d", (unsigned long)adsb_aircraft_count(), r->am_thr > 0 ? r->am_thr : 0);
+    oled_fit(0, 35, buf);
+    adsb_frm_view_t f;
+    if (adsb_recent(&f, 1)) { snprintf(buf, sizeof buf, "%06lX %s", (unsigned long)f.icao, f.txt); oled_fit(0, 46, buf); }
+  } else {
+    snprintf(buf, sizeof buf, "RX:%lu ship:%lu nf:%d", (unsigned long)ais_hw_frames(), (unsigned long)ais_mode_ships(), r->rf_dbm);
+    oled_fit(0, 35, buf);
+    const char *last = ais_mode_last();
+    snprintf(buf, sizeof buf, "%.21s", last[0] ? last : "-- waiting --");
+    oled_fit(0, 46, buf);
+  }
+  snprintf(buf, sizeof buf, "%s", r->why);
+  oled_fit(0, 57, buf);
+}
+
 static void oled_draw(void)
 {
   if (!oled_ok) return;
   u8g2.clearBuffer();
+
+  ui_page_t pg = ui_page();
+  if (rs_iq_locked() && (pg == UI_PAGE_STATUS || pg == UI_PAGE_RF || pg == UI_PAGE_SDR || pg == UI_PAGE_AIS)) {
+    oled_page_onchip();
+    u8g2.sendBuffer();
+    return;
+  }
 
   switch (ui_page()) {
     case UI_PAGE_RF:   oled_page_rf();   break;
@@ -1442,6 +1481,7 @@ static char s_decim_verify[16];
 static void menu_decim_cancel(void);
 static void cmdlink_send(const char *s)
 {
+  rs_cmd(s);                         /* radio_sm: every line opens a SWITCH window / updates the target */
   if (s_decim_verify[0] && strcmp(s, s_decim_verify) != 0) s_decim_verify[0] = 0;
 #if CMDLINK_ENABLE
   /* NO flush(): it would block until the last bit is out (~1 ms), stalling
@@ -2264,6 +2304,7 @@ static void process(const uint8_t *b, size_t nbytes)
     if (L->hdr.nbin >= 1 && L->hdr.nbin <= SPECLINE_MAX_BINS) {
       st_specline++;
       st_specline_ms = millis();
+      rs_blk_scan(L->hdr.f_center_hz, L->span_hz);
       st_specline_cf_hz   = L->hdr.f_center_hz;
       st_specline_span_hz = L->span_hz;
 #if SPY_ENABLE
@@ -2295,11 +2336,20 @@ static void process(const uint8_t *b, size_t nbytes)
    * ('A1'). Same block size, magic AIS1; no I/Q, no sequence bookkeeping. */
   if (h->magic == AISPKT_MAGIC) {
     st_aispkt++;
+    {
+      const aispkt_blk_t *A = (const aispkt_blk_t *)b;
+      aispkt_dbg_t D; memcpy(&D, b + AISPKT_DBG_OFS, sizeof D);
+      rs_blk_hw(A->hdr.f_center_hz, (D.opts & 0x80u) != 0, A->st.noise_qdbm / 4);
+    }
     ais_mode_hwblk(b);
     return;
   }
 
   if (h->magic != IQ_BLK_MAGIC) { st_badmagic++; return; }
+  {
+    int rf = (int)((h->fs_in_hz >> 20) & 0xFFFu); if (rf & 0x800) rf -= 0x1000;
+    rs_blk_iq(h->decim, h->fs_in_hz & 0x000FFFFFu, rf);
+  }
 
   /* --- diagnostics: what happened to the order (unchanged metrics) --- */
   if (have_seq) {
@@ -2472,6 +2522,7 @@ static void console_dispatch(const char *cmd)
     return;
   }
   if (!strcmp(cmd, "AISDBG")) { ais_hw_dbg_toggle(); return; }
+  if (!strcmp(cmd, "RSM")) { rs_log([](const char *l) { DIAG.println(l); }); return; }
   if (!strncmp(cmd, "AISIQ", 5)) {               /* I/Q AIS setup: AISIQ1 single A, AISIQ2 dual A+B, H<n>, S<hz> */
     if ((cmd[5] == '1' || cmd[5] == '2') && ui_mode() != UI_PAGE_AIS) { ais_iq_cmd(cmd + 5); ui_set_mode(UI_PAGE_AIS); return; }
     ais_iq_cmd(cmd + 5);
@@ -2584,6 +2635,9 @@ static void menu_decim_cancel(void)
 static void menu_decim_tick(uint32_t now)
 {
   if (!s_decim_pending) return;
+  /* radio_sm: the FG23 is on-chip (or being put there) - an 'i'/'i<R>' now
+   * would throw it out (ID1 2026-11-25). Keep the request until it is back in IQ. */
+  if (rs_iq_locked()) return;
   /* running = blocks are arriving. The old extra "< 2500 ms since the request"
    * made every request look like a running stream: 'i' then STARTED a stopped
    * stream and the 'i<R>' 150 ms later stopped it again (2026-11-25, AISIQ2). */
@@ -2604,6 +2658,7 @@ static void menu_decim_tick(uint32_t now)
 static uint32_t s_decim_verify_ms = 0;
 static void menu_decim_start_tick(uint32_t now)
 {
+  if (rs_iq_locked()) { s_decim_start[0] = 0; s_decim_start_ms = 0; s_decim_verify[0] = 0; return; }
   /* 600 ms, not 150: with 150 the stream often stayed stopped after a
    * restart (R=8 -> 4, 2026-11-25) - the FG23 was still tearing the stream down */
   if (s_decim_start[0] && s_decim_start_ms && now - s_decim_start_ms >= 600u) {
@@ -2619,6 +2674,163 @@ static void menu_decim_start_tick(uint32_t now)
       DIAG.printf("MENU: stream did not start, '%s' again\n", s_decim_verify);
     }
     s_decim_verify[0] = 0;
+  }
+}
+
+/* ===================================================================
+ *        FG23 STATE ON THE DISPLAYS (radio_sm.h, docs/radio-state-machine.md)
+ * ===================================================================
+ * Header: the first field is "FG23 <state>", in the on-chip modes the scale
+ * row carries the frequency and the decoder setup. Body: while the FG23
+ * decodes itself there is no I/Q, so no waterfall - the panel shows an
+ * aircraft radar + the newest frames (ADS-B) or the newest AIS messages. */
+static bool s_view_own = false;
+
+static void rs_state_text(char *val, size_t nv, char *line, size_t nl)
+{
+  const rs_info_t *r = rs_get();
+  uint32_t now = millis();
+  line[0] = 0;
+  switch (r->st) {
+    case RS_IQ:
+      snprintf(val, nv, "IQ %luk", (unsigned long)(r->iq_sps / 1000u));
+      break;
+    case RS_SCAN:
+      snprintf(val, nv, "SCAN");
+      break;
+    case RS_AIS_HW:
+      snprintf(val, nv, "AIS chip %c", r->hw_chan ? r->hw_chan : '?');
+      snprintf(line, nl, "%.3f MHz  AIS on-chip ch %c  nf %d dBm",
+               r->hw_f_hz / 1e6, r->hw_chan ? r->hw_chan : '?', r->rf_dbm);
+      break;
+    case RS_ADSB_HW:
+      snprintf(val, nv, "ADS-B chip");
+      if (r->hw_f_hz) snprintf(line, nl, "%.3f MHz  Mode S on-chip  AM thr %d",
+                               r->hw_f_hz / 1e6, r->am_thr > 0 ? r->am_thr : 0);
+      else snprintf(line, nl, "Mode S on-chip, PHY ch %lu", (unsigned long)r->ac_ch);
+      break;
+    case RS_SWITCH:
+      snprintf(val, nv, ">%s", rs_name(r->target));
+      snprintf(line, nl, "-> %s (%s) %lu s", rs_name(r->target), r->last_cmd,
+               (unsigned long)((now - r->since_ms) / 1000u));
+      break;
+    case RS_SILENT:
+      snprintf(val, nv, "SILENT");
+      snprintf(line, nl, "no blocks %lu s, last %s, cmd %s",
+               (unsigned long)((now - r->last_blk_ms) / 1000u), rs_name(r->prev), r->last_cmd);
+      break;
+    default:
+      snprintf(val, nv, "BOOT");
+      snprintf(line, nl, "waiting for the FG23");
+      break;
+  }
+}
+
+static void hms(char *o, size_t n, long t, uint32_t ms, uint32_t now)
+{
+  if (t > 0) { struct tm tm; time_t tt = t; gmtime_r(&tt, &tm); snprintf(o, n, "%02d:%02d:%02d", tm.tm_hour, tm.tm_min, tm.tm_sec); }
+  else snprintf(o, n, "-%6lus", (unsigned long)((now - ms) / 1000u));
+}
+
+static tft_view_t     *s_tv = NULL;
+static adsb_ac_view_t *s_acv = NULL;
+
+static void view_adsb(uint32_t now)
+{
+  const rs_info_t *r = rs_get();
+  tft_view_t *v = s_tv;
+  memset(v, 0, sizeof *v);
+  v->kind = 1;
+  int n = adsb_ac_list(s_acv, TV_AC);
+  int npos = 0; float maxd = 0;
+  for (int i = 0; i < n; i++) {
+    const adsb_ac_view_t *a = &s_acv[i];
+    if (!a->pos_ok) continue;
+    float d = sqrtf(a->dx_km * a->dx_km + a->dy_km * a->dy_km);
+    if (d > maxd) maxd = d;
+    tv_ac_t *t = &v->ac[v->nac++];
+    t->x = (int16_t)lrintf(a->dx_km * 10); t->y = (int16_t)lrintf(a->dy_km * 10);
+    t->alt = a->alt; t->alt_ok = a->alt_ok; t->trk = a->trk_ok ? (int16_t)a->trk : -1; t->rx = a->rx;
+    if (a->flight[0] && a->flight[0] != ' ') { snprintf(t->lab, sizeof t->lab, "%.8s", a->flight); for (int k = 7; k >= 0 && t->lab[k] == ' '; k--) t->lab[k] = 0; }
+    else snprintf(t->lab, sizeof t->lab, "%06lX", (unsigned long)a->icao);
+    npos++;
+  }
+  static const uint16_t RNG[] = { 25, 50, 100, 150, 200, 300, 400 };
+  v->range_km = 400;
+  for (unsigned k = 0; k < sizeof RNG / sizeof RNG[0]; k++) if (maxd * 1.05f <= RNG[k]) { v->range_km = RNG[k]; break; }
+  snprintf(v->title, sizeof v->title, "%s ADS-B %.0f MHz  ac %d  pos %d",
+           r->st == RS_ADSB_HW ? "FG23" : rs_name(r->st), r->hw_f_hz ? r->hw_f_hz / 1e6 : 1090.0, n, npos);
+  v->title_c = rs_color(r->st);
+  static adsb_frm_view_t *fr = NULL;
+  if (!fr) fr = (adsb_frm_view_t *)heap_caps_malloc(10 * sizeof *fr, MALLOC_CAP_SPIRAM);
+  int nf = fr ? adsb_recent(fr, 10) : 0;
+  for (int i = 0; i < nf && v->nln < TV_LN; i++) {
+    char t[12]; hms(t, sizeof t, (long)fr[i].t, fr[i].ms, now);
+    char lv[6] = "   "; if (fr[i].lvl != -128) snprintf(lv, sizeof lv, "%3d", fr[i].lvl - 30);
+    tv_ln_t *L = &v->ln[v->nln++];
+    snprintf(L->s, sizeof L->s, "%s %c %06lX %-17.17s %s", t, fr[i].src ? 'R' : 'F',
+             (unsigned long)fr[i].icao, fr[i].txt, lv);
+    L->c = fr[i].src ? TFTC_CYAN : TFTC_WHITE;
+  }
+  if (!nf) { snprintf(v->ln[0].s, sizeof v->ln[0].s, "no frames yet (UTC, F=FG23 R=RTL)"); v->ln[0].c = TFTC_DARKGREY; v->nln = 1; }
+}
+
+static void view_ais(uint32_t now)
+{
+  const rs_info_t *r = rs_get();
+  tft_view_t *v = s_tv;
+  memset(v, 0, sizeof *v);
+  v->kind = 2;
+  snprintf(v->title, sizeof v->title, "%s AIS %.3f ch %c  nf %d dBm",
+           r->st == RS_AIS_HW ? "FG23" : rs_name(r->st), r->hw_f_hz / 1e6, r->hw_chan ? r->hw_chan : '?', r->rf_dbm);
+  v->title_c = rs_color(r->st);
+  tv_ln_t *L = &v->ln[v->nln++];
+  snprintf(L->s, sizeof L->s, "RX %lu  on-chip %lu  ships %lu  (UTC)", (unsigned long)ais_mode_frames(),
+           (unsigned long)ais_hw_frames(), (unsigned long)ais_mode_ships());
+  L->c = TFTC_DARKGREY;
+  static ais_msg_view_t *m = NULL;
+  if (!m) m = (ais_msg_view_t *)heap_caps_malloc(12 * sizeof *m, MALLOC_CAP_SPIRAM);
+  int n = m ? ais_recent(m, 12) : 0;
+  for (int i = 0; i < n && v->nln + 2 <= TV_LN; i++) {
+    char t[12]; hms(t, sizeof t, m[i].t, m[i].ms, now);
+    L = &v->ln[v->nln++];
+    snprintf(L->s, sizeof L->s, "%s %c %s %5.0f dBm %+5.0f Hz", t, m[i].chan, m[i].hw ? "HW" : "IQ",
+             (double)m[i].dbm, (double)m[i].foff);
+    L->c = m[i].hw ? TFTC_YELLOW : TFTC_CYAN;
+    L = &v->ln[v->nln++];
+    snprintf(L->s, sizeof L->s, " %.39s", m[i].txt);
+    L->c = TFTC_WHITE;
+  }
+  if (!n) { L = &v->ln[v->nln++]; snprintf(L->s, sizeof L->s, "no messages yet"); L->c = TFTC_DARKGREY; }
+}
+
+static void radio_view_tick(uint32_t now)
+{
+  static uint32_t last = 0, seq = UINT32_MAX;
+  const rs_info_t *r = rs_get();
+  if (r->seq == seq && now - last < 1000u) return;
+  seq = r->seq; last = now;
+
+  char val[16], line[48];
+  rs_state_text(val, sizeof val, line, sizeof line);
+  tft_set_state(val, rs_color(r->st), line, rs_color(r->st));
+
+  /* on-chip (or switching to / gone silent in it): the body is ours */
+  bool body = rs_iq_locked();
+  if (menu_is_open()) return;                 /* the menu owns the overlay meanwhile */
+  if (body) {
+    if (!s_tv)  s_tv  = (tft_view_t *)heap_caps_malloc(sizeof(tft_view_t), MALLOC_CAP_SPIRAM);
+    if (!s_acv) s_acv = (adsb_ac_view_t *)heap_caps_malloc(sizeof(adsb_ac_view_t) * TV_AC, MALLOC_CAP_SPIRAM);
+    if (!s_tv || !s_acv) return;
+    if (!tft_overlay_on()) tft_overlay(true);
+    s_view_own = true;
+    bool adsb = (r->st == RS_ADSB_HW) || (r->st == RS_SWITCH && r->target == RS_ADSB_HW) ||
+                ((r->st == RS_SILENT || r->st == RS_SWITCH) && r->ac_ch == 4000u);
+    if (adsb) view_adsb(now); else view_ais(now);
+    tft_view_show(s_tv);
+  } else if (s_view_own) {
+    s_view_own = false;
+    if (tft_overlay_on()) tft_overlay(false);  /* back to the waterfall */
   }
 }
 
@@ -3089,6 +3301,8 @@ void loop()
   SECT(S_WIFI, wifi_tick(now));
   SECT(S_UI, ui_tick(now));
   menu_tick(now);
+  rs_tick(now);
+  radio_view_tick(now);
   menu_decim_tick(now);
   menu_decim_start_tick(now);
   cmdlink_tick(now);
@@ -3160,7 +3374,8 @@ void loop()
 #if SPY_ENABLE
   scan_flush(now);
 #endif
-  if (rtl_pending && now - rtl_last_tune_ms >= TUNE_RATE_MS) {
+  /* radio_sm: no F<kHz> while the FG23 decodes on-chip - it is applied when it is back in IQ */
+  if (rtl_pending && !rs_iq_locked() && now - rtl_last_tune_ms >= TUNE_RATE_MS) {
     rtl_pending = false;
     rtl_last_tune_ms = now;
     char cmd[16];

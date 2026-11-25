@@ -14,6 +14,8 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <string.h>
+#include <time.h>
+#include <math.h>
 #include "esp_timer.h"
 #include "esp_heap_caps.h"
 #include "menu.h"
@@ -71,6 +73,17 @@ static void note_mmsi(uint32_t v)
  * $PIONS,AIS,<chan>,<level dBFS>,<SNR dB>,<foff Hz>,<src>,<level dBm>
  * For HW frames the dBFS field is the dBm level mapped back with AIS_DBM_K,
  * so older readers of the first three fields keep working. */
+#define RV_N 24
+static ais_msg_view_t *s_rv = NULL;   /* PSRAM */
+static uint32_t       s_rvw = 0;
+int ais_recent(ais_msg_view_t *o, int max)
+{
+  if (!s_rv) return 0;
+  int n = 0;   /* written from the main loop only, read from the main loop: no lock */
+  for (uint32_t k = 0; k < RV_N && n < max && k < s_rvw; k++) o[n++] = s_rv[(s_rvw - 1 - k) % RV_N];
+  return n;
+}
+
 static void emit(const uint8_t *fr, int len, char chan, float lvl_dbfs, float snr_db,
                  float foff_hz, bool hw, float dbm)
 {
@@ -79,6 +92,15 @@ static void emit(const uint8_t *fr, int len, char chan, float lvl_dbfs, float sn
   ais_nmea(fr, len, chan, n, sizeof n);
   snprintf(s_last, sizeof s_last, "%.47s", d);
   s_last_ms = millis();
+  {
+    if (!s_rv) s_rv = (ais_msg_view_t *)heap_caps_calloc(RV_N, sizeof(ais_msg_view_t), MALLOC_CAP_SPIRAM);
+    ais_msg_view_t *v = s_rv ? &s_rv[s_rvw++ % RV_N] : NULL;
+    if (v) {
+    v->ms = s_last_ms; time_t tt = time(NULL); v->t = (tt > 1700000000) ? (long)tt : 0;
+    v->chan = chan; v->hw = hw; v->dbm = dbm; v->foff = foff_hz;
+    snprintf(v->txt, sizeof v->txt, "%.47s", d);
+    }
+  }
   uint32_t mmsi = frame_mmsi(fr, len);
   note_mmsi(mmsi);
   bench_note(hw, mmsi, dbm);
@@ -280,6 +302,8 @@ uint32_t    ais_mode_bad(void)     { return s_m ? ais_multi_crc_bad(s_m) : 0; }
 uint32_t    ais_mode_last_ms(void) { return s_last_ms; }
 const char *ais_mode_last(void)    { return s_last; }
 uint32_t    ais_mode_ships(void)   { return s_nmmsi; }
+uint32_t    ais_hw_frames(void)    { return s_hw_frames; }
+float       ais_hw_noise_dbm(void) { return (s_hw_noise_qdbm != INT16_MIN) ? s_hw_noise_qdbm / 4.0f : NAN; }
 
 /* =====================================================================
  *  AISBENCH — alternate the two receive paths on the same antenna

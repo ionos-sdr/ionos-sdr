@@ -55,6 +55,7 @@ typedef struct {
   int32_t  alt; bool alt_ok;
   float    gs, track; int32_t vrate; bool vel_ok;
   double   lat, lon; bool pos_ok;
+  float    cand_lat, cand_lon; uint32_t cand_ms;   /* first global fix waits for a second one that agrees */
   uint32_t cpr_lat[2], cpr_lon[2], cpr_ms[2]; bool cpr_ok[2];
   int8_t   lvl_last; float lvl_sum; uint32_t lvl_n;
 } ac_t;
@@ -75,6 +76,7 @@ typedef struct {
   float    maxd;                      /* max distance from the reference, m */
   uint32_t fix_rej;                   /* corrected frames dropped (unknown ICAO) */
   uint32_t msgs_rtl;                  /* of msgs: from the Beast input (RTL-SDR), the rest from the FG23 */
+  uint32_t cpr_rej;                   /* global CPR fixes rejected as implausible (pos_sane) */
 } st_t;
 
 #define ST_N 17
@@ -141,6 +143,7 @@ static void st_add(st_t *a, const st_t *b)
   a->noise_sum += b->noise_sum; a->noise_n += b->noise_n;
   if (b->maxd > a->maxd) a->maxd = b->maxd;
   a->fix_rej += b->fix_rej;
+  a->cpr_rej += b->cpr_rej;
 }
 
 /* ---------------------------------------------------------------- Mode S helpers */
@@ -253,6 +256,32 @@ static ac_t *ac_get(uint32_t icao, uint32_t now, st_t *st)
   return a;
 }
 
+/* A global CPR fix is believed only if it is physically possible:
+ *  - within RANGE_MAX_M of the station,
+ *  - with a recent position: no faster than ~1300 km/h + 10 km slack,
+ *  - with none: a second global fix within 20 km (and 30 s) confirms the first.
+ * 2026-11-25: RYR7BP appeared ~10 000 km away and its trail drew a line across
+ * the map before it jumped to Budapest (a bad even/odd pair, both receivers). */
+static double km_between(double la1, double lo1, double la2, double lo2)
+{
+  const double k = M_PI / 180.0;
+  double x = sin((la2 - la1) * k / 2), y = sin((lo2 - lo1) * k / 2);
+  return 2.0 * 6371.0 * asin(sqrt(x * x + cos(la1 * k) * cos(la2 * k) * y * y));
+}
+static bool pos_sane(ac_t *a, double olat, double olon, uint32_t now)
+{
+  if (km_between(ADSB_REF_LAT, ADSB_REF_LON, a->lat, a->lon) > RANGE_MAX_M / 1000.0) return false;
+  if (a->pos_ok && now - a->pos_ms < 120000u) {
+    double lim = 10.0 + (now - a->pos_ms) / 1000.0 * 0.36;
+    return km_between(olat, olon, a->lat, a->lon) <= lim;
+  }
+  if (a->cand_ms && now - a->cand_ms < 30000u && km_between(a->cand_lat, a->cand_lon, a->lat, a->lon) < 20.0) {
+    a->cand_ms = 0; return true;
+  }
+  a->cand_lat = (float)a->lat; a->cand_lon = (float)a->lon; a->cand_ms = now | 1;
+  return false;
+}
+
 static void decode_df17(ac_t *a, const uint8_t *m, uint32_t now, st_t *st, double ts)
 {
   static const char cs[] = "#ABCDEFGHIJKLMNOPQRSTUVWXYZ##### ###############0123456789######";
@@ -271,7 +300,13 @@ static void decode_df17(ac_t *a, const uint8_t *m, uint32_t now, st_t *st, doubl
     a->cpr_lat[f] = bits(m, 54, 17); a->cpr_lon[f] = bits(m, 71, 17); a->cpr_ms[f] = now; a->cpr_ok[f] = true;
     st->pos++; s_tot.pos++;
     if (a->cpr_ok[0] && a->cpr_ok[1] && (uint32_t)abs((int32_t)(a->cpr_ms[0] - a->cpr_ms[1])) < CPR_PAIR_MS) {
-      if (cpr_global(a, f == 1)) { a->pos_ok = true; a->pos_ms = now; a->pos_ts = ts; st->gok++; s_tot.gok++; ac_range(a, st); return; }
+      double olat = a->lat, olon = a->lon;
+      if (cpr_global(a, f == 1)) {
+        if (pos_sane(a, olat, olon, now)) { a->pos_ok = true; a->pos_ms = now; a->pos_ts = ts; st->gok++; s_tot.gok++; ac_range(a, st); return; }
+        /* rejected: keep the old position, demand a fresh even/odd pair */
+        a->lat = olat; a->lon = olon; a->cpr_ok[0] = a->cpr_ok[1] = false; st->cpr_rej++; s_tot.cpr_rej++;
+        return;
+      }
     }
     if (a->pos_ok && now - a->pos_ms < LOCAL_MAX_MS) { cpr_local(a, f); a->pos_ms = now; a->pos_ts = ts; st->lok++; s_tot.lok++; ac_range(a, st); }
   } else if (tc == 19) {
@@ -339,6 +374,67 @@ static void beast_flush(const beast_msg_t *q, uint32_t nq)       /* outside s_mx
   }
 }
 
+/* ---------------------------------------------------------------- recent frames (TFT view) */
+#define RF_N 24
+static adsb_frm_view_t *s_rf = NULL;   /* PSRAM, RF_N entries (internal RAM is tight) */
+static uint32_t        s_rfw = 0;
+static double ref_km(double lat, double lon, float *dx, float *dy)
+{
+  double kx = 111.320 * cos(ADSB_REF_LAT * M_PI / 180.0);
+  *dx = (float)((lon - ADSB_REF_LON) * kx); *dy = (float)((lat - ADSB_REF_LAT) * 110.574);
+  return sqrt((double)*dx * *dx + (double)*dy * *dy);
+}
+static void rf_note(const ac_t *a, const uint8_t *m, uint32_t nb, uint32_t df, int8_t lvl, uint32_t now, int src, bool pos_new)
+{
+  if (!s_rf) s_rf = (adsb_frm_view_t *)heap_caps_calloc(RF_N, sizeof(adsb_frm_view_t), MALLOC_CAP_SPIRAM);
+  if (!s_rf) return;
+  adsb_frm_view_t *f = &s_rf[s_rfw++ % RF_N];
+  f->ms = now; f->icao = a->icao; f->df = (uint8_t)df; f->src = (uint8_t)src; f->lvl = lvl;
+  struct timeval tv; gettimeofday(&tv, NULL); f->t = (tv.tv_sec > 1700000000) ? tv.tv_sec : 0;
+  f->tc = (df == 17 && nb == 14) ? (uint8_t)(m[4] >> 3) : 0;
+  uint32_t tc = f->tc;
+  if (df == 17 && tc >= 1 && tc <= 4) snprintf(f->txt, sizeof f->txt, "ID %s", a->flight);
+  else if (df == 17 && tc >= 9 && tc <= 18) {
+    char al[8] = "  -  ";
+    if (a->alt_ok) snprintf(al, sizeof al, "FL%03ld", (long)((a->alt + 50) / 100));
+    if (pos_new && a->pos_ok) { float dx, dy; snprintf(f->txt, sizeof f->txt, "%s %3.0fkm", al, ref_km(a->lat, a->lon, &dx, &dy)); }
+    else snprintf(f->txt, sizeof f->txt, "%s cpr", al);
+  } else if (df == 17 && tc == 19) {
+    if (a->vel_ok) snprintf(f->txt, sizeof f->txt, "GS%3.0f T%03.0f %+ld", a->gs, a->track, (long)a->vrate);
+    else snprintf(f->txt, sizeof f->txt, "vel");
+  } else if (df == 17) snprintf(f->txt, sizeof f->txt, "TC%lu", (unsigned long)tc);
+  else snprintf(f->txt, sizeof f->txt, "DF%lu", (unsigned long)df);
+}
+int adsb_recent(adsb_frm_view_t *o, int max)
+{
+  if (!s_mx || !s_rf) return 0;
+  int n = 0;
+  xSemaphoreTake(s_mx, portMAX_DELAY);
+  for (uint32_t k = 0; k < RF_N && n < max && k < s_rfw; k++) o[n++] = s_rf[(s_rfw - 1 - k) % RF_N];
+  xSemaphoreGive(s_mx);
+  return n;
+}
+int adsb_ac_list(adsb_ac_view_t *o, int max)
+{
+  if (!s_mx || !s_ac) return 0;
+  uint32_t now = millis(); int n = 0;
+  xSemaphoreTake(s_mx, portMAX_DELAY);
+  for (uint32_t i = 0; i < s_nac && n < max; i++) {
+    const ac_t *a = &s_ac[i];
+    if (now - a->last_ms > 60000u) continue;
+    adsb_ac_view_t *v = &o[n++];
+    v->icao = a->icao; memcpy(v->flight, a->flight, sizeof v->flight);
+    v->pos_ok = a->pos_ok && now - a->pos_ms < 60000u;
+    if (v->pos_ok) ref_km(a->lat, a->lon, &v->dx_km, &v->dy_km); else v->dx_km = v->dy_km = 0;
+    v->alt = a->alt; v->alt_ok = a->alt_ok; v->trk = a->track; v->trk_ok = a->vel_ok;
+    v->age_ms = now - a->last_ms;
+    v->rx = (uint8_t)(((a->seen_ms[0] && now - a->seen_ms[0] < 60000u) ? 1 : 0) |
+                      ((a->seen_ms[1] && now - a->seen_ms[1] < 60000u) ? 2 : 0));
+  }
+  xSemaphoreGive(s_mx);
+  return n;
+}
+
 /* ---------------------------------------------------------------- feeds */
 static void ingest(st_t *st, const uint8_t *m, uint32_t nb, uint32_t df, uint32_t icao, uint32_t fix, int8_t lvl,
                    double ts, uint32_t now, int src);
@@ -393,7 +489,11 @@ static void ingest(st_t *st, const uint8_t *m, uint32_t nb, uint32_t df, uint32_
     if (df == 17 && nb == 14) {
       uint32_t tc = m[4] >> 3;
       if (tc >= 9 && tc <= 18) a->posmsg_ms[src] = now | 1;          /* airborne position heard by this receiver */
+      uint32_t pms = a->pos_ms;
       decode_df17(a, m, now, st, ts);
+      rf_note(a, m, nb, df, lvl, now, src, a->pos_ms != pms);
+    } else {
+      rf_note(a, m, nb, df, lvl, now, src, false);
     }
   }
 }
@@ -582,8 +682,8 @@ static void j_period(const char *name, int minutes, double ep, uint32_t cur)
     "\"global_skipped\":0,\"local_ok\":%lu,\"local_aircraft_relative\":%lu,\"local_receiver_relative\":0,\"local_skipped\":0,"
     "\"local_range\":0,\"local_speed\":0,\"filtered\":0},", (unsigned long)a.pos, (unsigned long)a.gok, (unsigned long)a.lok, (unsigned long)a.lok);
   J("\"tracks\":{\"all\":%lu,\"single_message\":0},", (unsigned long)a.newac);
-  J("\"fg23\":{\"triggers\":%lu,\"fifo_full\":%lu,\"df11\":%lu,\"df17\":%lu,\"fix_rejected\":%lu,\"minutes\":%lu}}",
-    (unsigned long)a.trig, (unsigned long)a.ovf, (unsigned long)a.df11, (unsigned long)a.df17, (unsigned long)a.fix_rej, (unsigned long)got);
+  J("\"fg23\":{\"triggers\":%lu,\"fifo_full\":%lu,\"df11\":%lu,\"df17\":%lu,\"fix_rejected\":%lu,\"cpr_rejected\":%lu,\"minutes\":%lu}}",
+    (unsigned long)a.trig, (unsigned long)a.ovf, (unsigned long)a.df11, (unsigned long)a.df17, (unsigned long)a.fix_rej, (unsigned long)a.cpr_rej, (unsigned long)got);
 }
 
 static void h_stats(void)
