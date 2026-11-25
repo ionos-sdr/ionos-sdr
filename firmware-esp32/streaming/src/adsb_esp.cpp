@@ -12,6 +12,7 @@
 #include "adsb_graphs_html.h"
 #include "station_config.h"
 #include <Arduino.h>
+#include <esp_heap_caps.h>
 #include <WiFi.h>
 #include <WebServer.h>
 #include <math.h>
@@ -55,6 +56,13 @@ typedef struct {
   uint32_t cpr_lat[2], cpr_lon[2], cpr_ms[2]; bool cpr_ok[2];
   int8_t   lvl_last; float lvl_sum; uint32_t lvl_n;
 } ac_t;
+
+/* per-aircraft track for the map (tar1090-style trail of the selected aircraft), PSRAM */
+#define TR_N        256               /* points per aircraft */
+#define TR_STEP_S   4                 /* at most one point per 4 s */
+typedef struct { float lat, lon; int32_t alt; uint32_t t; } trp_t;
+static trp_t   *s_tr = NULL;          /* AC_MAX * TR_N */
+static uint16_t s_trn[AC_MAX], s_trw[AC_MAX];
 
 typedef struct {
   uint32_t min;                       /* millis()/60000 of this bucket, UINT32_MAX = empty */
@@ -178,8 +186,23 @@ static void cpr_local(ac_t *a, int f)
   if (fabs(lat - a->lat) < 1.0 && fabs(lon - a->lon) < 1.5) { a->lat = lat; a->lon = lon; }
 }
 
+static void trail_push(const ac_t *a)
+{
+  if (!s_tr) return;
+  uint32_t i = (uint32_t)(a - s_ac), t = (uint32_t)now_epoch();
+  trp_t *tr = s_tr + i * TR_N;
+  if (s_trn[i]) {
+    const trp_t *l = &tr[(s_trw[i] + TR_N - 1) % TR_N];
+    if (t - l->t < TR_STEP_S) return;
+  }
+  trp_t *p = &tr[s_trw[i]];
+  p->lat = (float)a->lat; p->lon = (float)a->lon; p->alt = a->alt_ok ? a->alt : INT32_MIN; p->t = t;
+  s_trw[i] = (uint16_t)((s_trw[i] + 1) % TR_N); if (s_trn[i] < TR_N) s_trn[i]++;
+}
+
 static void ac_range(const ac_t *a, st_t *st)
 {
+  trail_push(a);
   const double k = M_PI / 180.0;
   double p1 = ADSB_REF_LAT * k, p2 = a->lat * k, dl = (a->lon - ADSB_REF_LON) * k;
   double x = sin((p2 - p1) / 2), y = sin(dl / 2);
@@ -220,6 +243,7 @@ static ac_t *ac_get(uint32_t icao, uint32_t now, st_t *st)
   }
   ac_t *a = (s_nac < AC_MAX) ? &s_ac[s_nac++] : old;      /* full: reuse the stalest */
   memset(a, 0, sizeof *a);
+  s_trn[a - s_ac] = 0; s_trw[a - s_ac] = 0;
   a->icao = icao; a->first_ms = now;
   a->nic = a->nacp = a->sil = a->ver = -1;
   st->newac++; s_tot.newac++;
@@ -283,12 +307,13 @@ static void beast_service(void)
     WiFiClient c = s_beast->available();
     int slot = -1;
     for (int i = 0; i < BEAST_MAX_CLI; i++) if (!(s_bcli[i] && s_bcli[i].connected())) { slot = i; break; }
-    if (slot < 0) c.stop(); else { s_bcli[slot] = c; s_bcli[slot].setNoDelay(true); }
+    if (slot < 0) c.stop(); else { s_bcli[slot] = c; s_bcli[slot].setNoDelay(true); s_bcli[slot].setTimeout(1); }
   }
 }
-static void beast_send(const uint8_t *m, uint32_t nb, uint64_t t64, int8_t lvl)
+typedef struct { uint8_t b[2 + 2 * (6 + 1 + 14)]; uint8_t n; } beast_msg_t;
+static void beast_build(beast_msg_t *o, const uint8_t *m, uint32_t nb, uint64_t t64, int8_t lvl)
 {
-  uint8_t out[2 + 2 * (6 + 1 + 14)]; uint32_t n = 0;
+  uint8_t *out = o->b; uint32_t n = 0;
   uint8_t raw[6 + 1 + 14];
   uint64_t ts = t64 * 12u;                          /* 12 MHz counter, as Beast expects */
   for (int i = 0; i < 6; i++) raw[i] = (uint8_t)(ts >> (8 * (5 - i)));
@@ -297,8 +322,18 @@ static void beast_send(const uint8_t *m, uint32_t nb, uint64_t t64, int8_t lvl)
   memcpy(raw + 7, m, nb);
   out[n++] = 0x1A; out[n++] = (nb == 14) ? '3' : '2';
   for (uint32_t i = 0; i < 7 + nb; i++) { out[n++] = raw[i]; if (raw[i] == 0x1A) out[n++] = 0x1A; }
-  for (int i = 0; i < BEAST_MAX_CLI; i++)
-    if (s_bcli[i] && s_bcli[i].connected()) { s_bcli[i].write(out, n); s_beast_sent++; }
+  o->n = (uint8_t)n;
+}
+static void beast_flush(const beast_msg_t *q, uint32_t nq)       /* outside s_mx; a stuck client is dropped */
+{
+  if (!nq) return;
+  for (int i = 0; i < BEAST_MAX_CLI; i++) {
+    if (!(s_bcli[i] && s_bcli[i].connected())) continue;
+    for (uint32_t k = 0; k < nq; k++) {
+      if (s_bcli[i].write(q[k].b, q[k].n) != q[k].n) { s_bcli[i].stop(); break; }
+      s_beast_sent++;
+    }
+  }
 }
 
 /* ---------------------------------------------------------------- feeds */
@@ -308,6 +343,7 @@ void adsb_feed_ms1(const uint8_t *raw, uint32_t len)
   uint32_t n = raw[3]; if (4 + 20 * n > len) n = (len - 4) / 20;
   uint32_t now = millis();
   beast_service();
+  static beast_msg_t bq[48]; uint32_t nbq = 0;
   xSemaphoreTake(s_mx, portMAX_DELAY);
   st_t *st = st_cur();
   for (uint32_t i = 0; i < n; i++) {
@@ -333,9 +369,10 @@ void adsb_feed_ms1(const uint8_t *raw, uint32_t len)
     a->last_ms = now; a->msgs++; a->lvl_last = lvl; a->lvl_sum += lvl; a->lvl_n++; a->last_ts = ts;
     if (!fix) a->clean_ms = now;
     if (df == 17 && nb == 14) decode_df17(a, m, now, st, ts);
-    beast_send(m, nb, t64, lvl);
+    if (nbq < 48) beast_build(&bq[nbq++], m, nb, t64, lvl);
   }
   xSemaphoreGive(s_mx);
+  beast_flush(bq, nbq);
 }
 
 void adsb_feed_dbg(const aispkt_dbg_t *d)
@@ -385,13 +422,17 @@ static void J(const char *fmt, ...)
   va_end(ap);
   if (n > 0) s_len = (s_len + (size_t)n < s_cap) ? s_len + (size_t)n : s_cap - 1;
 }
+static uint32_t s_http_n = 0, s_http_slow = 0, s_http_maxms = 0;
 static void send_json(void)
 {
+  uint32_t t0 = millis();
   s_srv->sendHeader("Access-Control-Allow-Origin", "*");
   s_srv->sendHeader("Cache-Control", "no-cache");
   s_srv->setContentLength(s_len);
   s_srv->send(200, "application/json", "");
   s_srv->sendContent(s_buf, s_len);
+  uint32_t dt = millis() - t0;
+  s_http_n++; if (dt > 2000) s_http_slow++; if (dt > s_http_maxms) s_http_maxms = dt;
 }
 
 static void h_aircraft(void)
@@ -554,6 +595,27 @@ static void h_history(void)
   send_json();
 }
 
+static void h_trace(void)                         /* /data/trace.json?hex=xxxxxx -> [[t,lat,lon,alt],...] */
+{
+  uint32_t icao = (uint32_t)strtoul(s_srv->arg("hex").c_str(), NULL, 16);
+  xSemaphoreTake(s_mx, portMAX_DELAY);
+  s_len = 0;
+  J("{\"now\":%.1f,\"hex\":\"%06lx\",\"trace\":[", now_epoch(), (unsigned long)icao);
+  ac_t *a = ac_find(icao);
+  if (a && s_tr) {
+    uint32_t i = (uint32_t)(a - s_ac), n = s_trn[i], w = s_trw[i];
+    const trp_t *tr = s_tr + i * TR_N;
+    for (uint32_t k = 0; k < n; k++) {
+      const trp_t *p = &tr[(w + TR_N - n + k) % TR_N];
+      if (p->alt == INT32_MIN) J("%s[%lu,%.5f,%.5f,null]", k ? "," : "", (unsigned long)p->t, p->lat, p->lon);
+      else J("%s[%lu,%.5f,%.5f,%ld]", k ? "," : "", (unsigned long)p->t, p->lat, p->lon, (long)p->alt);
+    }
+  }
+  J("]}");
+  xSemaphoreGive(s_mx);
+  send_json();
+}
+
 static void h_outline(void)
 {
   xSemaphoreTake(s_mx, portMAX_DELAY);
@@ -658,6 +720,7 @@ static void http_task(void *arg)
         s_srv->on("/data/stats.json", h_stats);
         s_srv->on("/data/history.json", h_history);
         s_srv->on("/data/outline.json", h_outline);
+        s_srv->on("/data/trace.json", h_trace);
         s_srv->on("/graphs", h_graphs);
         s_srv->on("/data/bench", HTTP_POST, h_bench_post);
         s_srv->on("/data/bench.json", h_bench);
@@ -666,7 +729,21 @@ static void http_task(void *arg)
       } else { vTaskDelay(pdMS_TO_TICKS(1000)); continue; }
     }
     s_srv->handleClient();
-    xSemaphoreTake(s_mx, portMAX_DELAY); hist_tick(); xSemaphoreGive(s_mx);
+    if (xSemaphoreTake(s_mx, pdMS_TO_TICKS(1000)) == pdTRUE) { hist_tick(); xSemaphoreGive(s_mx); }
+    static uint32_t t_diag = 0, low = 0;
+    if (millis() - t_diag >= 10000) {
+      t_diag = millis();
+      size_t fr = heap_caps_get_free_size(MALLOC_CAP_INTERNAL), mn = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
+      size_t blk = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+      int bc = 0; for (int i = 0; i < BEAST_MAX_CLI; i++) if (s_bcli[i] && s_bcli[i].connected()) bc++;
+      Serial0.printf("ADSB-NET wifi %d rssi %d | int free %u min %u blk %u | http %lu slow %lu max %lu ms | beast cli %d sent %lu\n",
+                    (int)WiFi.status(), (int)WiFi.RSSI(), (unsigned)fr, (unsigned)mn, (unsigned)blk,
+                    (unsigned long)s_http_n, (unsigned long)s_http_slow, (unsigned long)s_http_maxms, bc, (unsigned long)s_beast_sent);
+      s_http_maxms = 0;
+      /* self-heal: lwIP needs internal RAM; if it stays exhausted the web server only times out */
+      if (fr < 3000 || blk < 1200) { if (++low >= 6) { Serial0.println("ADSB-NET internal RAM exhausted -> restart"); delay(100); esp_restart(); } }
+      else low = 0;
+    }
     vTaskDelay(pdMS_TO_TICKS(5));
   }
 }
@@ -678,9 +755,12 @@ void adsb_init(void)
   s_cap = 256 * 1024; s_buf = (char *)ps_malloc(s_cap);
   s_hist = (hist_t *)ps_calloc(HIST_N, sizeof(hist_t));
   s_bench = (bench_t *)ps_calloc(BENCH_N, sizeof(bench_t));
+  s_tr = (trp_t *)ps_calloc((size_t)AC_MAX * TR_N, sizeof(trp_t));   /* 1 MB; no trails if it fails */
   if (!s_ac || !s_buf || !s_hist || !s_bench) { s_ac = NULL; return; }
   for (int i = 0; i < ST_N; i++) s_st[i].min = UINT32_MAX;
   memset(&s_tot, 0, sizeof s_tot); s_tot.sig_peak = -128;
   s_mx = xSemaphoreCreateMutex();
-  xTaskCreatePinnedToCore(http_task, "adsb_http", 8192, NULL, 1, NULL, 0);
+  /* stack in PSRAM: internal RAM is only ~10 KB free with streaming running, and lwIP needs it */
+  if (xTaskCreatePinnedToCoreWithCaps(http_task, "adsb_http", 8192, NULL, 1, NULL, 0, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS)
+    xTaskCreatePinnedToCore(http_task, "adsb_http", 8192, NULL, 1, NULL, 0);
 }

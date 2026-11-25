@@ -19,7 +19,7 @@ button.on{background:#3a4a6a;border-color:#6a8acf;color:#fff}
 @media (max-width:620px){#grid{grid-template-columns:1fr}}
 </style></head><body>
 <header><b>ionos-mini · FG23 ADS-B · statistics</b>
-<span><button data-m="60">1 hour</button> <button data-m="360">6 hours</button> <button data-m="1440" class="on">24 hours</button></span>
+<span><button data-m="60">1 hour</button> <button data-m="360">6 hours</button> <button data-m="1440" class="on">24 hours</button> <button data-m="10080">7 days</button> <button data-m="43200">30 days</button> <button data-m="129600">90 days</button> <button data-m="525600">1 year</button></span>
 <a id="ml" href="./">map</a><span id="sum"></span></header>
 <div id="grid">
 <div class="card"><h3>Messages / min</h3><canvas id="c1"></canvas></div>
@@ -54,17 +54,18 @@ mk('c8',[['new aircraft','#ffb04f',1]]);
 mk('c9',[['adsb.fi','#999',1],['this receiver','#4fa3ff',1],['both','#7ee787',0],['only here','#ffb04f',0]]);
 mk('c10',[['0-50 km','#7ee787',0],['50-100 km','#4fa3ff',0],['100-200 km','#d2a8ff',0],['200-300 km','#ffb04f',0],['300+ km','#ff6b6b',0]],{y:{beginAtZero:true,max:100}});
 let mins=1440;
-function lab(t){const d=new Date(t*1000);return d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}
+function lab(t){const d=new Date(t*1000);return mins>1440?d.toLocaleDateString([], {month:'short',day:'numeric'})+' '+d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}):d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}
+function span(h){const m=h.n*(h.step||60)/60; return m>=2880?(m/1440).toFixed(1)+' days':m>=120?(m/60).toFixed(1)+' h':m+' min'}
 function set(id,labels,...arrs){const c=C[id];c.data.labels=labels;arrs.forEach((a,i)=>c.data.datasets[i].data=a);c.update()}
 async function load(){let h;try{h=await (await fetch('data/history.json'+q+(q?'&':'?')+'mins='+mins,{cache:'no-store'})).json()}catch(e){document.getElementById('sum').textContent='no connection';return}
  const L=h.t.map(lab);
  set('c1',L,h.msgs,h.pos,h.df17); set('c2',L,h.ac,h.acpos); set('c3',L,h.sig,h.peak); set('c4',L,h.range_km);
  set('c5',L,h.noise); set('c6',L,h.trig,h.pre,h.ovf); set('c7',L,h.msps); set('c8',L,h.tracks);
- const tot=h.msgs.reduce((a,b)=>a+b,0), mx=Math.max(0,...h.range_km.filter(x=>x!=null));
+ const tot=Math.round(h.msgs.reduce((a,b)=>a+(b||0),0)*(h.step||60)/60), mx=Math.max(0,...h.range_km.filter(x=>x!=null));
  try{const b=await (await fetch('data/bench.json'+q+(q?'&':'?')+'mins='+mins,{cache:'no-store'})).json();const LB=b.t.map(lab);
   set('c9',LB,b.ref,b.ours,b.matched,b.only_ours); set('c10',LB,b.cov0,b.cov1,b.cov2,b.cov3,b.cov4);
   if(b.n){const r=b.ref.reduce((a,c)=>a+c,0),m=b.matched.reduce((a,c)=>a+c,0); var bs=` · coverage vs adsb.fi ${r?(100*m/r).toFixed(0):0} %`}}catch(e){}
- document.getElementById('sum').textContent=`${h.n} min of data · ${tot} messages · max range ${mx.toFixed(0)} km`+(typeof bs!=='undefined'?bs:'')}
+ document.getElementById('sum').textContent=`${span(h)} of data`+(h.step>60?` (${h.step/60}-min averages)`:'')+(h.archive_since?` · archive since ${new Date(h.archive_since*1000).toLocaleDateString()}`:'')+` · ${tot} messages · max range ${mx.toFixed(0)} km`+(typeof bs!=='undefined'?bs:'')}
 document.querySelectorAll('button[data-m]').forEach(b=>b.onclick=()=>{document.querySelectorAll('button[data-m]').forEach(x=>x.classList.remove('on'));b.classList.add('on');mins=+b.dataset.m;load()});
 load(); setInterval(load,60000);
 </script></body></html>)HTML";

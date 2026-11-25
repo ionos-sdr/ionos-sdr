@@ -25,7 +25,7 @@ tr:nth-child(even){background:#1f2228}tr.sel{background:#3a4a6a}tr:hover{backgro
 <script>
 const q=location.search, map=L.map('map',{worldCopyJump:true}).setView([47.5,19.05],7);
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:12,attribution:'&copy; OpenStreetMap'}).addTo(map);
-const ac={}, trails={}; let sel=null, fitted=false, outline=null;
+const ac={}, TR={}; let sel=null, hov=null, fitted=false, outline=null;
 document.getElementById('gl').href='graphs'+q;
 async function rng(){try{const o=await (await fetch('data/outline.json'+q,{cache:'no-store'})).json();
  const p=o.actualRange.last24h.points.map(x=>[x[0],x[1]]); if(p.length<3)return;
@@ -57,6 +57,16 @@ function icon(a,c){const s=shape(a), rot=(s=='balloon'||s=='drone')?0:(a.track||
  else g=`<path d="${SH[s]}" fill="${c}" stroke="#000" stroke-width=".7" stroke-linejoin="round"/>`;
  return L.divIcon({className:'',iconSize:[SZ,SZ],iconAnchor:[SZ/2,SZ/2],
   html:`<svg width="${SZ}" height="${SZ}" viewBox="-16 -16 32 32" style="transform:rotate(${rot}deg);filter:drop-shadow(0 0 1px rgba(0,0,0,.6))">${g}</svg>`})}
+/* track of the hovered / selected aircraft: history from data/trace.json, then extended live */
+function seg(t,a,b){if(b[3]-a[3]>600)return; L.polyline([[a[0],a[1]],[b[0],b[1]]],{color:col(b[2]),weight:3,opacity:.95,interactive:false}).addTo(t.grp)}
+function addPt(t,p){const l=t.pts[t.pts.length-1]; if(l&&l[0]==p[0]&&l[1]==p[1])return; t.pts.push(p); if(l)seg(t,l,p)}
+async function showTrail(h){if(TR[h])return; const t=TR[h]={pts:[],ok:false,grp:L.layerGroup().addTo(map)};
+ try{const r=await (await fetch('data/trace.json'+q+(q?'&':'?')+'hex='+h,{cache:'no-store'})).json();
+  if(TR[h]!==t)return; for(const p of r.trace)addPt(t,[p[1],p[2],p[3],p[0]])}catch(e){}
+ if(TR[h]!==t)return; t.ok=true; if(ac[h]){const ll=ac[h].getLatLng(); addPt(t,[ll.lat,ll.lng,ac[h].alt,Date.now()/1000])}}
+function hideTrail(h){if(h==sel||h==hov||!TR[h])return; map.removeLayer(TR[h].grp); delete TR[h]}
+function selectAc(h){const o=sel; sel=(o==h)?null:h; if(o)hideTrail(o); if(sel)showTrail(sel)}
+map.on('click',()=>{const o=sel; sel=null; if(o)hideTrail(o)});
 function fmt(v,d){return v==null?'':(d?v.toFixed(d):v)}
 async function tick(){
  let j; try{j=await (await fetch('data/aircraft.json'+q,{cache:'no-store'})).json()}catch(e){document.getElementById('st').textContent='no connection';return}
@@ -66,18 +76,20 @@ async function tick(){
   if(a.lat!=null&&a.seen_pos<60){np++;
    const ll=[a.lat,a.lon], lab=(a.flight||a.hex).trim()+(a.alt_baro!=null?' '+Math.round(a.alt_baro/100):'');
    if(!ac[a.hex]){ac[a.hex]=L.marker(ll,{icon:icon(a,c)}).addTo(map).bindTooltip(lab,{permanent:true,direction:'right',offset:[SZ/2,0],className:'lbl'});
-     ac[a.hex].on('click',()=>{sel=a.hex;render(j)})}
+     const h=a.hex;
+     ac[h].on('mouseover',()=>{hov=h;showTrail(h)}).on('mouseout',()=>{hov=null;hideTrail(h)})
+      .on('click',()=>{selectAc(h);render(j)})}
    else{ac[a.hex].setLatLng(ll).setIcon(icon(a,c)).setTooltipContent(lab)}
-   const t=trails[a.hex]||(trails[a.hex]={pts:[],line:L.polyline([],{color:c,weight:2,opacity:.7}).addTo(map)});
-   const last=t.pts[t.pts.length-1]; if(!last||last[0]!=ll[0]||last[1]!=ll[1]){t.pts.push(ll); if(t.pts.length>200)t.pts.shift(); t.line.setLatLngs(t.pts).setStyle({color:c})}
+   ac[a.hex].alt=a.alt_baro;
+   const t=TR[a.hex]; if(t&&t.ok)addPt(t,[ll[0],ll[1],a.alt_baro,j.now]);
   } }
- for(const h in ac) if(!seen.has(h)){map.removeLayer(ac[h]);delete ac[h]; if(trails[h]){map.removeLayer(trails[h].line);delete trails[h]}}
+ for(const h in ac) if(!seen.has(h)){map.removeLayer(ac[h]);delete ac[h]; if(TR[h]){map.removeLayer(TR[h].grp);delete TR[h]}; if(sel==h)sel=null}
  if(!fitted&&np>2){const b=L.latLngBounds(Object.values(ac).map(m=>m.getLatLng()));map.fitBounds(b.pad(0.2));fitted=true}
  render(j,np)}
 function render(j,np){
  const rows=j.aircraft.slice().sort((a,b)=>a.seen-b.seen).map(a=>`<tr data-h="${a.hex}" class="${a.hex==sel?'sel':''}"><td>${a.hex}</td><td>${(a.flight||'').trim()}</td><td>${a.category||''}</td><td>${fmt(a.alt_baro)}</td><td>${fmt(a.gs,0)}</td><td>${fmt(a.track,0)}</td><td>${a.messages}</td><td>${a.seen.toFixed(0)}s</td><td>${fmt(a.rssi,1)}</td></tr>`).join('');
  const tb=document.getElementById('tb'); tb.innerHTML=rows;
- tb.querySelectorAll('tr').forEach(r=>r.onclick=()=>{sel=r.dataset.h; if(ac[sel])map.panTo(ac[sel].getLatLng()); render(j,np)});
+ tb.querySelectorAll('tr').forEach(r=>r.onclick=()=>{const h=r.dataset.h; if(sel!=h)selectAc(h); if(ac[h])map.panTo(ac[h].getLatLng()); render(j,np)});
  if(np!=null)document.getElementById('st').textContent=`${j.aircraft.length} aircraft, ${np} with position · ${j.messages} messages · ${new Date(j.now*1000).toLocaleTimeString()}`}
 tick(); setInterval(tick,1000); rng(); setInterval(rng,30000);
 </script></body></html>)HTML";
