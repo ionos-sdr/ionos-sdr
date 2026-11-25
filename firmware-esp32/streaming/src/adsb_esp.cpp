@@ -44,6 +44,7 @@
 
 typedef struct {
   uint32_t icao, first_ms, last_ms, pos_ms, msgs;
+  uint32_t seen_ms[2], posmsg_ms[2];   /* per receiver: 0 = FG23, 1 = RTL-SDR (splitter: both at once) */
   char     flight[9];
   char     cat[3];                    /* emitter category, e.g. "A3" (readsb "category") */
   int32_t  geo_diff; bool geo_ok;     /* TC19: GNSS - baro, ft */
@@ -103,7 +104,7 @@ static size_t            s_cap = 0, s_len = 0;
 typedef struct { float d, lat, lon; int32_t alt; } rng_t;
 static rng_t             s_rng[RNG_N];
 typedef struct {
-  uint32_t t; uint16_t msgs, pos, ac, acpos, tracks, df17, rtl;
+  uint32_t t; uint16_t msgs, pos, ac, acpos, tracks, df17, rtl, ac_rx[2], acpos_rx[2];
   float sig, peak, noise, maxd, msps; uint32_t trig, pre, ovf;
 } hist_t;
 static hist_t           *s_hist = NULL;
@@ -340,7 +341,7 @@ static void beast_flush(const beast_msg_t *q, uint32_t nq)       /* outside s_mx
 
 /* ---------------------------------------------------------------- feeds */
 static void ingest(st_t *st, const uint8_t *m, uint32_t nb, uint32_t df, uint32_t icao, uint32_t fix, int8_t lvl,
-                   double ts, uint32_t now);
+                   double ts, uint32_t now, int src);
 
 void adsb_feed_ms1(const uint8_t *raw, uint32_t len)
 {
@@ -364,7 +365,7 @@ void adsb_feed_ms1(const uint8_t *raw, uint32_t len)
     uint32_t th; memcpy(&th, r, 4);
     uint64_t t64 = fg_unwrap(th);
     double ts = s_off_ok ? fg_epoch(t64) : now_epoch();
-    ingest(st, m, nb, df, icao, fix, lvl, ts, now);
+    ingest(st, m, nb, df, icao, fix, lvl, ts, now, 0);
     if (nbq < 48) beast_build(&bq[nbq++], m, nb, t64, lvl);
   }
   xSemaphoreGive(s_mx);
@@ -373,7 +374,7 @@ void adsb_feed_ms1(const uint8_t *raw, uint32_t len)
 
 /* one CRC-good frame into the tables (caller holds s_mx) */
 static void ingest(st_t *st, const uint8_t *m, uint32_t nb, uint32_t df, uint32_t icao, uint32_t fix, int8_t lvl,
-                   double ts, uint32_t now)
+                   double ts, uint32_t now, int src)
 {
   {
     st->msgs++; st->acc[fix > 2 ? 2 : fix]++; s_tot.msgs++; s_tot.acc[fix > 2 ? 2 : fix]++; s_msgs_total++;
@@ -385,9 +386,15 @@ static void ingest(st_t *st, const uint8_t *m, uint32_t nb, uint32_t df, uint32_
       if (LVL_TO_DBFS(lvl) > -3.f) { st->strong++; s_tot.strong++; }
     }
     ac_t *a = ac_get(icao, now, st);
-    a->last_ms = now; a->msgs++; a->lvl_last = lvl; a->lvl_sum += lvl; a->lvl_n++; a->last_ts = ts;
+    a->last_ms = now; a->msgs++; a->last_ts = ts;
+    if (lvl != -128) { a->lvl_last = lvl; a->lvl_sum += lvl; a->lvl_n++; }
     if (!fix) a->clean_ms = now;
-    if (df == 17 && nb == 14) decode_df17(a, m, now, st, ts);
+    a->seen_ms[src] = now | 1;
+    if (df == 17 && nb == 14) {
+      uint32_t tc = m[4] >> 3;
+      if (tc >= 9 && tc <= 18) a->posmsg_ms[src] = now | 1;          /* airborne position heard by this receiver */
+      decode_df17(a, m, now, st, ts);
+    }
   }
 }
 
@@ -415,7 +422,7 @@ static void rtl_frame(const uint8_t *f, int n)
   uint32_t now = millis();
   xSemaphoreTake(s_mx, portMAX_DELAY);
   st_t *st = st_cur();
-  ingest(st, m, nb, df == 18 ? 17 : df, icao, 0, (int8_t)l, now_epoch(), now);
+  ingest(st, m, nb, df == 18 ? 17 : df, icao, 0, (int8_t)l, now_epoch(), now, 1);
   st->msgs_rtl++; s_tot.msgs_rtl++;
   xSemaphoreGive(s_mx);
   s_rtl_frames++; s_rtl_last_ms = now;
@@ -521,6 +528,8 @@ static void h_aircraft(void)
     ac_t *a = &s_ac[i];
     if (now - a->last_ms >= AC_SHOW_MS) continue;
     J("%s{\"hex\":\"%06lx\",\"type\":\"adsb_icao\"", first ? "" : ",", (unsigned long)a->icao); first = false;
+    { bool f0 = a->seen_ms[0] && now - a->seen_ms[0] < 60000u, f1 = a->seen_ms[1] && now - a->seen_ms[1] < 60000u;
+      J(",\"ionos_rx\":\"%s\"", f0 && f1 ? "both" : f1 ? "rtl" : f0 ? "fg23" : "none"); }
     if (a->flight[0]) J(",\"flight\":\"%s\"", a->flight);
     if (a->cat[0]) J(",\"category\":\"%s\"", a->cat);
     if (a->alt_ok) J(",\"alt_baro\":%ld", (long)a->alt);
@@ -627,6 +636,10 @@ static void hist_tick(void)
   }
   for (uint32_t i = 0; i < s_nac; i++) {
     if (now - s_ac[i].last_ms < 60000u) h.ac++;
+    for (int k = 0; k < 2; k++) {
+      if (s_ac[i].seen_ms[k] && now - s_ac[i].seen_ms[k] < 60000u) h.ac_rx[k]++;
+      if (s_ac[i].posmsg_ms[k] && now - s_ac[i].posmsg_ms[k] < 60000u) h.acpos_rx[k]++;
+    }
     if (s_ac[i].pos_ok && now - s_ac[i].pos_ms < 60000u) h.acpos++;
   }
   s_hist[s_hw % HIST_N] = h; s_hw++;
@@ -646,8 +659,8 @@ static void h_history(void)
   uint32_t first = s_hw - n;
   s_len = 0;
   J("{\"now\":%.1f,\"step\":60,\"n\":%lu", now_epoch(), (unsigned long)n);
-  const char *names[] = { "t", "msgs", "pos", "ac", "acpos", "tracks", "df17", "sig", "peak", "noise", "range_km", "msps", "trig", "pre", "ovf", "msgs_rtl" };
-  for (int f = 0; f < 16; f++) {
+  const char *names[] = { "t", "msgs", "pos", "ac", "acpos", "tracks", "df17", "sig", "peak", "noise", "range_km", "msps", "trig", "pre", "ovf", "msgs_rtl", "ac_fg23", "ac_rtl", "acpos_fg23", "acpos_rtl" };
+  for (int f = 0; f < 20; f++) {
     J(",\"%s\":[", names[f]);
     for (uint32_t i = 0; i < n; i++) {
       const hist_t *h = &s_hist[(first + i) % HIST_N];
@@ -669,6 +682,10 @@ static void h_history(void)
         case 13: J("%s%lu", c, (unsigned long)h->pre); break;
         case 14: J("%s%lu", c, (unsigned long)h->ovf); break;
         case 15: J("%s%u", c, h->rtl); break;
+        case 16: J("%s%u", c, h->ac_rx[0]); break;
+        case 17: J("%s%u", c, h->ac_rx[1]); break;
+        case 18: J("%s%u", c, h->acpos_rx[0]); break;
+        case 19: J("%s%u", c, h->acpos_rx[1]); break;
       }
     }
     J("]");

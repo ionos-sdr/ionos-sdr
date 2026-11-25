@@ -25,6 +25,7 @@ button.on{background:#3a4a6a;border-color:#6a8acf;color:#fff}
 <div class="card"><h3>Messages / min</h3><canvas id="c1"></canvas></div>
 <div class="card"><h3>Messages / min by receiver (FG23 on-chip vs RTL-SDR on the same antenna)</h3><canvas id="c11"></canvas></div>
 <div class="card"><h3>Aircraft (last minute)</h3><canvas id="c2"></canvas></div>
+<div class="card"><h3>Aircraft per receiver, last minute (seen / with a position message)</h3><canvas id="c12"></canvas></div>
 <div class="card"><h3>Signal level (FG23 soft level − 30, approx. dBFS)</h3><canvas id="c3"></canvas></div>
 <div class="card"><h3>Range (km, max per minute, from the reference point)</h3><canvas id="c4"></canvas></div>
 <div class="card"><h3>Noise level (FG23 RSSI, dBm)</h3><canvas id="c5"></canvas></div>
@@ -47,6 +48,7 @@ function mk(id,sets,opt={}){const ctx=document.getElementById(id);
 mk('c1',[['all','#4fa3ff',1],['position','#ffb04f',0],['DF17','#7ee787',0]]);
 mk('c2',[['aircraft','#4fa3ff',1],['with position','#ffb04f',1]]);
 mk('c11',[['FG23 on-chip','#7ee787',1],['RTL-SDR','#d2a8ff',1]]);
+mk('c12',[['FG23 seen','#7ee787',0],['RTL seen','#d2a8ff',0],['FG23 position','#2ea043',0],['RTL position','#8957e5',0]]);
 mk('c3',[['mean','#7ee787',0],['peak','#ff6b6b',0]],{y:{beginAtZero:false}});
 mk('c4',[['max range','#d2a8ff',1]]);
 mk('c5',[['noise','#999',0]],{y:{beginAtZero:false}});
@@ -62,7 +64,7 @@ function set(id,labels,...arrs){const c=C[id];c.data.labels=labels;arrs.forEach(
 async function load(){let h;try{h=await (await fetch('data/history.json'+q+(q?'&':'?')+'mins='+mins,{cache:'no-store'})).json()}catch(e){document.getElementById('sum').textContent='no connection';return}
  const L=h.t.map(lab);
  set('c1',L,h.msgs,h.pos,h.df17);
- const RT=(h.msgs_rtl||h.msgs.map(()=>0)); set('c11',L,h.msgs.map((v,i)=>v==null?null:Math.max(0,v-(RT[i]||0))),RT); set('c2',L,h.ac,h.acpos); set('c3',L,h.sig,h.peak); set('c4',L,h.range_km);
+ const RT=(h.msgs_rtl||h.msgs.map(()=>0)); set('c11',L,h.msgs.map((v,i)=>v==null?null:Math.max(0,v-(RT[i]||0))),RT); set('c2',L,h.ac,h.acpos); if(h.ac_fg23)set('c12',L,h.ac_fg23,h.ac_rtl,h.acpos_fg23,h.acpos_rtl); set('c3',L,h.sig,h.peak); set('c4',L,h.range_km);
  set('c5',L,h.noise); set('c6',L,h.trig,h.pre,h.ovf); set('c7',L,h.msps); set('c8',L,h.tracks);
  const tot=Math.round(h.msgs.reduce((a,b)=>a+(b||0),0)*(h.step||60)/60), mx=Math.max(0,...h.range_km.filter(x=>x!=null));
  try{const b=await (await fetch('data/bench.json'+q+(q?'&':'?')+'mins='+mins,{cache:'no-store'})).json();const LB=b.t.map(lab);

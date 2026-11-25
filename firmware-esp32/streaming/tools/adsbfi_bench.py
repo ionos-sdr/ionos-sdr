@@ -13,6 +13,9 @@ Per sample: ref = adsb.fi aircraft with a position not older than MAX_AGE_S,
 ours = aircraft this receiver heard in the last MAX_AGE_S (any message),
 matched = ref & ours (by ICAO), only = ours not in ref. Coverage per distance
 band = matched / ref within the band (distance from the receiver).
+Per receiver (FG23 on-chip / RTL-SDR, e.g. both behind a splitter): the same
+matched and coverage figures from the ESP's 'ionos_rx' field (heard by that
+receiver within the last 60 s); these go to the CSV only.
 
 usage: python adsbfi_bench.py [--esp http://192.168.1.243:8080] [--csv adsbfi_bench.csv]
        receiver position: --lat/--lon or env ADSB_RX_LAT / ADSB_RX_LON
@@ -49,6 +52,11 @@ def sample(a, ref_url):
             continue
         refpos[x['hex'].lower().lstrip('~')] = dist_km(a.lat, a.lon, x['lat'], x['lon'])
     seen = {x['hex'].lower() for x in ours.get('aircraft', []) if float(x.get('seen', 99)) <= MAX_AGE_S}
+    rx = {'fg23': set(), 'rtl': set()}
+    for x in ours.get('aircraft', []):
+        r = x.get('ionos_rx')
+        if r in ('fg23', 'both'): rx['fg23'].add(x['hex'].lower())
+        if r in ('rtl', 'both'): rx['rtl'].add(x['hex'].lower())
     matched = seen & set(refpos)
     s = {'ref': len(refpos), 'ours': len(seen), 'matched': len(matched), 'only': len(seen - set(refpos)),
          'maxkm': max((refpos[h] for h in matched), default=0.0)}
@@ -56,6 +64,8 @@ def sample(a, ref_url):
         inb = [h for h, d in refpos.items() if lo <= d < hi]
         s['n%d' % i] = len(inb)
         s['m%d' % i] = sum(1 for h in inb if h in seen)
+        for k in rx: s['%s_m%d' % (k, i)] = sum(1 for h in inb if h in rx[k])
+    for k in rx: s[k + '_matched'] = len(rx[k] & set(refpos)); s[k + '_seen'] = len(rx[k])
     return s
 
 
@@ -72,7 +82,8 @@ def main():
     f = open(a.csv, 'a', newline='')
     w = csv.writer(f)
     if new:
-        w.writerow(['t', 'ref', 'ours', 'matched', 'only_ours', 'cov0', 'cov1', 'cov2', 'cov3', 'cov4', 'max_km', 'samples'])
+        w.writerow(['t', 'ref', 'ours', 'matched', 'only_ours', 'cov0', 'cov1', 'cov2', 'cov3', 'cov4', 'max_km', 'samples']
+                   + ['%s_%s' % (k, c) for k in ('fg23', 'rtl') for c in ('seen', 'matched', 'cov0', 'cov1', 'cov2', 'cov3', 'cov4')])
     t_end = time.time() + a.hours * 3600 if a.hours > 0 else None
     print('adsb.fi benchmark:', ref_url, '->', a.esp, flush=True)
     buf, minute = [], int(time.time() // 60)
@@ -91,6 +102,11 @@ def main():
                 cov.append(255 if n == 0 else round(100.0 * mm / n))
             row = [minute * 60 + 60, round(avg('ref')), round(avg('ours')), round(avg('matched')), round(avg('only')),
                    *cov, round(max(x['maxkm'] for x in buf)), len(buf)]
+            for k in ('fg23', 'rtl'):
+                row += [round(avg(k + '_seen')), round(avg(k + '_matched'))]
+                for i in range(len(BANDS_KM)):
+                    n, mm = sum(x['n%d' % i] for x in buf), sum(x['%s_m%d' % (k, i)] for x in buf)
+                    row.append(255 if n == 0 else round(100.0 * mm / n))
             w.writerow(row); f.flush()
             body = ','.join(str(v) for v in row[:11]).encode()
             try:
@@ -100,8 +116,8 @@ def main():
                 posted = 'posted'
             except Exception as e:
                 posted = 'POST failed: ' + str(e)[:60]
-            print(time.strftime('%H:%M:%S'), 'ref %d ours %d both %d only %d cov %s max %d km (%s)'
-                  % (row[1], row[2], row[3], row[4], row[5:10], row[10], posted), flush=True)
+            print(time.strftime('%H:%M:%S'), 'ref %d ours %d both %d only %d cov %s max %d km | fg23 %d/%d rtl %d/%d (%s)'
+                  % (row[1], row[2], row[3], row[4], row[5:10], row[10], row[13], row[12], row[20], row[19], posted), flush=True)
             buf, minute = [], m
         time.sleep(max(1.0, SAMPLE_S - (time.time() - t0)))
 
