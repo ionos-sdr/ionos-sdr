@@ -55,6 +55,7 @@ typedef struct {
   int32_t  alt; bool alt_ok;
   float    gs, track; int32_t vrate; bool vel_ok;
   double   lat, lon; bool pos_ok;
+  bool     cpr_fix[2];                 /* that CPR half came from an error-corrected frame */
   float    cand_lat, cand_lon; uint32_t cand_ms;   /* first global fix waits for a second one that agrees */
   uint32_t cpr_lat[2], cpr_lon[2], cpr_ms[2]; bool cpr_ok[2];
   int8_t   lvl_last; float lvl_sum; uint32_t lvl_n;
@@ -282,7 +283,7 @@ static bool pos_sane(ac_t *a, double olat, double olon, uint32_t now)
   return false;
 }
 
-static void decode_df17(ac_t *a, const uint8_t *m, uint32_t now, st_t *st, double ts)
+static void decode_df17(ac_t *a, const uint8_t *m, uint32_t now, st_t *st, double ts, bool fixed)
 {
   static const char cs[] = "#ABCDEFGHIJKLMNOPQRSTUVWXYZ##### ###############0123456789######";
   uint32_t tc = bits(m, 32, 5);
@@ -297,9 +298,12 @@ static void decode_df17(ac_t *a, const uint8_t *m, uint32_t now, st_t *st, doubl
     uint32_t a12 = bits(m, 40, 12);
     if (a12 & 0x10u) { uint32_t n = ((a12 >> 5) << 4) | (a12 & 0xFu); a->alt = (int32_t)n * 25 - 1000; a->alt_ok = true; }
     int f = (int)bits(m, 53, 1);
-    a->cpr_lat[f] = bits(m, 54, 17); a->cpr_lon[f] = bits(m, 71, 17); a->cpr_ms[f] = now; a->cpr_ok[f] = true;
+    a->cpr_lat[f] = bits(m, 54, 17); a->cpr_lon[f] = bits(m, 71, 17); a->cpr_ms[f] = now; a->cpr_ok[f] = true; a->cpr_fix[f] = fixed;
     st->pos++; s_tot.pos++;
-    if (a->cpr_ok[0] && a->cpr_ok[1] && (uint32_t)abs((int32_t)(a->cpr_ms[0] - a->cpr_ms[1])) < CPR_PAIR_MS) {
+    /* global decode only from two CRC-clean halves: a mis-corrected bit in a CPR
+     * field (1-2 bit correction on the FG23 path) moves the fix by a whole zone
+     * or more - corrected frames may still refine a known position (local) */
+    if (a->cpr_ok[0] && a->cpr_ok[1] && !a->cpr_fix[0] && !a->cpr_fix[1] && (uint32_t)abs((int32_t)(a->cpr_ms[0] - a->cpr_ms[1])) < CPR_PAIR_MS) {
       double olat = a->lat, olon = a->lon;
       if (cpr_global(a, f == 1)) {
         if (pos_sane(a, olat, olon, now)) { a->pos_ok = true; a->pos_ms = now; a->pos_ts = ts; st->gok++; s_tot.gok++; ac_range(a, st); return; }
@@ -490,7 +494,7 @@ static void ingest(st_t *st, const uint8_t *m, uint32_t nb, uint32_t df, uint32_
       uint32_t tc = m[4] >> 3;
       if (tc >= 9 && tc <= 18) a->posmsg_ms[src] = now | 1;          /* airborne position heard by this receiver */
       uint32_t pms = a->pos_ms;
-      decode_df17(a, m, now, st, ts);
+      decode_df17(a, m, now, st, ts, fix != 0);
       rf_note(a, m, nb, df, lvl, now, src, a->pos_ms != pms);
     } else {
       rf_note(a, m, nb, df, lvl, now, src, false);
