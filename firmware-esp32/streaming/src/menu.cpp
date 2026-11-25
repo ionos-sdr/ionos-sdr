@@ -72,6 +72,7 @@ static void mark_dirty(uint32_t now) { s_nvs_dirty = true; s_nvs_dirty_ms = now;
 /* ===================== apply functions ================================ */
 static void apply_mode(void)  { menu_host_set_mode((int)s_set.mode); }
 static void apply_decim(void) { menu_host_set_decim(MENU_DECIM[s_set.decim_idx]); }
+int32_t menu_decim(void) { return MENU_DECIM[s_set.decim_idx]; }
 static void apply_freq(void)  { menu_host_tune((uint32_t)s_set.freq_khz); }
 static void apply_fft(void)   { menu_host_console(s_set.fft_idx ? "Fset n=2048" : "Fset n=1024"); }
 static void apply_led(void)

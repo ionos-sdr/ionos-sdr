@@ -63,6 +63,10 @@ static bool      s_dirty = true;
 static void ui_mode_tune(void)
 {
   uint32_t k = UI_TABLE[s_mode].tune_khz;
+  /* AIS owns its stream rate too: dual A+B needs 100 ksps (R=4) at 162.000;
+   * the other demod modes go back to the menu's rate */
+  if (s_mode == UI_PAGE_AIS) { k = ais_mode_tune_khz(); menu_host_set_decim(ais_mode_decim()); }
+  else if (UI_TABLE[s_mode].is_demod) menu_host_set_decim(menu_decim());
   if (k && menu_host_tune(k))
     Serial0.printf("UI: %s -> tuning %lu.%03lu MHz\n", UI_TABLE[s_mode].name,
                    (unsigned long)(k / 1000), (unsigned long)(k % 1000));

@@ -3,10 +3,12 @@
 #define AIS_MODE_H
 #include <stdint.h>
 
-/* Tuning: channel A (87B, 161.975) sits at -10 kHz, away from the DC block,
- * the 1/f noise and the display's DC interpolation. Channel B (162.025) is
- * outside the +-25 kHz band at 50 ksps — single channel for now. */
-#define AIS_TUNE_KHZ  161985u
+/* Tuning. single (AISIQ1): channel A (87B, 161.975) at -10 kHz at 50 ksps,
+ * away from the DC block; channel B (162.025) is outside the band.
+ * dual (AISIQ2, default): 162.000 MHz at 100 ksps (R=4), A at -25 kHz and
+ * B at +25 kHz, DC in the middle between them. */
+#define AIS_TUNE_KHZ       161985u
+#define AIS_DUAL_TUNE_KHZ  162000u
 #define AIS_NMEA_PORT 10110          /* OpenCPN: Network, TCP, <ip>:10110 */
 
 void        ais_mode_init(void);
@@ -17,6 +19,9 @@ uint32_t    ais_mode_bad(void);
 uint32_t    ais_mode_last_ms(void);
 const char *ais_mode_last(void);     /* short description of the last message */
 uint32_t    ais_mode_ships(void);    /* distinct MMSIs seen */
+uint32_t    ais_mode_tune_khz(void); /* the I/Q path's centre for the current setup */
+int32_t     ais_mode_decim(void);    /* the FG23 stream decimation it needs (R) */
+void        ais_iq_cmd(const char *arg);   /* AISIQ[1|2|H<n>|S<hz>] */
 
 /* ---- EXPERIMENTAL (branch exp/fg23-ais-onchip): AIS decoded on the FG23 ----
  * The FG23 sends AIS1 blocks (aispkt.h) instead of I/Q while 'A1' runs. The

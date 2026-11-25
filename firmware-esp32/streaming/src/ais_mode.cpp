@@ -14,14 +14,28 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <string.h>
+#include "esp_timer.h"
+#include "esp_heap_caps.h"
+#include "menu.h"
 
 Stream &diag_stream(void);
 
 #define AIS_MAX_CLI   3
 #define AIS_MMSI_MAX  64
 
-static ais_rx_t   s_a;
+/* I/Q path: ais_multi (DDC per channel + frequency hypotheses), in PSRAM.
+ * dual (default): 162.000 MHz, R=4 -> 100 ksps, channels A and B;
+ * single: 161.985 MHz, R=8 -> 50 ksps, channel A only (the 2026-11-23 setup). */
+static ais_multi_t *s_m = NULL;
 static uint32_t   s_sps = 0;
+static bool       s_dual = true;
+static int        s_nhyp = 1;                /* >1: frequency hypotheses (AFC off) */
+static int32_t    s_step = 1500;
+static int        s_afc = 8;                 /* AFC EMA shift, 0 = off (used with 1 hypothesis) */
+static bool       s_reinit = false;
+static uint32_t   s_rej = 0;                 /* frames dropped by the MMSI / type check */
+static int64_t    s_cpu_us = 0, s_cpu_t0 = 0; static float s_cpu_pct = 0;
+static uint32_t   s_iq_frames = 0;
 static uint32_t   s_last_ms = 0;
 static char       s_last[48] = "";
 static uint32_t   s_mmsi[AIS_MMSI_MAX];
@@ -79,30 +93,110 @@ static void emit(const uint8_t *fr, int len, char chan, float lvl_dbfs, float sn
     if (s_cli[i] && s_cli[i].connected()) { s_cli[i].print(n); s_cli[i].print("\r\n"); s_cli[i].print(ps); s_cli[i].print("\r\n"); }
 }
 
+/* CRC-16 passes ~1/65536 of noise frames; with 2 channels x 5 hypotheses x
+ * 5 lanes some get through. Live 2026-11-24: one I/Q-only "station" had a
+ * 10-digit MMSI. Drop message types 0 / >27 and MMSI 0 / > 999 999 999. */
+static bool plausible(const uint8_t *fr, int len)
+{
+  if (len < 11) return false;
+  unsigned t = fr[0] >> 2;
+  uint32_t mmsi = frame_mmsi(fr, len);
+  return t >= 1 && t <= 27 && mmsi != 0 && mmsi <= 999999999u;
+}
+
 static void on_frame(const uint8_t *fr, int len, char chan, uint32_t t48k, void *ctx)
 {
   (void)t48k; (void)ctx;
-  emit(fr, len, chan, s_a.last_lvl_dbfs, s_a.last_snr_db, s_a.last_foff_hz, false,
-       s_a.last_lvl_dbfs + AIS_DBM_K);
+  if (!plausible(fr, len)) { s_rej++; return; }
+  const ais_rx_t *r = s_m->last;
+  s_iq_frames++;
+  emit(fr, len, chan, r->last_lvl_dbfs, r->last_snr_db, r->last_foff_hz, false,
+       r->last_lvl_dbfs + AIS_DBM_K);
+}
+
+/* Internal RAM first, while >= 10 KB stays free for lwIP/WiFi (see adsb_esp.cpp):
+ * the dual setup with its buffers in PSRAM ran ~10x slower than real time
+ * (cache misses, 2026-11-25). */
+static uint32_t s_n_int = 0, s_n_ps = 0;
+static void *ais_alloc(size_t n)
+{
+  void *p = NULL;
+  if (heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) > n + 256 &&
+      heap_caps_get_free_size(MALLOC_CAP_INTERNAL) > n + 10000)
+    p = heap_caps_malloc(n, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  if (p) s_n_int++;
+  else { p = heap_caps_malloc(n, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT); if (p) s_n_ps++; }
+  return p;
+}
+
+uint32_t ais_mode_tune_khz(void) { return s_dual ? AIS_DUAL_TUNE_KHZ : AIS_TUNE_KHZ; }
+int32_t  ais_mode_decim(void)    { return s_dual ? 4 : 8; }
+
+static void iq_status(void)
+{
+  Stream &o = diag_stream();
+  o.printf("AISIQ [rx %u B, multi %u B] ", (unsigned)sizeof(ais_rx_t), (unsigned)sizeof(ais_multi_t));
+  o.printf("AISIQ %s: tune %lu kHz, R=%ld, stream %lu sps, %d hypotheses x %ld Hz, AFC %d, cpu %.1f %%, frames %lu, rejected %lu, mem int %lu / psram %lu",
+           s_dual ? "dual A+B" : "single A", (unsigned long)ais_mode_tune_khz(), (long)ais_mode_decim(),
+           (unsigned long)s_sps, s_nhyp, (long)s_step, s_nhyp == 1 ? s_afc : 0, (double)s_cpu_pct,
+           (unsigned long)s_iq_frames, (unsigned long)s_rej, (unsigned long)s_n_int, (unsigned long)s_n_ps);
+  if (s_m) for (int c = 0; c < s_m->nch; c++)
+    o.printf(" | %c %+ld Hz: %lu", s_m->ch[c].chan, (long)s_m->ch[c].off_hz, (unsigned long)s_m->ch[c].frames);
+  o.println();
+}
+
+/* AISIQ = status, AISIQ1 = single A (50 ksps), AISIQ2 = dual A+B (100 ksps),
+ * AISIQH<n> = hypotheses 1..5, AISIQS<hz> = hypothesis step,
+ * AISIQA<sh> = AFC time constant 2^sh samples (0 = off; only with 1 hypothesis) */
+void ais_iq_cmd(const char *a)
+{
+  while (*a == ' ') a++;
+  if (*a == '1' || *a == '2') {
+    s_dual = (*a == '2'); s_reinit = true;
+    menu_host_set_decim(ais_mode_decim());
+    menu_host_tune(ais_mode_tune_khz());
+  } else if (*a == 'H') {
+    int n = atoi(a + 1); if (n >= 1 && n <= AIS_HYP_MAX) { s_nhyp = n; s_reinit = true; }
+  } else if (*a == 'S') {
+    long v = atol(a + 1); if (v >= 200 && v <= 4000) { s_step = (int32_t)v; s_reinit = true; }
+  } else if (*a == 'A') {
+    int v = atoi(a + 1); if (v >= 0 && v <= 12) { s_afc = v; s_reinit = true; }
+  }
+  iq_status();
 }
 
 void ais_mode_init(void)
 {
   s_sps = 0;
-  diag_stream().printf("AIS RX: channel A 161.975 MHz (tune %lu kHz), NMEA on TCP %d\n",
-                       (unsigned long)AIS_TUNE_KHZ, AIS_NMEA_PORT);
+  if (!s_m) s_m = (ais_multi_t *)ais_alloc(sizeof(ais_multi_t));
+  if (s_m) memset(s_m, 0, sizeof *s_m);
+  diag_stream().printf("AIS RX: %s, tune %lu kHz, NMEA on TCP %d (%u B in PSRAM)\n",
+                       s_dual ? "channels A+B" : "channel A", (unsigned long)ais_mode_tune_khz(), AIS_NMEA_PORT,
+                       (unsigned)sizeof(ais_multi_t));
 }
 
 void ais_mode_feed(const int16_t *iq, int nsamp, uint32_t sps)
 {
-  if (sps == 0) return;
-  if (sps != s_sps) {
-    s_sps = sps;
-    ais_rx_init(&s_a, sps, (int32_t)(161975 - (int32_t)AIS_TUNE_KHZ) * 1000, 'A', on_frame, NULL);
-    diag_stream().printf("AIS RX: %lu sps, channel FIR %d taps, A at %+ld Hz\n",
-                         (unsigned long)sps, s_a.ch_n, (long)(161975 - (long)AIS_TUNE_KHZ) * 1000);
+  if (sps == 0 || !s_m) return;
+  if (sps != s_sps || s_reinit) {
+    s_sps = sps; s_reinit = false;
+    ais_multi_init(s_m, sps, ais_mode_tune_khz(), s_nhyp, s_step, on_frame, NULL, ais_alloc);
+    for (int c = 0; c < s_m->nch; c++)                /* AFC and hypotheses exclude each other */
+      for (int k = 0; k < s_m->ch[c].nh; k++) s_m->ch[c].rx[k]->afc_sh = (s_nhyp == 1) ? s_afc : 0;
+    diag_stream().printf("AIS RX: %lu sps at %lu kHz -> %d channel(s), DDC %d taps /%d -> %lu sps, %d hypotheses x %ld Hz\n",
+                         (unsigned long)sps, (unsigned long)ais_mode_tune_khz(), s_m->nch,
+                         s_m->nch ? s_m->ch[0].n : 0, s_m->nch ? s_m->ch[0].D : 0,
+                         (unsigned long)s_m->sps_ddc, s_nhyp, (long)s_step);
   }
-  ais_rx_feed(&s_a, iq, nsamp);
+  int64_t t0 = esp_timer_get_time();
+  ais_multi_feed(s_m, iq, nsamp);
+  int64_t t1 = esp_timer_get_time();
+  s_cpu_us += t1 - t0;
+  if (!s_cpu_t0) s_cpu_t0 = t1;
+  if (t1 - s_cpu_t0 >= 10000000) {                  /* load of the AIS demod, % of one core, per 10 s */
+    s_cpu_pct = 100.0f * (float)s_cpu_us / (float)(t1 - s_cpu_t0);
+    s_cpu_us = 0; s_cpu_t0 = t1;
+  }
 }
 
 /* AIS1 block from the FG23 (main.cpp process(), SPI task context is NOT
@@ -181,8 +275,8 @@ void ais_mode_tick(uint32_t now_ms)
   }
 }
 
-uint32_t    ais_mode_frames(void)  { return s_a.frames + s_hw_frames; }
-uint32_t    ais_mode_bad(void)     { return s_a.crc_bad; }
+uint32_t    ais_mode_frames(void)  { return s_iq_frames + s_hw_frames; }
+uint32_t    ais_mode_bad(void)     { return s_m ? ais_multi_crc_bad(s_m) : 0; }
 uint32_t    ais_mode_last_ms(void) { return s_last_ms; }
 const char *ais_mode_last(void)    { return s_last; }
 uint32_t    ais_mode_ships(void)   { return s_nmmsi; }
@@ -281,7 +375,7 @@ static void bench_enter(bool hw, uint32_t now)
    * 0.41 msgs/min against ~2.6/min before the bench. */
   if (!hw && s_b_send) {
     char f[16];
-    snprintf(f, sizeof f, "F%lu", (unsigned long)AIS_TUNE_KHZ);
+    snprintf(f, sizeof f, "F%lu", (unsigned long)ais_mode_tune_khz());
     s_b_send(f);
   }
   diag_stream().printf("AISBENCH slot %lu: %s for %lu s\n", (unsigned long)s_b_slot,

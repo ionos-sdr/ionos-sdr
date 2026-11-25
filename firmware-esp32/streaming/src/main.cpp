@@ -2098,8 +2098,9 @@ static void deliver(const uint8_t *b)
 #endif
   /* CW: the same raw int16 I/Q, it only needs the envelope */
   if (demod_on && ui_mode() == UI_PAGE_CW) cw_rx_feed(iq, nsamp, cur_sps);
-  /* AIS: GMSK 9600, channel A, same raw int16 I/Q (ais_mode.cpp / ais_rx.c) */
-  if (demod_on && ui_mode() == UI_PAGE_AIS) ais_mode_feed(iq, nsamp, cur_sps);
+  /* AIS: GMSK 9600, same raw int16 I/Q (ais_mode.cpp / ais_rx.c). Its own
+   * DDC decimates, so it also runs at 100 ksps (dual A+B, AISIQ2). */
+  if (!usbhost_usb_mode() && cur_sps <= 100000u && ui_mode() == UI_PAGE_AIS) ais_mode_feed(iq, nsamp, cur_sps);
 
   /* --- (a) USB: the WHOLE block goes, header included. The PC side strips
    * the header; in return it can resynchronise on the magic at any time,
@@ -2460,6 +2461,11 @@ static void console_dispatch(const char *cmd)
     return;
   }
   if (!strcmp(cmd, "AISDBG")) { ais_hw_dbg_toggle(); return; }
+  if (!strncmp(cmd, "AISIQ", 5)) {               /* I/Q AIS setup: AISIQ1 single A, AISIQ2 dual A+B, H<n>, S<hz> */
+    if ((cmd[5] == '1' || cmd[5] == '2') && ui_mode() != UI_PAGE_AIS) { ais_iq_cmd(cmd + 5); ui_set_mode(UI_PAGE_AIS); return; }
+    ais_iq_cmd(cmd + 5);
+    return;
+  }
   if (!strncmp(cmd, "AISBENCH", 8)) {
     if (atol(cmd + 8) > 0 && ui_mode() != UI_PAGE_AIS) ui_set_mode(UI_PAGE_AIS);
     ais_bench_cmd(cmd + 8, cmdlink_send);
@@ -2563,9 +2569,12 @@ extern "C" void menu_host_set_decim(int32_t R)
 static void menu_decim_tick(uint32_t now)
 {
   if (!s_decim_pending) return;
-  bool running = (cur_decim != 0) && (s_last_blk_s > 1.0f || (now - s_decim_pending_ms) < 2500u);
+  /* running = blocks are arriving. The old extra "< 2500 ms since the request"
+   * made every request look like a running stream: 'i' then STARTED a stopped
+   * stream and the 'i<R>' 150 ms later stopped it again (2026-11-25, AISIQ2). */
+  bool running = (cur_decim != 0) && s_last_blk_s > 1.0f;
   if (cur_decim == 0 && (now - s_decim_pending_ms) < 5000u) return;   /* wait for the header */
-  if (cur_decim == (uint32_t)s_decim_pending) { s_decim_pending = 0; return; }   /* already there */
+  if (cur_decim == (uint32_t)s_decim_pending) { s_decim_pending = 0; return; }   /* already there: never toggle */
   snprintf(s_decim_start, sizeof s_decim_start, "i%ld", (long)s_decim_pending);
   if (running) {
     cmdlink_send("i");                              /* stop first; the start line follows 150 ms later
@@ -2577,10 +2586,25 @@ static void menu_decim_tick(uint32_t now)
   DIAG.printf("MENU: decimation -> R=%ld (%s)\n", (long)s_decim_pending, running ? "restart" : "start");
   s_decim_pending = 0;
 }
+static char     s_decim_verify[16];       /* the start line, re-sent once if no blocks follow */
+static uint32_t s_decim_verify_ms = 0;
 static void menu_decim_start_tick(uint32_t now)
 {
-  if (s_decim_start[0] && s_decim_start_ms && now - s_decim_start_ms >= 150u) {
-    cmdlink_send(s_decim_start); s_decim_start[0] = 0; s_decim_start_ms = 0;
+  /* 600 ms, not 150: with 150 the stream often stayed stopped after a
+   * restart (R=8 -> 4, 2026-11-25) - the FG23 was still tearing the stream down */
+  if (s_decim_start[0] && s_decim_start_ms && now - s_decim_start_ms >= 600u) {
+    cmdlink_send(s_decim_start);
+    snprintf(s_decim_verify, sizeof s_decim_verify, "%s", s_decim_start);
+    s_decim_verify_ms = now;
+    s_decim_start[0] = 0; s_decim_start_ms = 0;
+  }
+  /* 4 s later still no blocks: the start did not take - send it once more */
+  if (s_decim_verify[0] && now - s_decim_verify_ms >= 4000u) {
+    if (s_last_blk_s < 1.0f) {
+      cmdlink_send(s_decim_verify);
+      DIAG.printf("MENU: stream did not start, '%s' again\n", s_decim_verify);
+    }
+    s_decim_verify[0] = 0;
   }
 }
 

@@ -74,6 +74,7 @@ void menu_host_info(menu_host_info_t *o);           /* fill live values */
 bool menu_host_tune(uint32_t khz);                  /* -> rtl_pending_set */
 void menu_host_cmdlink(const char *line);           /* -> cmdlink_send */
 void menu_host_set_decim(int32_t R);                /* FG23 'i' semantics handled by the ESP (knows if the stream runs) */
+int32_t menu_decim(void);                           /* the menu's stream decimation R (the non-AIS modes use it) */
 bool menu_host_console(const char *line);           /* -> the console dispatcher (Lset…, Fset…, Bs…) */
 void menu_host_set_mode(int mode);                  /* 0/1, UI-M4 hooks here */
 
