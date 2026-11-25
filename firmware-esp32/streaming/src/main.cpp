@@ -1439,6 +1439,7 @@ static uint32_t s_cmd_repeat_ms = 0;
  * the stream is stopped on purpose, and a re-sent 'i4' threw the FG23 out of
  * that mode (ID1, 2026-11-25) */
 static char s_decim_verify[16];
+static void menu_decim_cancel(void);
 static void cmdlink_send(const char *s)
 {
   if (s_decim_verify[0] && strcmp(s, s_decim_verify) != 0) s_decim_verify[0] = 0;
@@ -2463,6 +2464,10 @@ static void console_dispatch(const char *cmd)
     char l[24];
     snprintf(l, sizeof l, "A%s", cmd[5] ? cmd + 5 : "1");
     if (l[1] != '0' && ui_mode() != UI_PAGE_AIS) ui_set_mode(UI_PAGE_AIS);
+    /* the on-chip path needs no stream: drop the AIS I/Q rate change that
+     * entering the AIS mode queued. Its 'i' + 'i4' restart, sent between AC4000
+     * and A1, left ID1's ADS-B monitor deaf (2026-11-25, 15:05-18:15). */
+    if (l[1] != '0') menu_decim_cancel();
     cmdlink_send(l);
     return;
   }
@@ -2571,6 +2576,10 @@ extern "C" void menu_host_set_decim(int32_t R)
 {
   s_decim_pending = R;
   s_decim_pending_ms = millis();
+}
+static void menu_decim_cancel(void)
+{
+  s_decim_pending = 0; s_decim_start[0] = 0; s_decim_start_ms = 0; s_decim_verify[0] = 0;
 }
 static void menu_decim_tick(uint32_t now)
 {
