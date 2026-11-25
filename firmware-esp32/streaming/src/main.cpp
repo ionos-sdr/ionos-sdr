@@ -309,6 +309,8 @@
 #include "cw_rx.h"          /* CW Morse decoder */
 #include "ais_mode.h"       /* AIS receiver, NMEA on TCP 10110 */
 #include "adsb_esp.h"       /* ADS-B: aircraft table, tar1090/readsb JSON on :8080 */
+#define MAP_META_ONLY
+#include "map_data.h"       /* TFT base maps: MAP_LAT0/LON0, MAP_LEVELS (zoom choice in view_adsb) */
 #include "radio_sm.h"       /* the FG23's state from its blocks (docs/radio-state-machine.md) */
 
 /* ---- Menu and button. The Heltec V3 PRG button (GPIO0) pages through the
@@ -2741,38 +2743,48 @@ static void view_adsb(uint32_t now)
   tft_view_t *v = s_tv;
   memset(v, 0, sizeof *v);
   v->kind = 1;
+  { double la, lo; adsb_ref(&la, &lo); v->ref_lat = (float)la; v->ref_lon = (float)lo; }
   int n = adsb_ac_list(s_acv, TV_AC);
-  int npos = 0; float maxd = 0;
+  int nfg = 0;
+  /* the device shows its OWN receiver: FG23 entries only (the RTL-SDR has its own on the web map) */
+  float ext[TV_AC]; int ne = 0;
+  const float kx = 111.32f * cosf(MAP_LAT0 * (float)M_PI / 180.0f);
   for (int i = 0; i < n; i++) {
     const adsb_ac_view_t *a = &s_acv[i];
+    if (!(a->rx & 1)) continue;
+    nfg++;
     if (!a->pos_ok) continue;
-    float d = sqrtf(a->dx_km * a->dx_km + a->dy_km * a->dy_km);
-    if (d > maxd) maxd = d;
     tv_ac_t *t = &v->ac[v->nac++];
-    t->x = (int16_t)lrintf(a->dx_km * 10); t->y = (int16_t)lrintf(a->dy_km * 10);
+    t->lat = a->lat; t->lon = a->lon;
     t->alt = a->alt; t->alt_ok = a->alt_ok; t->trk = a->trk_ok ? (int16_t)a->trk : -1; t->rx = a->rx;
-    if (a->flight[0] && a->flight[0] != ' ') { snprintf(t->lab, sizeof t->lab, "%.8s", a->flight); for (int k = 7; k >= 0 && t->lab[k] == ' '; k--) t->lab[k] = 0; }
+    if (a->flight[0] && a->flight[0] != ' ') { snprintf(t->lab, sizeof t->lab, "%.8s", a->flight); for (int k = 7; k >= 0 && (t->lab[k] == ' ' || !t->lab[k]); k--) t->lab[k] = 0; }
     else snprintf(t->lab, sizeof t->lab, "%06lX", (unsigned long)a->icao);
-    npos++;
+    /* how far from the map centre, in "half widths" (the map is 240 x 270) */
+    float ex = fabsf((a->lon - MAP_LON0) * kx), ey = fabsf((a->lat - MAP_LAT0) * 110.574f) * 240.0f / 270.0f;
+    ext[ne++] = ex > ey ? ex : ey;
   }
-  static const uint16_t RNG[] = { 25, 50, 100, 150, 200, 300, 400 };
-  v->range_km = 400;
-  for (unsigned k = 0; k < sizeof RNG / sizeof RNG[0]; k++) if (maxd * 1.05f <= RNG[k]) { v->range_km = RNG[k]; break; }
-  snprintf(v->title, sizeof v->title, "%s ADS-B %.0f MHz  ac %d  pos %d",
-           r->st == RS_ADSB_HW ? "FG23" : rs_name(r->st), r->hw_f_hz ? r->hw_f_hz / 1e6 : 1090.0, n, npos);
-  v->title_c = rs_color(r->st);
+  /* zoom: smallest level that holds ~85 % of the aircraft; changes at most every 30 s */
+  static uint8_t lvl = 1; static uint32_t lvl_ms = 0;
+  if (ne && (now - lvl_ms > 30000u || !lvl_ms)) {
+    for (int i = 1; i < ne; i++) for (int k = i; k > 0 && ext[k - 1] > ext[k]; k--) { float t = ext[k]; ext[k] = ext[k - 1]; ext[k - 1] = t; }
+    float need = ext[(int)(ne * 0.85f) < ne ? (int)(ne * 0.85f) : ne - 1];
+    uint8_t want = MAP_NLEV - 1;
+    for (uint8_t k = 0; k < MAP_NLEV; k++) if (need <= MAP_HALF_KM[k]) { want = k; break; }
+    if (want != lvl) { lvl = want; lvl_ms = now; } else if (!lvl_ms) lvl_ms = now;
+  }
+  v->map_level = lvl;
+  snprintf(v->title, sizeof v->title, "%s 1090 MHz  ac %d  pos %d", r->st == RS_ADSB_HW ? "FG23" : rs_name(r->st), nfg, v->nac);
+  v->title_c = (r->st == RS_ADSB_HW) ? TFTC_WHITE : rs_color(r->st);
   static adsb_frm_view_t *fr = NULL;
-  if (!fr) fr = (adsb_frm_view_t *)heap_caps_malloc(10 * sizeof *fr, MALLOC_CAP_SPIRAM);
-  int nf = fr ? adsb_recent(fr, 10) : 0;
-  for (int i = 0; i < nf && v->nln < TV_LN; i++) {
+  if (!fr) fr = (adsb_frm_view_t *)heap_caps_malloc(16 * sizeof *fr, MALLOC_CAP_SPIRAM);
+  int nf = fr ? adsb_recent(fr, 16) : 0;
+  for (int i = 0; i < nf && v->nln < 3; i++) {
+    if (fr[i].src) continue;                                   /* FG23 frames only */
     char t[12]; hms(t, sizeof t, (long)fr[i].t, fr[i].ms, now);
-    char lv[6] = "   "; if (fr[i].lvl != -128) snprintf(lv, sizeof lv, "%3d", fr[i].lvl - 30);
     tv_ln_t *L = &v->ln[v->nln++];
-    snprintf(L->s, sizeof L->s, "%s %c %06lX %-17.17s %s", t, fr[i].src ? 'R' : 'F',
-             (unsigned long)fr[i].icao, fr[i].txt, lv);
-    L->c = fr[i].src ? TFTC_CYAN : TFTC_WHITE;
+    snprintf(L->s, sizeof L->s, "%s %06lX %.21s", t, (unsigned long)fr[i].icao, fr[i].txt);
+    L->c = TFTC_WHITE;
   }
-  if (!nf) { snprintf(v->ln[0].s, sizeof v->ln[0].s, "no frames yet (UTC, F=FG23 R=RTL)"); v->ln[0].c = TFTC_DARKGREY; v->nln = 1; }
 }
 
 static void view_ais(uint32_t now)

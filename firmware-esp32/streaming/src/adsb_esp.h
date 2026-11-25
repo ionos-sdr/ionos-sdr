@@ -26,12 +26,14 @@ uint32_t adsb_aircraft_count(void);
 typedef struct {
   uint32_t icao; char flight[9];
   float    dx_km, dy_km;      /* east / north of the reference, valid if pos_ok */
+  float    lat, lon;          /* valid if pos_ok */
   int32_t  alt;  bool alt_ok, pos_ok;
   float    trk;  bool trk_ok;
   uint32_t age_ms;            /* since the last message */
   uint8_t  rx;                /* bit0 FG23 heard it in the last minute, bit1 RTL-SDR */
 } adsb_ac_view_t;
-int adsb_ac_list(adsb_ac_view_t *o, int max);          /* aircraft seen in the last 60 s */
+int adsb_ac_list(adsb_ac_view_t *o, int max);
+void adsb_ref(double *lat, double *lon);              /* the station (station_config.h) */          /* aircraft seen in the last 60 s */
 typedef struct {
   uint32_t ms;                /* millis() at reception */
   time_t   t;                 /* epoch s, 0 = no clock */

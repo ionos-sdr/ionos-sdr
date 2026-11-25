@@ -425,6 +425,8 @@ int adsb_recent(adsb_frm_view_t *o, int max)
   xSemaphoreGive(s_mx);
   return n;
 }
+void adsb_ref(double *lat, double *lon) { *lat = ADSB_REF_LAT; *lon = ADSB_REF_LON; }
+
 int adsb_ac_list(adsb_ac_view_t *o, int max)
 {
   if (!s_mx || !s_ac) return 0;
@@ -437,6 +439,7 @@ int adsb_ac_list(adsb_ac_view_t *o, int max)
     v->icao = a->icao; memcpy(v->flight, a->flight, sizeof v->flight);
     v->pos_ok = a->pos_ok && now - a->pos_ms < 60000u;
     if (v->pos_ok) ref_km(a->lat, a->lon, &v->dx_km, &v->dy_km); else v->dx_km = v->dy_km = 0;
+    v->lat = (float)a->lat; v->lon = (float)a->lon;
     v->alt = a->alt; v->alt_ok = a->alt_ok; v->trk = a->track; v->trk_ok = a->vel_ok;
     v->age_ms = now - a->last_ms;
     v->rx = (uint8_t)(1u << a->src);

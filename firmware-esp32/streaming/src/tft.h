@@ -93,12 +93,14 @@ void tft_set_state(const char *val, uint16_t col, const char *line, uint16_t lin
  * (no flicker); the caller owns the overlay (tft_overlay(true) first). */
 #define TV_AC 48
 #define TV_LN 25
-typedef struct { int16_t x, y; int32_t alt; int16_t trk; uint8_t rx; bool alt_ok; char lab[9]; } tv_ac_t;  /* x,y: 0.1 km E/N */
+typedef struct { float lat, lon; int32_t alt; int16_t trk; uint8_t rx; bool alt_ok; char lab[9]; } tv_ac_t;
 typedef struct { char s[41]; uint16_t c; } tv_ln_t;
 typedef struct {
-    uint8_t  kind;               /* 1 = radar + list (ADS-B), 2 = list only (AIS) */
+    uint8_t  kind;               /* 1 = map + newest frames (ADS-B), 2 = list only (AIS) */
     char     title[41]; uint16_t title_c;
-    uint16_t range_km;
+    uint16_t range_km;           /* unused by the map view */
+    uint8_t  map_level;          /* index into MAP_LEVELS (map_data.h) */
+    float    ref_lat, ref_lon;   /* the station, NAN = not shown */
     uint8_t  nac;  tv_ac_t ac[TV_AC];
     uint8_t  nln;  tv_ln_t ln[TV_LN];
 } tft_view_t;

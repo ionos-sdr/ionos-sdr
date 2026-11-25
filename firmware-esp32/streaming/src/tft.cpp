@@ -613,6 +613,82 @@ static uint16_t alt_col(const tv_ac_t *a)
     return TFT_MAGENTA;
 }
 
+
+/* ---- on-chip ADS-B: base map (map_data.h, Natural Earth) + aircraft + translucent text bands ---- */
+#include "map_data.h"
+static inline uint16_t sw16(uint16_t c) { return (uint16_t)((c >> 8) | (c << 8)); }   /* sprite buffer is byte-swapped RGB565 */
+static void band_dim(uint16_t *buf, int y0, int y1)          /* 50 % darker: text stays readable, map shows through */
+{
+    for (int y = y0; y < y1; y++) for (int x = 0; x < W; x++) {
+        uint16_t c = sw16(buf[y * W + x]);
+        buf[y * W + x] = sw16((uint16_t)((c >> 1) & 0x7BEF));
+    }
+}
+static uint16_t alt_col565(const tv_ac_t *a)                  /* web map colours: hsl(30+t*270, 85 %, 45 %) */
+{
+    if (!a->alt_ok) return 0x8410;
+    float t = a->alt / 40000.0f; if (t < 0) t = 0; if (t > 1) t = 1;
+    float h = 30 + t * 270, s = 0.85f, l = 0.45f;
+    float c = (1 - fabsf(2 * l - 1)) * s, hp = h / 60.0f, x = c * (1 - fabsf(fmodf(hp, 2) - 1)), m = l - c / 2;
+    float r = 0, gg = 0, b = 0;
+    if (hp < 1) { r = c; gg = x; } else if (hp < 2) { r = x; gg = c; } else if (hp < 3) { gg = c; b = x; }
+    else if (hp < 4) { gg = x; b = c; } else if (hp < 5) { r = x; b = c; } else { r = c; b = x; }
+    return lcd.color565((uint8_t)((r + m) * 255), (uint8_t)((gg + m) * 255), (uint8_t)((b + m) * 255));
+}
+static void map_render(LGFX_Sprite &g, const tft_view_t *v)
+{
+    const map_level_t *L = &MAP_LEVELS[v->map_level < MAP_NLEV ? v->map_level : 1];
+    uint16_t *buf = (uint16_t *)g.getBuffer();
+    uint16_t pal[64];
+    for (int k = 0; k < 64; k++) pal[k] = sw16(L->pal[k]);
+    for (int i = 0; i < MAP_W * MAP_H; i++) buf[i] = pal[L->img[i]];
+    const float kx = 111.32f * cosf(MAP_LAT0 * (float)M_PI / 180.0f);
+    auto X = [&](float lon) { return (lon - MAP_LON0) * kx / L->kmpp + MAP_W / 2; };
+    auto Y = [&](float lat) { return (MAP_LAT0 - lat) * 110.574f / L->kmpp + MAP_H / 2; };
+    /* station */
+    if (!isnan(v->ref_lat)) {
+        int sx = (int)X(v->ref_lon), sy = (int)Y(v->ref_lat);
+        g.drawCircle(sx, sy, 4, TFT_RED); g.drawCircle(sx, sy, 5, TFT_WHITE); g.fillCircle(sx, sy, 1, TFT_RED);
+    }
+    /* aircraft: oriented arrow, colour = altitude; labels only where they do not collide */
+    int16_t lr[TV_AC][4]; int nl = 0;
+    for (int i = 0; i < v->nac; i++) {
+        const tv_ac_t *a = &v->ac[i];
+        float px = X(a->lon), py = Y(a->lat);
+        if (px < -6 || px > W + 6 || py < 10 || py > VSA - 34) continue;
+        uint16_t c = alt_col565(a);
+        float t = (a->trk >= 0 ? a->trk : 0) * (float)M_PI / 180.0f, sn = sinf(t), cs = cosf(t);
+        auto R = [&](float dx, float dy, int &ox, int &oy) { ox = (int)lrintf(px + dx * cs - dy * sn); oy = (int)lrintf(py + dx * sn + dy * cs); };
+        int x0, y0_, x1, y1, x2, y2;
+        R(0, -7, x0, y0_); R(-4.5f, 5, x1, y1); R(4.5f, 5, x2, y2);
+        g.fillTriangle(x0, y0_, x1, y1, x2, y2, c);
+        g.drawTriangle(x0, y0_, x1, y1, x2, y2, TFT_BLACK);
+        int lw = 6 * (int)strlen(a->lab), lx = (int)px + 7, ly = (int)py - 4;
+        if (lx + lw > W) lx = (int)px - 7 - lw;
+        bool clash = ly < 11 || ly + 8 > VSA - 34;
+        for (int k = 0; k < nl && !clash; k++)
+            clash = !(lx + lw < lr[k][0] || lx > lr[k][2] || ly + 8 < lr[k][1] || ly > lr[k][3]);
+        if (clash) continue;
+        lr[nl][0] = lx; lr[nl][1] = ly; lr[nl][2] = lx + lw; lr[nl][3] = ly + 8; nl++;
+        g.setTextColor(TFT_BLACK);
+        for (int dx = -1; dx <= 1; dx++) for (int dy = -1; dy <= 1; dy++) if (dx || dy) { g.setCursor(lx + dx, ly + dy); g.print(a->lab); }
+        g.setTextColor(TFT_WHITE);
+        g.setCursor(lx, ly); g.print(a->lab);
+    }
+    /* scale bar (bottom left, above the frame band) */
+    int km = (L->half_km <= 60) ? 20 : (L->half_km <= 150) ? 50 : 100, bl = (int)lrintf(km / L->kmpp), by = VSA - 40;
+    g.fillRect(6, by, bl, 3, TFT_BLACK); g.drawFastVLine(6, by - 2, 7, TFT_BLACK); g.drawFastVLine(6 + bl, by - 2, 7, TFT_BLACK);
+    g.setTextColor(TFT_BLACK); g.setCursor(10 + bl, by - 3); char sb[12]; snprintf(sb, sizeof sb, "%d km", km); g.print(sb);
+    /* translucent bands: title on top, newest frames at the bottom */
+    band_dim(buf, 0, 11);
+    g.setTextColor(v->title_c); g.setCursor(2, 2); g.print(v->title);
+    int nb = v->nln < 3 ? v->nln : 3, yb = VSA - 1 - 10 * nb;
+    if (nb) {
+        band_dim(buf, yb - 1, VSA);
+        for (int i = 0; i < nb; i++) { g.setTextColor(v->ln[i].c); g.setCursor(2, yb + 1 + 10 * i); g.print(v->ln[i].s); }
+    }
+}
+
 static void view_render(void)
 {
     const tft_view_t *v = s_vw;
@@ -630,42 +706,8 @@ static void view_render(void)
     g.setCursor(0, 2);
     g.print(v->title);
     int y0 = 14;
-    if (v->kind == 1) {
-        const int cx = W / 2, cy = 12 + 75, R = 72;
-        float rk = v->range_km ? (float)v->range_km : 100.0f;
-        g.drawCircle(cx, cy, R, TFT_DARKGREY);
-        g.drawCircle(cx, cy, R / 2, 0x39E7);
-        g.drawFastHLine(cx - R, cy, 2 * R, 0x2104);
-        g.drawFastVLine(cx, cy - R, 2 * R, 0x2104);
-        g.setTextColor(TFT_DARKGREY, TFT_BLACK);
-        char b[16];
-        snprintf(b, sizeof b, "%u km", (unsigned)v->range_km); g.setCursor(cx + R - 30, cy + R - 8); g.print(b);
-        snprintf(b, sizeof b, "%u", (unsigned)(v->range_km / 2)); g.setCursor(cx + R / 2 + 2, cy + 2); g.print(b);
-        g.setCursor(cx - 2, cy - R - 0); g.print("N");
-        g.fillCircle(cx, cy, 2, TFT_WHITE);                       /* the station */
-        for (int i = 0; i < v->nac; i++) {
-            const tv_ac_t *a = &v->ac[i];
-            float px = cx + (a->x / 10.0f) / rk * R, py = cy - (a->y / 10.0f) / rk * R;
-            float dx = px - cx, dy = py - cy;
-            if (dx * dx + dy * dy > (R + 3) * (R + 3)) continue;
-            uint16_t c = alt_col(a);
-            if (a->trk >= 0) {
-                float t = a->trk * (float)M_PI / 180.0f;
-                g.drawLine((int)px, (int)py, (int)(px + 9 * sinf(t)), (int)(py - 9 * cosf(t)), c);
-            }
-            if (a->rx & 1) g.fillRect((int)px - 2, (int)py - 2, 5, 5, c);      /* FG23 heard it: filled */
-            else           g.drawRect((int)px - 2, (int)py - 2, 5, 5, c);      /* RTL-SDR only: hollow */
-            g.setTextColor(c, TFT_BLACK);
-            int lx = (int)px + 4; if (lx > W - 42) lx = (int)px - 46;
-            g.setCursor(lx, (int)py - 3);
-            g.print(a->lab);
-        }
-        g.setTextColor(TFT_DARKGREY, TFT_BLACK);
-        g.setCursor(0, 12 + 150 - 8); g.print("#FG23 oRTL");
-        y0 = 12 + 150 + 3;
-        g.drawFastHLine(0, y0 - 2, W, TFT_DARKGREY);
-    }
-    for (int i = 0; i < v->nln; i++) {
+    if (v->kind == 1) map_render(g, v);
+    else for (int i = 0; i < v->nln; i++) {
         int y = y0 + 10 * i;
         if (y > VSA - 9) break;
         g.setTextColor(v->ln[i].c, TFT_BLACK);

@@ -1,0 +1,114 @@
+#!/usr/bin/env python3
+# Inputs: the Natural Earth 10m GeoJSON files named below, from
+# https://github.com/nvkelso/natural-earth-vector/tree/master/geojson (public domain),
+# in the working directory. Output: map_data.h (copy to firmware-esp32/streaming/src/) + previews.
+"""Offline base maps for the ionos-mini TFT (240x270 body), from Natural Earth 10m
+(public domain). Equirectangular around (LAT0, LON0); one 8-bit indexed image per level."""
+import json, math, sys
+from PIL import Image, ImageDraw, ImageFont
+W, H, SS = 240, 270, 3
+LAT0, LON0 = 47.50, 19.05                       # Budapest (city centre) - not the station
+LEVELS = [60, 150, 320]                          # half-width, km
+NCOL = 64
+C = dict(land=(238, 236, 224), urban=(214, 196, 176), water=(130, 186, 232), river=(80, 150, 222),
+         border=(160, 90, 170), motorway=(232, 112, 70), text=(30, 30, 40), halo=(250, 250, 246))
+def load(n): return json.load(open(n + '.geojson'))['features']
+LAKES, RIVERS, URBAN = load('ne_10m_lakes'), load('ne_10m_rivers_lake_centerlines'), load('ne_10m_urban_areas')
+BORD, ROADS, PLACES = load('ne_10m_admin_0_boundary_lines_land'), load('ne_10m_roads'), load('ne_10m_populated_places_simple')
+FONT = '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'; FONTB = '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf'
+
+def rings(g):
+    t, c = g['type'], g['coordinates']
+    if t == 'Polygon': return c
+    if t == 'MultiPolygon': return [r for p in c for r in p]
+    if t == 'LineString': return [c]
+    if t == 'MultiLineString': return c
+    return []
+
+def render(half_km):
+    kmpp = 2.0 * half_km / W
+    kx = 111.32 * math.cos(math.radians(LAT0))
+    def P(lon, lat): return ((lon - LON0) * kx / kmpp + W / 2) * SS, ((LAT0 - lat) * 110.574 / kmpp + H / 2) * SS
+    lon_span = (W / 2 + 20) * kmpp / kx; lat_span = (H / 2 + 20) * kmpp / 110.574
+    def near(g):
+        for r in rings(g):
+            for x, y in r[::max(1, len(r) // 50)]:
+                if abs(x - LON0) < lon_span * 1.5 and abs(y - LAT0) < lat_span * 1.5: return True
+        return False
+    im = Image.new('RGB', (W * SS, H * SS), C['land']); d = ImageDraw.Draw(im)
+    lw = lambda px: max(1, int(round(px * SS)))
+    for f in URBAN:
+        if near(f['geometry']):
+            for r in rings(f['geometry']): d.polygon([P(*p[:2]) for p in r], fill=C['urban'])
+    for f in ROADS:
+        pr = f['properties']
+        if pr.get('type') != 'Major Highway' or pr.get('continent') != 'Europe' or not near(f['geometry']): continue
+        for r in rings(f['geometry']): d.line([P(*p[:2]) for p in r], fill=C['motorway'], width=lw(1.4 if half_km < 200 else 1.0))
+    for f in RIVERS:
+        if not near(f['geometry']): continue
+        sr = f['properties'].get('scalerank', 9) or 9
+        w = (2.2 if sr <= 3 else 1.4 if sr <= 6 else 0.9) * (1.0 if half_km < 200 else 0.8)
+        for r in rings(f['geometry']): d.line([P(*p[:2]) for p in r], fill=C['river'], width=lw(w))
+    for f in LAKES:
+        if near(f['geometry']):
+            for r in rings(f['geometry']): d.polygon([P(*p[:2]) for p in r], fill=C['water'])
+    for f in BORD:
+        if not near(f['geometry']): continue
+        for r in rings(f['geometry']):
+            pts = [P(*p[:2]) for p in r]
+            for a, b in zip(pts, pts[1:]):                       # dashed
+                L = math.hypot(b[0] - a[0], b[1] - a[1]); n = max(1, int(L / (5 * SS)))
+                for k in range(0, n, 2):
+                    t0, t1 = k / n, min(1, (k + 1) / n)
+                    d.line([(a[0] + (b[0] - a[0]) * t0, a[1] + (b[1] - a[1]) * t0), (a[0] + (b[0] - a[0]) * t1, a[1] + (b[1] - a[1]) * t1)],
+                           fill=C['border'], width=lw(1.3))
+    minpop = {60: 25000, 150: 60000, 320: 150000}[half_km]
+    fn, fb = ImageFont.truetype(FONT, 8 * SS), ImageFont.truetype(FONTB, 9 * SS)
+    placed = []
+    for f in sorted(PLACES, key=lambda f: -f['properties']['pop_max']):
+        pr = f['properties']; lon, lat = f['geometry']['coordinates']
+        if pr['pop_max'] < minpop and pr['name'] != 'Budapest': continue
+        x, y = P(lon, lat)
+        if not (6 * SS < x < (W - 6) * SS and 14 * SS < y < (H - 36) * SS): continue
+        big = pr['pop_max'] > 1000000; font = fb if big else fn
+        bb = d.textbbox((0, 0), pr['name'], font=font); tw, th = bb[2] - bb[0], bb[3] - bb[1]
+        tx, ty = x + 3 * SS, y - th / 2 - bb[1]
+        if tx + tw > (W - 2) * SS: tx = x - 3 * SS - tw
+        rect = (tx - SS, ty + bb[1] - SS, tx + tw + SS, ty + bb[3] + SS)
+        if any(not (rect[2] < q[0] or rect[0] > q[2] or rect[3] < q[1] or rect[1] > q[3]) for q in placed): continue
+        placed.append(rect)
+        r = 2 * SS if big else 1.4 * SS
+        d.ellipse((x - r, y - r, x + r, y + r), fill=C['text'])
+        d.text((tx, ty), pr['name'], font=font, fill=C['text'], stroke_width=int(1.2 * SS), stroke_fill=C['halo'])
+    im = im.resize((W, H), Image.LANCZOS)
+    return im, kmpp
+
+out = ['/* map_data.h - generated by tools/tft_map/render.py from Natural Earth 10m (public domain).',
+       ' * Base maps for the TFT on-chip ADS-B view: 240x270, 8-bit indexed, RGB565 palette.',
+       ' * Equirectangular around LAT0/LON0 (Budapest centre), x = (lon-LON0)*111.32*cos(LAT0)/kmpp + 120,',
+       ' * y = (LAT0-lat)*110.574/kmpp + 135. */', '#pragma once', '#include <stdint.h>',
+       '#define MAP_W %d' % W, '#define MAP_H %d' % H, '#define MAP_NLEV %d' % len(LEVELS),
+       '#define MAP_LAT0 %.4f' % LAT0, '#define MAP_LON0 %.4f' % LON0,
+       'static const uint16_t MAP_HALF_KM[MAP_NLEV] = {%s};' % ','.join(str(x) for x in LEVELS),
+       '#ifndef MAP_META_ONLY   /* the images: only in tft.cpp */']
+lv = []
+for i, hk in enumerate(LEVELS):
+    im, kmpp = render(hk)
+    im.save('preview_%d.png' % hk)
+    q = im.quantize(colors=NCOL, method=Image.MEDIANCUT, dither=Image.NONE)
+    pal = q.getpalette()[:NCOL * 3]
+    p565 = []
+    for k in range(NCOL):
+        r, g, b = pal[3 * k:3 * k + 3]; p565.append(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3))
+    q.convert('RGB').save('quant_%d.png' % hk)
+    data = q.tobytes()
+    out.append('static const uint16_t MAP_PAL%d[%d] = {%s};' % (i, NCOL, ','.join('0x%04X' % v for v in p565)))
+    out.append('static const uint8_t MAP_IMG%d[%d] = {' % (i, len(data)))
+    for k in range(0, len(data), 40): out.append(','.join(str(b) for b in data[k:k + 40]) + ',')
+    out.append('};')
+    lv.append('{ %.6ff, %d, MAP_PAL%d, MAP_IMG%d }' % (kmpp, hk, i, i))
+out.append('typedef struct { float kmpp; uint16_t half_km; const uint16_t *pal; const uint8_t *img; } map_level_t;')
+out.append('static const map_level_t MAP_LEVELS[MAP_NLEV] = { %s };' % ', '.join(lv))
+out.append('#endif')
+open('map_data.h', 'w').write('\n'.join(out) + '\n')
+print('ok')
