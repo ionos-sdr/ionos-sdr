@@ -12,6 +12,7 @@ html,body{margin:0;height:100%;font:13px system-ui,sans-serif;background:#111;co
 #wrap{display:flex;height:100%}#map{flex:1}
 #side{width:380px;overflow:auto;background:#1a1d22;border-left:1px solid #333}
 #hdr{padding:8px 10px;border-bottom:1px solid #333}#hdr b{color:#fff;font-size:15px}
+#tabs{display:flex;gap:4px;margin:6px 0 2px}#tabs button{flex:1;background:#23272e;color:#ccc;border:1px solid #444;border-radius:4px;padding:4px 6px;cursor:pointer;font:12px sans-serif}#tabs button.on{background:#3a4a6a;border-color:#6a8acf;color:#fff}#tabs button small{color:#9aa}
 table{width:100%;border-collapse:collapse}th,td{padding:3px 6px;text-align:right;white-space:nowrap}
 th{position:sticky;top:0;background:#23272e;color:#aaa;font-weight:600}td:first-child,th:first-child,td:nth-child(2),th:nth-child(2){text-align:left}
 tr:nth-child(even){background:#1f2228}tr.sel{background:#3a4a6a}tr:hover{background:#2c3340;cursor:pointer}
@@ -19,7 +20,7 @@ tr:nth-child(even){background:#1f2228}tr.sel{background:#3a4a6a}tr:hover{backgro
 .lbl:before{display:none}.dim{color:#888}
 @media (max-width:700px){#wrap{flex-direction:column}#side{width:auto;height:40%}}
 </style></head><body><div id="wrap"><div id="map"></div><div id="side">
-<div id="hdr"><b>ionos-mini · FG23 ADS-B</b> <a id="gl" href="graphs" style="color:#8ab4f8;margin-left:8px">graphs</a><br><span id="st" class="dim">…</span></div>
+<div id="hdr"><b>ionos-mini · ADS-B</b> <a id="gl" href="graphs" style="color:#8ab4f8;margin-left:8px">graphs</a><div id="tabs"><button data-t="fg23">FG23 on-chip <small id="nfg"></small></button><button data-t="rtl">RTL-SDR <small id="nrt"></small></button><button data-t="all">Both <small id="nal"></small></button></div><span id="st" class="dim">…</span></div>
 <table><thead><tr><th>ICAO</th><th>Callsign</th><th>Cat</th><th>Alt ft</th><th>GS kt</th><th>Track</th><th>Msgs</th><th>Seen</th><th>RSSI</th></tr></thead><tbody id="tb"></tbody></table>
 </div></div>
 <script>
@@ -67,10 +68,21 @@ async function showTrail(h){if(TR[h])return; const t=TR[h]={pts:[],ok:false,grp:
 function hideTrail(h){if(h==sel||h==hov||!TR[h])return; map.removeLayer(TR[h].grp); delete TR[h]}
 function selectAc(h){const o=sel; sel=(o==h)?null:h; if(o)hideTrail(o); if(sel)showTrail(sel)}
 map.on('click',()=>{const o=sel; sel=null; if(o)hideTrail(o)});
+/* receiver tabs: FG23 on-chip / RTL-SDR (same antenna via a splitter) / both merged */
+let tab=(location.hash||'#fg23').slice(1); if(!['fg23','rtl','all'].includes(tab))tab='fg23';
+function rxOk(a){const r=a.ionos_rx||'fg23'; return tab=='all'||r=='both'||r==tab}
+function setTab(t){tab=t; history.replaceState(null,'',location.pathname+location.search+'#'+t);
+ document.querySelectorAll('#tabs button').forEach(b=>b.classList.toggle('on',b.dataset.t==t));
+ for(const h in ac){map.removeLayer(ac[h]);delete ac[h]} for(const h in TR){map.removeLayer(TR[h].grp);delete TR[h]} sel=null; tick()}
+document.querySelectorAll('#tabs button').forEach(b=>b.onclick=()=>setTab(b.dataset.t));
+document.querySelectorAll('#tabs button').forEach(b=>b.classList.toggle('on',b.dataset.t==tab));
 function fmt(v,d){return v==null?'':(d?v.toFixed(d):v)}
 async function tick(){
  let j; try{j=await (await fetch('data/aircraft.json'+q,{cache:'no-store'})).json()}catch(e){document.getElementById('st').textContent='no connection';return}
  const seen=new Set(); let np=0;
+ const cnt={fg23:0,rtl:0,all:0}; for(const a of j.aircraft){const r=a.ionos_rx; if(r=='fg23'||r=='both')cnt.fg23++; if(r=='rtl'||r=='both')cnt.rtl++; if(r&&r!='none')cnt.all++}
+ document.getElementById('nfg').textContent=cnt.fg23; document.getElementById('nrt').textContent=cnt.rtl; document.getElementById('nal').textContent=cnt.all;
+ j={...j,aircraft:j.aircraft.filter(rxOk)};
  for(const a of j.aircraft){
   seen.add(a.hex); const c=col(a.alt_baro);
   if(a.lat!=null&&a.seen_pos<60){np++;
@@ -90,6 +102,6 @@ function render(j,np){
  const rows=j.aircraft.slice().sort((a,b)=>a.seen-b.seen).map(a=>`<tr data-h="${a.hex}" class="${a.hex==sel?'sel':''}"><td>${a.hex}</td><td>${(a.flight||'').trim()}</td><td>${a.category||''}</td><td>${fmt(a.alt_baro)}</td><td>${fmt(a.gs,0)}</td><td>${fmt(a.track,0)}</td><td>${a.messages}</td><td>${a.seen.toFixed(0)}s</td><td>${fmt(a.rssi,1)}</td></tr>`).join('');
  const tb=document.getElementById('tb'); tb.innerHTML=rows;
  tb.querySelectorAll('tr').forEach(r=>r.onclick=()=>{const h=r.dataset.h; if(sel!=h)selectAc(h); if(ac[h])map.panTo(ac[h].getLatLng()); render(j,np)});
- if(np!=null)document.getElementById('st').textContent=`${j.aircraft.length} aircraft, ${np} with position · ${j.messages} messages · ${new Date(j.now*1000).toLocaleTimeString()}`}
+ if(np!=null)document.getElementById('st').textContent=`${({fg23:'FG23 on-chip',rtl:'RTL-SDR',all:'both receivers'})[tab]}: ${j.aircraft.length} aircraft, ${np} with position · ${j.messages} messages (all) · ${new Date(j.now*1000).toLocaleTimeString()}`}
 tick(); setInterval(tick,1000); rng(); setInterval(rng,30000);
 </script></body></html>)HTML";
