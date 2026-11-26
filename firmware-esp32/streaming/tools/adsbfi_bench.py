@@ -51,7 +51,7 @@ def sample(a, ref_url):
         if float(x.get('seen_pos', 0)) > MAX_AGE_S:
             continue
         refpos[x['hex'].lower().lstrip('~')] = dist_km(a.lat, a.lon, x['lat'], x['lon'])
-    seen = {x['hex'].lower() for x in ours.get('aircraft', []) if float(x.get('seen', 99)) <= MAX_AGE_S}
+    seen = {x['hex'].lower() for x in ours.get('aircraft', []) if float(x.get('seen', 99)) <= MAX_AGE_S and x.get('ionos_rx', 'fg23') in ('fg23', 'both')}   # 'ours' = the FG23 (the RTL-SDR has its own entries since 48bf193)
     rx = {'fg23': set(), 'rtl': set()}
     for x in ours.get('aircraft', []):
         r = x.get('ionos_rx')

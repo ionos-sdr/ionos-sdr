@@ -8,6 +8,8 @@ fills the dashboard. Unplugging the dongle or losing WiFi only pauses the feed.
 
 Sources:
   rtl_adsb (default)  rtl_adsb.exe from radioconda, raw '*hex;' lines, no signal level
+  dump1090            gvanem Dump1090 for Windows (--raw, same '*hex;' lines), the
+                      reference decoder: --src dump1090 --exe ...\dump1090.exe --cfg rtl_bench.cfg
   beast               a dump1090/readsb-style Beast output, e.g. --src beast --beast 127.0.0.1:30005
 
 Only CRC-good DF11 (IID 0), DF17 and DF18 frames are forwarded (what the FG23
@@ -20,10 +22,11 @@ import argparse, socket, subprocess, sys, time, threading, os
 
 ap = argparse.ArgumentParser()
 ap.add_argument('--esp', default='192.168.1.243:30004')
-ap.add_argument('--src', default='rtl_adsb', choices=('rtl_adsb', 'beast'))
+ap.add_argument('--src', default='rtl_adsb', choices=('rtl_adsb', 'dump1090', 'beast'))
 ap.add_argument('--exe', default=os.path.expanduser(r'~\radioconda\Library\bin\rtl_adsb.exe'))
 ap.add_argument('--gain', default='20', help='tuner gain dB for rtl_adsb (the LNA ahead gives ~40 dB)')
 ap.add_argument('--beast', default='127.0.0.1:30005')
+ap.add_argument('--cfg', default=None, help='dump1090 config file')
 ap.add_argument('--log', default=None)
 a = ap.parse_args()
 
@@ -105,7 +108,10 @@ def handle(m, sig=0):
     esp.send(beast(m, sig))
 
 def run_rtl_adsb():
-    cmd = [a.exe, '-g', str(a.gain)]
+    if a.src == 'dump1090':
+        cmd = [a.exe, '--raw'] + (['--config', a.cfg] if a.cfg else [])
+    else:
+        cmd = [a.exe, '-g', str(a.gain)]
     while True:
         log('starting', ' '.join(cmd))
         try:
@@ -123,7 +129,7 @@ def run_rtl_adsb():
             elif line:
                 log('rtl_adsb:', line[:160])
         p.wait()
-        log('rtl_adsb exited (%s) after %d frames - dongle unplugged or busy? retry in 5 s' % (p.returncode, got))
+        log(a.src, 'exited (%s) after %d frames - dongle unplugged or busy? retry in 5 s' % (p.returncode, got))
         time.sleep(5)
 
 def run_beast():
@@ -162,4 +168,4 @@ def run_beast():
         time.sleep(3)
 
 log('rtl_feed ->', a.esp, 'source', a.src)
-(run_rtl_adsb if a.src == 'rtl_adsb' else run_beast)()
+(run_beast if a.src == 'beast' else run_rtl_adsb)()
