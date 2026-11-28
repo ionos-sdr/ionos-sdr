@@ -40,6 +40,7 @@
 #define CMDLINK_RX_PORT     gpioPortA
 #define CMDLINK_RX_PIN      6              /* PA06 = EXP 11 */
 #define CMDLINK_BAUD        115200u
+#define CMDLINK_BAUD_AUDIO  230400u        /* 'N2': 14-bit audio, 16 kB/s */
 
 #define CMDLINK_LINE_MAX    48   /* 2026-08-15: the W-scan command (W<kHz>,<span>,<nbin>,<floor>,<range>) is ~30 chars. */
 
@@ -73,6 +74,33 @@ static volatile uint16_t s_ring_w = 0;      /* written by the ISR */
 static uint16_t          s_ring_r = 0;      /* read by cmdlink_poll */
 static volatile uint32_t s_ring_ovf = 0;
 
+/* ---- NBFM audio mode (2026-11-28) ----
+ * While the FG23 transmits NBFM ('N'), the same one-wire link carries the
+ * audio, and the ISR writes samples into a ring lent by app.c (the idle
+ * capture buffer) instead of the line ring. Two formats:
+ *   fmt 0 ('N'):  raw int8 PCM, 8 kHz, 115200 baud (8000 of 11520 B/s).
+ *   fmt 1 ('N2'): 14-bit PCM, 8 kHz, 230400 baud: two bytes per sample,
+ *                 the high 7 bits with bit 7 SET, then the low 7 bits with
+ *                 bit 7 clear - a lost byte costs one sample, never the
+ *                 alignment. 16000 of 23040 B/s.
+ * Samples are stored as int16 (full scale +-32767). Line parsing is off
+ * until cmdlink_audio_end(), which also restores 115200. */
+static volatile int16_t *s_aud = NULL;
+static uint32_t          s_aud_mask = 0;
+static volatile uint32_t s_aud_w = 0;            /* free-running, ISR */
+static volatile uint32_t s_aud_r = 0;            /* free-running, TX loop */
+static volatile uint32_t s_aud_ovf = 0;
+static volatile uint32_t s_aud_bad = 0;          /* 14-bit: low byte without its high byte */
+static volatile bool     s_audio = false;
+static uint8_t           s_fmt = 0;
+static int16_t           s_hi = -1;              /* 14-bit: pending high 7 bits, -1 = none */
+
+static inline void aud_put(int16_t v)
+{
+  if (s_aud_w - s_aud_r <= s_aud_mask) { s_aud[s_aud_w & s_aud_mask] = v; ++s_aud_w; }
+  else ++s_aud_ovf;
+}
+
 void EUSART1_RX_IRQHandler(void)
 {
   while (CMDLINK_EUSART->STATUS & EUSART_STATUS_RXFL) {
@@ -88,6 +116,21 @@ void EUSART1_RX_IRQHandler(void)
     uint32_t err = CMDLINK_EUSART->IF & (EUSART_IF_FERR | EUSART_IF_PERR);
     uint8_t ch = (uint8_t)(CMDLINK_EUSART->RXDATA & 0xFFu);
     if (err) { CMDLINK_EUSART->IF_CLR = err; ++s_errors; continue; }
+    if (s_audio) {
+      if (s_fmt == 0) {
+        aud_put((int16_t)((int8_t)ch * 256));
+      } else if (ch & 0x80u) {
+        s_hi = (int16_t)(ch & 0x7Fu);
+      } else if (s_hi >= 0) {
+        int32_t v = ((int32_t)s_hi << 7) | ch;          /* 14-bit two's complement */
+        if (v & 0x2000) v -= 0x4000;
+        aud_put((int16_t)(v * 4));
+        s_hi = -1;
+      } else {
+        ++s_aud_bad;
+      }
+      continue;
+    }
     uint16_t next = (uint16_t)((s_ring_w + 1u) % CMDLINK_RING);
     if (next == s_ring_r) { ++s_ring_ovf; continue; }   /* ring full: drop */
     s_ring[s_ring_w] = ch;
@@ -181,6 +224,10 @@ bool cmdlink_poll(void)
         }
         ++s_lines;
         if (s_on_line) s_on_line(s_buf);
+        /* The dup window starts when the command ENDS (2026-11-28): the
+         * ESP's 30 ms repeat of a long command (Nt1000,10 = 10 s of TX)
+         * waits in the ring meanwhile and must not run it a second time. */
+        s_last_us = (uint32_t)RAIL_GetTime();
         got_line = true;
         /* ONE line per call. Tuning may stop and restart the stream — we
          * do not want that twice in a row within the same loop iteration. */
@@ -203,4 +250,66 @@ void cmdlink_stats(uint32_t *lines, uint32_t *errors)
 {
   if (lines)  *lines  = s_lines;
   if (errors) *errors = s_errors + s_ring_ovf;
+}
+
+/* ---------------- NBFM audio mode ---------------- */
+static void set_baud(uint32_t baud)
+{
+  /* Full re-init, exactly like cmdlink_init(). (2026-11-28: the first version did
+   * EUSART_Enable(disable) + EUSART_BaudrateSet(): the latter waits for SYNCBUSY,
+   * which never clears while the EUSART is disabled - the FG23 hung at 'N2'.)
+   * The GPIO route lives in GPIO->EUSARTROUTE and survives the reset. */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
+  EUSART_UartInit_TypeDef init = EUSART_UART_INIT_DEFAULT_HF;
+#pragma GCC diagnostic pop
+  init.baudrate         = baud;
+  init.enable           = eusartEnableRx;
+  init.advancedSettings = NULL;
+  NVIC_DisableIRQ(EUSART1_RX_IRQn);
+  EUSART_UartInitHf(CMDLINK_EUSART, &init);
+  CMDLINK_EUSART->IF_CLR = EUSART_IF_RXFL;
+  EUSART_IntEnable(CMDLINK_EUSART, EUSART_IEN_RXFL);
+  NVIC_ClearPendingIRQ(EUSART1_RX_IRQn);
+  NVIC_EnableIRQ(EUSART1_RX_IRQn);
+}
+
+void cmdlink_audio_begin(int16_t *buf, uint32_t nsamp_pow2, uint8_t fmt)
+{
+  s_aud = buf;
+  s_aud_mask = nsamp_pow2 - 1u;
+  s_ring_r = s_ring_w;                 /* drop whatever line bytes are pending */
+  s_len = 0;
+  s_aud_r = s_aud_w;
+  s_aud_ovf = 0; s_aud_bad = 0;
+  s_fmt = fmt; s_hi = -1;
+  if (fmt == 1) set_baud(CMDLINK_BAUD_AUDIO);
+  s_audio = true;
+}
+
+void cmdlink_audio_end(void)
+{
+  s_audio = false;
+  if (s_fmt == 1) set_baud(CMDLINK_BAUD);
+  s_fmt = 0;
+  s_ring_r = s_ring_w;                 /* audio tail bytes are not a command */
+  s_len = 0;
+  s_last[0] = 0;                       /* the next line is never a "duplicate" */
+}
+
+uint32_t cmdlink_audio_level(void) { return s_aud_w - s_aud_r; }
+uint32_t cmdlink_audio_total(void) { return s_aud_w; }
+uint32_t cmdlink_audio_ovf(void)   { return s_aud_ovf + s_aud_bad; }
+
+int16_t cmdlink_audio_pop(void)
+{
+  if (s_aud_w == s_aud_r) return 0;
+  int16_t v = s_aud[s_aud_r & s_aud_mask];
+  ++s_aud_r;
+  return v;
+}
+
+void cmdlink_audio_skip(void)
+{
+  if (s_aud_w != s_aud_r) ++s_aud_r;
 }

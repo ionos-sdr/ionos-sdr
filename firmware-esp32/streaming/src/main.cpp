@@ -1481,8 +1481,10 @@ static uint32_t s_cmd_repeat_ms = 0;
  * that mode (ID1, 2026-11-25) */
 static char s_decim_verify[16];
 static void menu_decim_cancel(void);
+static bool s_fm_active = false;   /* NBFM TX: the cmdlink carries raw audio, no lines (fm_tick) */
 static void cmdlink_send(const char *s)
 {
+  if (s_fm_active) { DIAG.printf("  -> FG23: %s DROPPED (NBFM TX owns the link)\n", s); return; }
   rs_cmd(s);                         /* radio_sm: every line opens a SWITCH window / updates the target */
   if (s_decim_verify[0] && strcmp(s, s_decim_verify) != 0) s_decim_verify[0] = 0;
 #if CMDLINK_ENABLE
@@ -1499,6 +1501,7 @@ static void cmdlink_send(const char *s)
 static void cmdlink_tick(uint32_t now)
 {
 #if CMDLINK_ENABLE
+  if (s_fm_active) { s_cmd_repeat[0] = 0; return; }
   if (s_cmd_repeat[0] && now - s_cmd_repeat_ms >= 30u) {
     Serial1.print(s_cmd_repeat);
     Serial1.print("\r");
@@ -1507,6 +1510,128 @@ static void cmdlink_tick(uint32_t now)
 #else
   (void)now;
 #endif
+}
+
+/* ===================== NBFM audio TX (2026-11-28) =====================
+ * PC -> TCP 7355 -> this loop -> cmdlink (115200, raw) -> FG23 'N' -> RF.
+ * Protocol: text lines first, each forwarded to the FG23 as a command
+ * (e.g. "F446006.250", "Np-20", "Nc885"), at most one per 300 ms; then the
+ * line "GO" (int8 PCM, 8 kHz, raw on the cmdlink at 115200: 8000 of 11520 B/s)
+ * or "GO2" (14-bit PCM as byte pairs, link switched to 230400: 16000 of 23040 B/s). While audio
+ * flows no other line may touch the link (cmdlink_send drops them). Closing
+ * the socket ends it: the FG23 stops after 1 s without audio and resumes
+ * its I/Q stream by itself; the link is given back 1.5 s later. */
+#define FM_PORT 7355
+static WiFiServer srv_fm(FM_PORT);
+static WiFiClient fm_cli, fm_next;
+static uint32_t fm_rx_ms = 0;              /* last audio byte: 2 s without one = client gone */
+static bool     fm_srv_up = false;
+static uint8_t  fm_state = 0;            /* 0 idle, 1 header, 2 start, 3 audio, 4 release */
+static uint8_t  fm_fmt = 0;              /* 0: GO  = int8 @115200;  1: GO2 = 14-bit pairs @230400 */
+static uint32_t fm_t = 0, fm_bytes = 0, fm_log_ms = 0, fm_log_bytes = 0;
+static char     fm_line[48];
+static uint8_t  fm_len = 0;
+
+static void fm_tick(uint32_t now)
+{
+#if CMDLINK_ENABLE
+  if (!fm_srv_up) {
+    if (WiFi.status() == WL_CONNECTED) { srv_fm.begin(); srv_fm.setNoDelay(true); fm_srv_up = true;
+      DIAG.printf("NBFM: TCP %d ready (lines, GO, then int8 PCM 8 kHz)\n", FM_PORT); }
+    return;
+  }
+  /* A new client always wins (2026-11-28: a PC script killed without a FIN left
+   * the old socket 'connected' forever and every later run was refused). The
+   * old one is dropped; if it was sending audio, the FG23 first gets its 1 s
+   * of silence (state 4), then the new client is taken from fm_next. */
+  if (srv_fm.hasClient()) {
+    WiFiClient n = srv_fm.accept();
+    if (fm_next) fm_next.stop();
+    fm_next = n;
+    if (fm_state == 1) { fm_cli.stop(); fm_state = 0; }
+    else if (fm_state == 2 || fm_state == 3) { fm_cli.stop(); fm_state = 4; fm_t = now;
+      DIAG.println("NBFM: new client replaces the old one"); }
+  }
+  if (fm_state == 0 && fm_next) {
+    fm_cli = fm_next; fm_next = WiFiClient(); fm_cli.setNoDelay(true);
+    fm_state = 1; fm_len = 0; fm_t = now - 300u; fm_rx_ms = now;
+    DIAG.printf("NBFM: client %s\n", fm_cli.remoteIP().toString().c_str());
+  }
+  switch (fm_state) {
+  case 1:                                            /* header lines, one per 300 ms */
+    if (!fm_cli.connected()) { fm_cli.stop(); fm_state = 0; break; }
+    if (now - fm_t < 300u) break;
+    while (fm_cli.available()) {
+      int c = fm_cli.read();
+      if (c == '\n' || c == '\r') {
+        if (!fm_len) continue;
+        fm_line[fm_len] = 0; fm_len = 0;
+        if (strcmp(fm_line, "GO") == 0 || strcmp(fm_line, "GO2") == 0) {
+          fm_fmt = fm_line[2] == '2'; fm_state = 2; fm_t = now; DIAG.printf("NBFM: %s\n", fm_line); }
+        else { cmdlink_send(fm_line); fm_t = now; fm_cli.printf("ok %s\n", fm_line); }
+        break;
+      }
+      if (fm_len < sizeof fm_line - 1) fm_line[fm_len++] = (char)c;
+    }
+    break;
+  case 2:                                            /* let the last repeat go out, then 'N' */
+    if (now - fm_t < 300u) break;
+    Serial1.print(fm_fmt ? "N2\r" : "N\r");          /* raw, ONCE (a repeat would be audio) */
+    if (fm_fmt) { Serial1.flush(); Serial1.updateBaudRate(230400); }   /* the FG23 switches with it */
+    s_fm_active = true; fm_t = now; fm_bytes = 0; fm_log_ms = now; fm_log_bytes = 0; fm_rx_ms = now;
+    fm_state = 3; DIAG.println("NBFM: -> FG23 N, audio follows");
+    break;
+  case 3: {                                          /* audio: never block the loop */
+    if (now - fm_t < 150u) break;                    /* FG23 enters audio mode (stops its stream) */
+    int room = Serial1.availableForWrite();
+    int have = fm_cli.available();
+    int n = room < have ? room : have;
+    if (n > 512) n = 512;
+    if (n > 0) {
+      uint8_t buf[512];
+      n = fm_cli.read(buf, n);
+      if (n > 0) { Serial1.write(buf, n); fm_bytes += n; fm_rx_ms = now; }
+    }
+    if (now - fm_rx_ms > 2000u) fm_cli.stop();       /* silent socket: treat as gone */
+    if (now - fm_log_ms >= 10000u) {
+      DIAG.printf("NBFM: %lu B/s to the FG23, %lu B total\n",
+                  (unsigned long)((fm_bytes - fm_log_bytes) * 1000u / (now - fm_log_ms)), (unsigned long)fm_bytes);
+      fm_log_ms = now; fm_log_bytes = fm_bytes;
+    }
+    if (!fm_cli.connected() && fm_cli.available() == 0) {
+      fm_cli.stop(); fm_state = 4; fm_t = now;
+      DIAG.printf("NBFM: client gone after %lu B, releasing the link in 1.5 s\n", (unsigned long)fm_bytes);
+    }
+    break; }
+  case 4:
+    if (now - fm_t >= 1500u) {
+      if (fm_fmt) { Serial1.updateBaudRate(CMDLINK_BAUD); fm_fmt = 0; }   /* the FG23 is back at 115200 by now */
+      s_fm_active = false; fm_state = 0; DIAG.println("NBFM: link released"); }
+    break;
+  default: break;
+  }
+#else
+  (void)now;
+#endif
+}
+
+/* FG23 stall watchdog (2026-11-28, ID1): after an FG23 reset, flash or a
+ * TX->RX turnaround the I/Q blocks sometimes stop reaching the ESP while the
+ * FG23 keeps counting them (SEQ-HOLE of thousands when it comes back), and
+ * then the FG23 also stops answering the cmdlink - an NBFM 'N' got lost
+ * this way. An SWD connect (what FGINFO does) brings it back every time.
+ * So: I/Q silent for 4 s, nothing that silences it on purpose -> FGINFO,
+ * at most every 20 s. Root cause still open (SPI/RDY handshake). */
+static void fg23_stall_tick(uint32_t now)
+{
+  static uint32_t last_kick = 0;
+  const rs_info_t *r = rs_get();
+  if (s_fm_active || fm_state != 0) return;
+  if (r->st != RS_SILENT || r->prev != RS_IQ) return;
+  if (now - r->since_ms < 4000u || (last_kick && now - last_kick < 20000u)) return;
+  last_kick = now;
+  DIAG.println("FG23: I/Q silent > 4 s -> SWD kick (FGINFO)");
+  fg23_prog_cmd("FGINFO", Serial0);
 }
 
 #if SPY_ENABLE
@@ -2919,7 +3044,7 @@ void setup()
               (int)PIN_SCLK, (int)PIN_MOSI, (int)PIN_CS);
 
 #if CMDLINK_ENABLE
-  Serial1.setTxBufferSize(256);
+  Serial1.setTxBufferSize(2048);   /* NBFM audio (fm_tick) needs headroom; lines are tiny */
   Serial1.begin(CMDLINK_BAUD, SERIAL_8N1, -1, CMDLINK_TX_PIN);
   DIAG.printf("CMD:  GPIO%d -> FG23 PA06 / EXP 11 (%d baud) - tuning "
               "from the phone\n", CMDLINK_TX_PIN, CMDLINK_BAUD);
@@ -3318,6 +3443,8 @@ void loop()
   menu_decim_tick(now);
   menu_decim_start_tick(now);
   cmdlink_tick(now);
+  fm_tick(now);
+  fg23_stall_tick(now);
   usbhost_tick(now);
   usbhost_flush();          /* MSG1 blocks, only when a whole block fits (after flush_usb) */
 #if APRS_RX_ENABLE

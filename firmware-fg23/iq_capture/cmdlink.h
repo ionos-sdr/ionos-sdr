@@ -43,4 +43,16 @@ bool cmdlink_poll(void);
  * framing/parity errors. For diagnostics ('s' command). */
 void cmdlink_stats(uint32_t *lines, uint32_t *errors);
 
+/* NBFM audio mode (2026-11-28): after cmdlink_audio_begin() the link carries
+ * PCM samples at 8 kHz (fmt 0: int8 @115200, fmt 1: 14-bit pairs @230400)
+ * until cmdlink_audio_end(); no lines are parsed meanwhile. Samples come out
+ * as int16, full scale +-32767. */
+void     cmdlink_audio_begin(int16_t *buf, uint32_t nsamp_pow2, uint8_t fmt);
+void     cmdlink_audio_end(void);
+uint32_t cmdlink_audio_level(void);   /* samples waiting */
+uint32_t cmdlink_audio_total(void);   /* samples received since boot (activity) */
+uint32_t cmdlink_audio_ovf(void);     /* samples lost: ring full or broken pair */
+int16_t  cmdlink_audio_pop(void);     /* 0 when empty */
+void     cmdlink_audio_skip(void);    /* drop one (rate trim) */
+
 #endif /* CMDLINK_H */

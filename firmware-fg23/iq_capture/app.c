@@ -708,6 +708,7 @@ void app_init(void)
   printf("# TX: w=CW p=PN9 x=stop d<dBm>=power b=APRS beacon — "
          "ATTENUATOR/DUMMY LOAD in front of the SDR!\r\n");
   printf("# NCO test: z=offset benchmark y[<Hz>]=test tone (def 1200)\r\n");
+  printf("# NBFM TX: N=audio from ESP  Nt<Hz>[,s]=test tone  N?=settings (power starts at MIN)\r\n");
   printf("# CW Morse: M1=CQ  M2=VVV  M3=beacon  M <text>  M/WPM <text>\r\n");
   printf("# k[<s>]=I/Q rate benchmark   n[<s>]=zero-copy (NULL) test\r\n");
   printf("# i[<R>]=continuous decimated I/Q stream (R=8..4096)\r\n");
@@ -1015,6 +1016,189 @@ static void nco_tone_test(double f_tone)
   if (!was_tx) tx_stream_stop();
 }
 
+
+/* ================= NBFM audio TX (2026-11-28) =================
+ * The NCO-AFSK principle with real audio: carrier-wave stream, and the
+ * instantaneous frequency set per sample with RAIL_SetFreqOffset().
+ *
+ *   ESP32 ---(cmdlink, 115200, raw int8 PCM 8 kHz)---> ring (cmdlink.c)
+ *   ring -> 4x linear interpolation -> 32 kHz -> + CTCSS NCO -> SetFreqOffset
+ *
+ * Jitter buffer: TX starts when NB_TARGET samples (300 ms) are waiting; the
+ * fill is then held near the target by dropping / repeating one sample in
+ * 128 (+-0.8 %, far more than the PC-vs-FG23 clock difference). An empty
+ * ring sends silence (carrier + CTCSS); 1 s without a byte ends the TX.
+ *
+ * Deviation is set in Hz; the synth tick in mHz/tick is band dependent
+ * (4.649 Hz @ 144.8, 14.19 Hz @ 446.006 measured 2026-11-28), so 'Nk' calibrates
+ * it: 'Nd2405' + 'Nt1000' = carrier null (Bessel J0, beta 2.405) on the
+ * analyser when Nk is right.
+ *
+ * Power: starts from the MINIMUM after every boot (request below range,
+ * the PA conversion clamps it); 'Np<dBm>' raises it. */
+#define NB_FS_IN        8000u
+#define NB_UP           4u                 /* output rate 32 kHz */
+#define NB_RING         8192u              /* int16 samples in the 32 kB capture buffer, ~1 s */
+#define NB_TARGET       2400u              /* jitter-buffer target, 300 ms */
+#define NB_TRIM_BAND    1200u              /* +-150 ms dead band before trimming */
+#define NB_PREFILL_US   3000000u           /* no audio within 3 s: no TX at all */
+#define NB_IDLE_US      1000000u           /* 1 s without audio bytes: TX ends */
+
+static int32_t s_nb_dev_hz    = 2500;      /* PMR446: +-2.5 kHz peak, total */
+static int32_t s_nb_tick_mhz  = 14190;     /* Hz/tick x1000, 'Nk' - MEASURED @446 MHz (ID1, RTL, Bessel null) */
+static int32_t s_nb_ctcss_dhz = 0;         /* CTCSS in 0.1 Hz, 0 = off */
+static int32_t s_nb_ctcss_hz  = 350;       /* CTCSS deviation, part of the total */
+static int32_t s_nb_pwr_ddbm  = -400;      /* below range -> PA minimum */
+
+static void nb_status(void)
+{
+  printf("# NBFM: dev +-%ld Hz (audio %ld + CTCSS %ld), tick %ld.%03ld Hz, "
+         "CTCSS %ld.%ld Hz, power req %ld ddBm\r\n",
+         (long)s_nb_dev_hz, (long)(s_nb_dev_hz - (s_nb_ctcss_dhz ? s_nb_ctcss_hz : 0)),
+         (long)(s_nb_ctcss_dhz ? s_nb_ctcss_hz : 0),
+         (long)(s_nb_tick_mhz / 1000), (long)(s_nb_tick_mhz % 1000),
+         (long)(s_nb_ctcss_dhz / 10), (long)(s_nb_ctcss_dhz % 10), (long)s_nb_pwr_ddbm);
+  printf("# NBFM: N=stream from ESP  Nt<Hz>[,s]=test tone  Nd<Hz> dev  Nk<mHz/tick>  "
+         "Nc<0.1Hz> CTCSS (0=off)  Nl<Hz> CTCSS dev  Np<dBm> power  N?=status\r\n");
+}
+
+/* tone_hz > 0: internal test tone for secs, otherwise audio from the cmdlink. */
+static void nb_run(int32_t tone_hz, uint32_t secs, uint8_t fmt)
+{
+  if (capturing) { printf("# capture running - wait\r\n"); return; }
+  nco_init_table();
+
+  int32_t ct_hz   = s_nb_ctcss_dhz ? s_nb_ctcss_hz : 0;
+  int32_t aud_hz  = s_nb_dev_hz - ct_hz;
+  if (aud_hz < 0) aud_hz = 0;
+  /* audio samples are int16 (+-32767 = +-aud_hz); interpolated x4 -> s4 up to
+   * +-131068; off_a = (s4 * k_a) >> 17 with k_a = aud_ticks * 2^17 / (4 * 32767) */
+  int32_t k_a = (int32_t)((int64_t)aud_hz * 1000 * 131072 / s_nb_tick_mhz / (4 * 32767));
+  int32_t k_c = (int32_t)((int64_t)ct_hz  * 1000 * 256 / s_nb_tick_mhz / 127);
+  uint32_t ct_word = s_nb_ctcss_dhz ? nco_word(s_nb_ctcss_dhz / 10.0, (double)(NB_FS_IN * NB_UP)) : 0;
+  uint32_t tn_word = tone_hz > 0 ? nco_word((double)tone_hz, (double)NB_FS_IN) : 0;
+  int32_t tick0 = s_freq_tick;
+
+  /* ---- wait for the jitter buffer (stream mode) ---- */
+  if (tone_hz <= 0) {
+    /* the ring is the 'c' capture buffer: idle while the carrier stream runs (RAM is full) */
+    cmdlink_audio_begin((int16_t *)capture_buf, NB_RING, fmt);
+    RAIL_Time_t t0 = RAIL_GetTime();
+    while (cmdlink_audio_level() < NB_TARGET) {
+      if ((uint32_t)(RAIL_GetTime() - t0) > NB_PREFILL_US) {
+        cmdlink_audio_end();
+        printf("# NBFM: no audio within 3 s - no TX\r\n");
+        return;
+      }
+    }
+  }
+
+  /* ---- carrier on ---- */
+  armed = false;
+  if (s_tx_active) { RAIL_StopTxStream(s_rail); s_tx_active = false; }
+  RAIL_SetTxPowerDbm(s_rail, (RAIL_TxPower_t)s_nb_pwr_ddbm);
+  RAIL_Status_t st = RAIL_StartTxStream(s_rail, s_channel, RAIL_STREAM_CARRIER_WAVE);
+  if (st != RAIL_STATUS_NO_ERROR) {
+    if (tone_hz <= 0) cmdlink_audio_end();
+    printf("# NBFM: StartTxStream st=%d - no TX\r\n", (int)st);
+    restart_rx();
+    return;
+  }
+  s_tx_active = true; s_tx_mode = RAIL_STREAM_CARRIER_WAVE;
+  RAIL_SetFreqOffset(s_rail, (RAIL_FrequencyOffset_t)tick0);
+  printf("# NBFM TX ON: %s, power %d ddBm, dev +-%ld Hz, CTCSS %ld.%ld Hz - 'x' stops\r\n",
+         tone_hz > 0 ? "test tone" : "ESP audio", (int)RAIL_GetTxPowerDbm(s_rail),
+         (long)s_nb_dev_hz, (long)(s_nb_ctcss_dhz / 10), (long)(s_nb_ctcss_dhz % 10));
+
+  /* ---- 32 kHz loop ---- */
+  const uint32_t period_ns = 1000000000u / (NB_FS_IN * NB_UP);   /* 31250 */
+  const uint32_t whole_us = period_ns / 1000u, frac_ns = period_ns % 1000u;
+  uint32_t ns_acc = 0, ct_acc = 0, tn_acc = 0, nin = 0;
+  uint32_t underrun = 0, trim_drop = 0, trim_rep = 0, late = 0;
+  uint32_t last_total = cmdlink_audio_total();
+  RAIL_Time_t last_rx = RAIL_GetTime(), t_start = last_rx;
+  uint32_t n_in_total = (tone_hz > 0) ? secs * NB_FS_IN : 0xFFFFFFFFu;
+  int32_t prev = 0, cur = 0;
+  RAIL_Time_t target = RAIL_GetTime();
+  const char *why = "end";
+
+  while (nin < n_in_total) {
+    /* next input sample (8 kHz) */
+    prev = cur;
+    if (tone_hz > 0) {
+      cur = (int32_t)s_sine[tn_acc >> (PHASE_BITS - SINE_BITS)] * 258; tn_acc += tn_word;   /* +-32766 */
+    } else {
+      uint32_t lvl = cmdlink_audio_level();
+      if (lvl == 0) { cur = 0; ++underrun; }
+      else {
+        if ((nin & 127u) == 0u) {
+          if (lvl > NB_TARGET + NB_TRIM_BAND) { cmdlink_audio_skip(); ++trim_drop; }
+          else if (lvl < NB_TARGET - NB_TRIM_BAND) { ++trim_rep; goto hold; }
+        }
+        cur = cmdlink_audio_pop();
+      }
+    hold:;
+      uint32_t tot = cmdlink_audio_total();
+      if (tot != last_total) { last_total = tot; last_rx = RAIL_GetTime(); }
+      else if ((uint32_t)(RAIL_GetTime() - last_rx) > NB_IDLE_US) { why = "audio stopped"; break; }
+    }
+    ++nin;
+
+    for (uint32_t k = 0; k < NB_UP; ++k) {
+      int32_t s4 = prev * (int32_t)NB_UP + (cur - prev) * (int32_t)k;      /* x4 */
+      int32_t off = tick0 + (int32_t)(((int64_t)s4 * k_a) >> 17);
+      if (ct_word) { off += ((int32_t)s_sine[ct_acc >> (PHASE_BITS - SINE_BITS)] * k_c) >> 8; ct_acc += ct_word; }
+      RAIL_SetFreqOffset(s_rail, (RAIL_FrequencyOffset_t)off);
+      target += whole_us;
+      ns_acc += frac_ns;
+      if (ns_acc >= 1000u) { ns_acc -= 1000u; ++target; }
+      if ((int32_t)(RAIL_GetTime() - target) > 200) ++late;
+      while ((int32_t)(RAIL_GetTime() - target) < 0) { }
+    }
+
+    /* terminal abort, checked every 1024 input samples (128 ms) */
+    if ((nin & 1023u) == 0u) {
+      char ch;
+      if (sl_iostream_getchar(sl_iostream_vcom_handle, &ch) == SL_STATUS_OK && ch != '\r' && ch != '\n') { why = "terminal"; break; }
+    }
+  }
+
+  /* ---- carrier off, back to RX ---- */
+  RAIL_SetFreqOffset(s_rail, (RAIL_FrequencyOffset_t)tick0);
+  RAIL_StopTxStream(s_rail);
+  s_tx_active = false;
+  if (tone_hz <= 0) cmdlink_audio_end();
+  restart_rx();
+  printf("# NBFM TX OFF (%s): %lu.%lu s, underrun %lu, trim -%lu/+%lu, late %lu, ovf %lu\r\n",
+         why, (unsigned long)((RAIL_GetTime() - t_start) / 1000000u),
+         (unsigned long)((RAIL_GetTime() - t_start) / 100000u % 10u),
+         (unsigned long)underrun, (unsigned long)trim_drop, (unsigned long)trim_rep,
+         (unsigned long)late, (unsigned long)cmdlink_audio_ovf());
+}
+
+static void nb_cmd(const char *line)
+{
+  char sub = line[1];
+  if (sub == '\0') { nb_run(0, 0, 0); return; }          /* int8 @115200 */
+  if (sub == '2' && line[2] == '\0') { nb_run(0, 0, 1); return; }   /* 14-bit @230400 */
+  if (sub == 't') {
+    int32_t hz = atoi(line + 2); const char *c = strchr(line, ',');
+    uint32_t secs = c ? (uint32_t)atoi(c + 1) : 10u;
+    if (hz < 50 || hz > 3500) hz = 1000;
+    if (secs < 1u || secs > 600u) secs = 10u;
+    nb_run(hz, secs, 0);
+    return;
+  }
+  long v = atol(line + 2);
+  if (sub == 'd' && v >= 0 && v <= 5000) s_nb_dev_hz = (int32_t)v;
+  else if (sub == 'k' && v >= 1000 && v <= 50000) s_nb_tick_mhz = (int32_t)v;
+  else if (sub == 'c' && (v == 0 || (v >= 670 && v <= 2541))) s_nb_ctcss_dhz = (int32_t)v;
+  else if (sub == 'l' && v >= 0 && v <= 1000) s_nb_ctcss_hz = (int32_t)v;
+  else if (sub == 'p' && v >= -40 && v <= 20) s_nb_pwr_ddbm = (int32_t)(v * 10);
+  else if (sub != '?') printf("# NBFM: bad argument '%s'\r\n", line);
+  nb_status();
+}
+
 static void aprs_send_beacon(void)
 {
   if (capturing) { printf("# capture running — 's' first / wait\r\n"); return; }
@@ -1126,7 +1310,7 @@ static void handle_line(const char *line)
    * byte even a non-existent command would force the stream through a
    * stop-tune-start cycle — a visible gap in the waterfall, for nothing.
    * ('F' is not on the list: it handles the stop and restart itself.) */
-  static const char NEEDS_STOP[] = "cwpxbzydfkngMWA";
+  static const char NEEDS_STOP[] = "cwpxbzydfkngMWAN";
   bool resume_after = false;
 
   /* On-chip AIS owns the radio and the SPI like the stream does: any other
@@ -1164,6 +1348,8 @@ static void handle_line(const char *line)
     tx_stream_stop();
   } else if (c == 'b') {              /* T5: APRS direct-FSK beacon */
     aprs_send_beacon();
+  } else if (c == 'N') {              /* NBFM audio TX (2026-11-28) */
+    nb_cmd(line);
   } else if (c == 'z') {              /* T5b: offset speed benchmark */
     offset_speed_benchmark();
   } else if (c == 'y') {              /* T5b: NCO test tone */
